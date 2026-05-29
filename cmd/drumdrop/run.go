@@ -42,11 +42,13 @@ var valueFlags = map[string]bool{
 	"--limit":      true,
 	"--brand":      true,
 	"--instructor": true,
+	"--interval":   true,
 	"-out":         true,
 	"-quality":     true,
 	"-limit":       true,
 	"-brand":       true,
 	"-instructor":  true,
+	"-interval":    true,
 }
 
 // splitArgs separates positional arguments from flag tokens, preserving order
