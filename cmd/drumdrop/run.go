@@ -32,6 +32,39 @@ func extractID(input string) int {
 
 func permissionIDs() string { return os.Getenv("DRUMDROP_PERMISSION_IDS") }
 
+// valueFlags lists the download flags that consume the following argument.
+// Used to split positionals from flags so that flags may appear after the id
+// (Go's flag.Parse stops at the first non-flag token; the Node reference loops
+// over all argv regardless of position — see src/cli.mjs parseArgs).
+var valueFlags = map[string]bool{
+	"--out":     true,
+	"--quality": true,
+	"--limit":   true,
+	"-out":      true,
+	"-quality":  true,
+	"-limit":    true,
+}
+
+// splitArgs separates positional arguments from flag tokens, preserving order
+// within each group, so flags work regardless of where they sit relative to
+// the positional content id. A flag of the form --name=value is self-contained;
+// a value flag (e.g. --out dir) carries the following token along with it.
+func splitArgs(argv []string) (positionals, flags []string) {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			flags = append(flags, a)
+			if !strings.Contains(a, "=") && valueFlags[a] && i+1 < len(argv) {
+				i++
+				flags = append(flags, argv[i])
+			}
+			continue
+		}
+		positionals = append(positionals, a)
+	}
+	return positionals, flags
+}
+
 // cmdDownload resolves a lesson or course and downloads each lesson.
 func cmdDownload(argv []string) error {
 	fs := flag.NewFlagSet("drumdrop", flag.ContinueOnError)
@@ -42,10 +75,14 @@ func cmdDownload(argv []string) error {
 	whole := fs.Bool("whole-course", false, "walk up to the parent course")
 	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")
 	dryRun := fs.Bool("dry-run", false, "list what would be downloaded")
-	if err := fs.Parse(argv); err != nil {
+
+	// Parse flags from the whole arg list, not just the leading run, so a flag
+	// placed after the positional id (e.g. `drumdrop 409875 --dry-run`) is honored.
+	positionals, flags := splitArgs(argv)
+	if err := fs.Parse(flags); err != nil {
 		return err
 	}
-	rest := fs.Args()
+	rest := append(positionals, fs.Args()...)
 	if len(rest) == 0 {
 		fmt.Print(usage)
 		os.Exit(1)
@@ -97,12 +134,8 @@ func cmdDownload(argv []string) error {
 			resolved = append(resolved, resolvedLesson{id: id, failed: true})
 			continue
 		}
-		if courseTitle == "" {
-			if len(lesson.ParentContentData) > 0 && lesson.ParentContentData[0].Title != "" {
-				courseTitle = lesson.ParentContentData[0].Title
-			} else {
-				courseTitle = fmt.Sprintf("content-%d", rootID)
-			}
+		if courseTitle == "" && len(lesson.ParentContentData) > 0 && lesson.ParentContentData[0].Title != "" {
+			courseTitle = lesson.ParentContentData[0].Title
 		}
 		noVideo := ""
 		if lesson.Video.HLSManifestURL == "" {
