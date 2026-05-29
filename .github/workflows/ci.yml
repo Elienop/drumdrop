@@ -28,3 +28,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: CLI smoke
+        run: node src/cli.mjs --help

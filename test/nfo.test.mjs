@@ -23,7 +23,7 @@ test('buildNfo emits a movie element with the title', () => {
 
 test('buildNfo strips HTML from the description and escapes entities', () => {
   const xml = buildNfo(lesson);
-  assert.match(xml, /<plot>Welcome &amp;amp; enjoy<\/plot>/);
+  assert.match(xml, /<plot>Welcome &amp; enjoy<\/plot>/);
   assert.doesNotMatch(xml, /<p>/);
 });
 

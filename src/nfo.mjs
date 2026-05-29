@@ -17,6 +17,16 @@ function dateOnly(s) {
   return m ? `${m[1]}-${m[2]}-${m[3]}` : '';
 }
 
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 export function buildNfo(lesson) {
   const runtimeMin = lesson.length_in_seconds
     ? Math.ceil(lesson.length_in_seconds / 60)
@@ -31,7 +41,7 @@ export function buildNfo(lesson) {
   lines.push(`  <title>${esc(lesson.title)}</title>`);
   if (series) lines.push(`  <set><name>${esc(series)}</name></set>`);
   if (lesson.description) {
-    const plot = String(lesson.description).replace(/<[^>]+>/g, '').trim();
+    const plot = decodeEntities(String(lesson.description).replace(/<[^>]+>/g, '')).trim();
     if (plot) lines.push(`  <plot>${esc(plot)}</plot>`);
   }
   if (premiered) {
