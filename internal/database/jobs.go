@@ -76,6 +76,101 @@ func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcont
 	return id, nil
 }
 
+// ClaimNextJob atomically takes the oldest queued job and marks it running. In
+// a single transaction it selects the lowest-id job in status='queued', stamps
+// started_at, increments attempts (so a fresh claim records attempt #1), and
+// re-reads the row to return its post-update state. The bool is false when the
+// queue holds no queued job (sql.ErrNoRows), in which case the returned Job is
+// the zero value and err is nil.
+//
+// Select-then-update inside one tx makes the claim atomic: with
+// SetMaxOpenConns(1) only one worker runs at a time today, and the same query
+// stays correct if a worker pool is added later.
+func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
+	var claimed Job
+	var ok bool
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		j, err := scanJob(tx.QueryRowContext(ctx,
+			`SELECT `+jobColumns+` FROM jobs WHERE status = ? ORDER BY id LIMIT 1`,
+			JobQueued,
+		))
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil // queue empty: ok stays false
+			}
+			return fmt.Errorf("select next queued job: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE jobs
+			    SET status = ?,
+			        started_at = CURRENT_TIMESTAMP,
+			        attempts = attempts + 1
+			  WHERE id = ?`,
+			JobRunning, j.ID,
+		); err != nil {
+			return fmt.Errorf("claim job %d: %w", j.ID, err)
+		}
+
+		// Re-read inside the same tx so the returned row reflects the new
+		// status, attempts, and started_at exactly as persisted.
+		claimed, err = scanJob(tx.QueryRowContext(ctx,
+			`SELECT `+jobColumns+` FROM jobs WHERE id = ?`, j.ID,
+		))
+		if err != nil {
+			return fmt.Errorf("re-read claimed job %d: %w", j.ID, err)
+		}
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return Job{}, false, err
+	}
+	return claimed, ok, nil
+}
+
+// RequeueStaleRunning moves every job stuck in status='running' back to
+// 'queued' and clears its started_at, returning how many rows it touched. The
+// daemon calls this once at startup to recover jobs orphaned mid-download by a
+// crash or kill, so they are retried rather than lost.
+func (s *Store) RequeueStaleRunning(ctx context.Context) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE jobs SET status = ?, started_at = NULL WHERE status = ?`,
+			JobQueued, JobRunning,
+		)
+		if err != nil {
+			return fmt.Errorf("requeue stale running jobs: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected requeuing stale jobs: %w", err)
+		}
+		n = int(affected)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// ActiveJobExists reports whether any job for the given lesson is still queued
+// or running. The planner uses it to avoid enqueuing a duplicate job for a
+// lesson that already has work outstanding.
+func (s *Store) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM jobs WHERE railcontent_id = ? AND status IN (?, ?)`,
+		railcontentID, JobQueued, JobRunning,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("count active jobs for lesson %d: %w", railcontentID, err)
+	}
+	return count > 0, nil
+}
+
 // ListQueued returns every job still in status='queued', oldest first (by id),
 // so the scheduler processes them in enqueue order.
 func (s *Store) ListQueued(ctx context.Context) ([]Job, error) {

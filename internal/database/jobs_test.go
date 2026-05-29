@@ -287,6 +287,191 @@ func TestJobFollowOnDeleteSetNull(t *testing.T) {
 	}
 }
 
+// TestClaimNextJobClaimsOldestRunningAttempts asserts ClaimNextJob takes the
+// oldest queued job, flips it to running, records attempt #1 and started_at,
+// then hands out the next job on a second claim and reports ok=false when the
+// queue is empty.
+func TestClaimNextJobClaimsOldestRunningAttempts(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first, err := s.EnqueueJob(ctx, sql.NullInt64{}, 11)
+	if err != nil {
+		t.Fatalf("EnqueueJob first: %v", err)
+	}
+	second, err := s.EnqueueJob(ctx, sql.NullInt64{}, 22)
+	if err != nil {
+		t.Fatalf("EnqueueJob second: %v", err)
+	}
+
+	got, ok, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNextJob ok = false with a queued job present, want true")
+	}
+	if got.ID != first {
+		t.Errorf("claimed job id = %d, want the oldest %d", got.ID, first)
+	}
+	if got.RailcontentID != 11 {
+		t.Errorf("claimed job railcontent_id = %d, want 11", got.RailcontentID)
+	}
+	if got.Status != JobRunning {
+		t.Errorf("claimed job status = %q, want %q", got.Status, JobRunning)
+	}
+	if got.Attempts != 1 {
+		t.Errorf("claimed job attempts = %d, want 1 (claim performs attempt #1)", got.Attempts)
+	}
+	if !got.StartedAt.Valid {
+		t.Error("claimed job started_at is NULL, want a populated CURRENT_TIMESTAMP")
+	}
+
+	// The persisted row must match what was returned.
+	persisted, err := s.GetJob(ctx, first)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if persisted.Status != JobRunning || persisted.Attempts != 1 || !persisted.StartedAt.Valid {
+		t.Errorf("persisted claimed job = %+v, want running/attempts=1/started_at set", persisted)
+	}
+
+	// The next claim takes the second-oldest job, not the already-running one.
+	next, ok, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("second ClaimNextJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("second ClaimNextJob ok = false, want true")
+	}
+	if next.ID != second {
+		t.Errorf("second claim id = %d, want %d", next.ID, second)
+	}
+
+	// Queue now empty: ok=false, zero-value job, nil error.
+	empty, ok, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextJob on empty queue: %v", err)
+	}
+	if ok {
+		t.Errorf("ClaimNextJob ok = true on empty queue, want false (job=%+v)", empty)
+	}
+	if empty != (Job{}) {
+		t.Errorf("ClaimNextJob on empty queue returned %+v, want zero Job", empty)
+	}
+}
+
+// TestRequeueStaleRunning asserts a running (e.g. crash-orphaned) job is moved
+// back to queued with its started_at cleared, and the count of moved rows is
+// returned.
+func TestRequeueStaleRunning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 77); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	claimed, ok, err := s.ClaimNextJob(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if !ok {
+		t.Fatal("ClaimNextJob ok = false, want true")
+	}
+
+	n, err := s.RequeueStaleRunning(ctx)
+	if err != nil {
+		t.Fatalf("RequeueStaleRunning: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("RequeueStaleRunning returned %d, want 1", n)
+	}
+
+	requeued, err := s.GetJob(ctx, claimed.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if requeued.Status != JobQueued {
+		t.Errorf("status after requeue = %q, want %q", requeued.Status, JobQueued)
+	}
+	if requeued.StartedAt.Valid {
+		t.Errorf("started_at after requeue = %+v, want NULL", requeued.StartedAt)
+	}
+
+	// A clean queue with nothing running moves zero rows.
+	n2, err := s.RequeueStaleRunning(ctx)
+	if err != nil {
+		t.Fatalf("second RequeueStaleRunning: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("RequeueStaleRunning with nothing running returned %d, want 0", n2)
+	}
+}
+
+// TestActiveJobExists asserts a lesson is "active" while its job is queued or
+// running, and inactive once the job reaches a terminal state or for a lesson
+// with no job at all — this is what gates the planner's dedupe.
+func TestActiveJobExists(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const lesson = 909
+
+	// Absent lesson: no job, not active.
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists (absent): %v", err)
+	} else if active {
+		t.Error("ActiveJobExists = true for a lesson with no job, want false")
+	}
+
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	// Queued: active.
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists (queued): %v", err)
+	} else if !active {
+		t.Error("ActiveJobExists = false for a queued job, want true")
+	}
+
+	// Running: active.
+	if err := s.MarkJobRunning(ctx, id); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists (running): %v", err)
+	} else if !active {
+		t.Error("ActiveJobExists = false for a running job, want true")
+	}
+
+	// Done: inactive.
+	if err := s.MarkJobDone(ctx, id); err != nil {
+		t.Fatalf("MarkJobDone: %v", err)
+	}
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists (done): %v", err)
+	} else if active {
+		t.Error("ActiveJobExists = true after MarkJobDone, want false")
+	}
+
+	// Failed: inactive (so the planner can re-enqueue next cycle).
+	failID, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	if err != nil {
+		t.Fatalf("EnqueueJob (for failed): %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, failID, "boom"); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists (failed): %v", err)
+	} else if active {
+		t.Error("ActiveJobExists = true after MarkJobFailed, want false")
+	}
+}
+
 // TestListQueuedOrderAndFilter asserts ListQueued returns only queued jobs, in
 // enqueue (id) order, and excludes jobs that have moved on to running/done.
 func TestListQueuedOrderAndFilter(t *testing.T) {
