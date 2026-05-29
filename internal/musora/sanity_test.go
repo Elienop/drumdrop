@@ -40,3 +40,28 @@ func TestApplyPermissionsDefaultAndNoop(t *testing.T) {
 		t.Fatalf("non-permission query changed: %s", got)
 	}
 }
+
+func TestApplyPermissionsValidatesIDs(t *testing.T) {
+	q := "x array::intersects(permission_v2, [0]) y"
+
+	// A valid comma-separated id list is substituted verbatim.
+	if got := ApplyPermissions(q, "1,2,3"); got != "x array::intersects(permission_v2, [1,2,3]) y" {
+		t.Fatalf("valid ids not substituted: %s", got)
+	}
+
+	// Malformed values must fall back to the default ("92") rather than inject
+	// arbitrary text into the GROQ array literal.
+	want := "x array::intersects(permission_v2, [92]) y"
+	for _, bad := range []string{
+		"92]) || true || ([", // injection attempt
+		"abc",                // non-numeric
+		"1,",                 // trailing comma
+		",1",                 // leading comma
+		"1, 2",               // embedded space
+		"1;2",                // wrong separator
+	} {
+		if got := ApplyPermissions(q, bad); got != want {
+			t.Fatalf("ApplyPermissions(%q) = %q, want fallback %q", bad, got, want)
+		}
+	}
+}

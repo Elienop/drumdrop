@@ -25,3 +25,17 @@ func TestCollectLeaves(t *testing.T) {
 		t.Fatalf("nested = %v, want [4 5 3]", got)
 	}
 }
+
+func TestLeafIDsDropsZeroID(t *testing.T) {
+	// A tree whose leaves include a zero-id (structural) leaf: that leaf must be
+	// dropped, the real railcontent leaves kept in order.
+	tree := &Node{RailcontentID: 1, Children: []Node{
+		{RailcontentID: 4},
+		{RailcontentID: 0}, // structural leaf with no railcontent reference
+		{RailcontentID: 5},
+	}}
+	got := leafIDs(CollectLeaves(tree, nil))
+	if !reflect.DeepEqual(got, []int{4, 5}) {
+		t.Fatalf("leafIDs = %v, want [4 5] (zero-id leaf dropped)", got)
+	}
+}

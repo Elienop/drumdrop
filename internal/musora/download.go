@@ -63,6 +63,8 @@ func Sanitize(name string) string {
 	return s
 }
 
+// fetchToFile downloads url to dest. The media/asset URLs are open-read and
+// need no auth: a User-Agent header is enough, no session cookie is attached.
 func fetchToFile(url, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

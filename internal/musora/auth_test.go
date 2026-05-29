@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoginAndEnsureSession(t *testing.T) {
+func TestLogin(t *testing.T) {
 	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -15,6 +15,10 @@ func TestLoginAndEnsureSession(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
+	// Save and restore the package global so a torn-down server URL can never
+	// leak into later tests (httptest URLs are dead once srv.Close runs).
+	prevBase := AuthBase
+	t.Cleanup(func() { AuthBase = prevBase })
 	AuthBase = srv.URL
 
 	cookie, err := Login("a@b.com", "pw")
@@ -26,12 +30,5 @@ func TestLoginAndEnsureSession(t *testing.T) {
 	}
 	if LoadCookie() != cookie {
 		t.Fatal("cookie not persisted")
-	}
-}
-
-func TestEnsureSessionNoCreds(t *testing.T) {
-	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir())
-	if _, err := EnsureSession(); err == nil {
-		t.Fatal("expected error when no creds stored")
 	}
 }

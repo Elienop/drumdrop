@@ -1,6 +1,9 @@
 package musora
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type Node struct {
 	RailcontentID int    `json:"railcontent_id"`
@@ -19,7 +22,13 @@ func TopParent(id int, permIDs string) (int, error) {
 	var res []struct {
 		TopParent int `json:"top_parent"`
 	}
-	if err := json.Unmarshal(raw, &res); err != nil || len(res) == 0 {
+	// A malformed response must surface as a (wrapped) error so the planner
+	// retries the expansion instead of treating it as "no parent". An empty
+	// decoded slice is a legitimate "no parent" result -> fall back to id.
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return 0, fmt.Errorf("top_parent: decode response: %w", err)
+	}
+	if len(res) == 0 {
 		return id, nil
 	}
 	return res[0].TopParent, nil
@@ -35,7 +44,13 @@ func Hierarchy(rootID int, permIDs string) (*Node, error) {
 		return nil, err
 	}
 	var res []Node
-	if err := json.Unmarshal(raw, &res); err != nil || len(res) == 0 {
+	// A malformed response must surface as a (wrapped) error so the planner
+	// retries the expansion instead of treating it as "zero lessons". An empty
+	// decoded slice is a legitimate "no hierarchy" result -> return nil, nil.
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("hierarchy_children: decode response: %w", err)
+	}
+	if len(res) == 0 {
 		return nil, nil
 	}
 	return &res[0], nil
@@ -55,6 +70,18 @@ func CollectLeaves(n *Node, acc []Node) []Node {
 	return acc
 }
 
+// leafIDs returns the RailcontentIDs of the given leaves, dropping any leaf with
+// a zero id (e.g. a structural node with no railcontent reference).
+func leafIDs(leaves []Node) []int {
+	var ids []int
+	for _, leaf := range leaves {
+		if leaf.RailcontentID != 0 {
+			ids = append(ids, leaf.RailcontentID)
+		}
+	}
+	return ids
+}
+
 // ResolveLessonIDs: whole=false -> exactly the node pointed at; whole=true -> walk to top parent.
 func ResolveLessonIDs(targetID int, whole bool, permIDs string) (rootID int, lessonIDs []int, err error) {
 	rootID = targetID
@@ -67,10 +94,6 @@ func ResolveLessonIDs(targetID int, whole bool, permIDs string) (rootID int, les
 	if err != nil {
 		return
 	}
-	for _, leaf := range CollectLeaves(root, nil) {
-		if leaf.RailcontentID != 0 {
-			lessonIDs = append(lessonIDs, leaf.RailcontentID)
-		}
-	}
+	lessonIDs = leafIDs(CollectLeaves(root, nil))
 	return
 }
