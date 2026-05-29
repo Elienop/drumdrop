@@ -79,6 +79,13 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		return enqueued, fmt.Errorf("list follows: %w", err)
 	}
 
+	// seen tracks lesson ids already counted/enqueued this run. The same lesson
+	// can appear under multiple follows; in a real Plan the first EnqueueJob makes
+	// ActiveJobExists return true for later encounters, but in a dry run nothing
+	// is enqueued, so without this set PlanDryRun would over-report duplicates. We
+	// dedupe regardless of dryRun so the dry-run count matches what Plan enqueues.
+	seen := map[int]bool{}
+
 	for _, f := range follows {
 		ids, err := p.Expander.Expand(f, p.PermIDs)
 		if err != nil {
@@ -100,6 +107,14 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 			// Record the lesson regardless of whether we enqueue it.
 			if err := p.Store.UpsertLesson(ctx, id, "", parent, f.Brand); err != nil {
 				return enqueued, fmt.Errorf("upsert lesson %d: %w", id, err)
+			}
+
+			// Dedupe within this run: a lesson already counted/enqueued under an
+			// earlier follow is skipped. In a real Plan the prior EnqueueJob makes
+			// ActiveJobExists true; the seen-set mirrors that for dry runs (which
+			// enqueue nothing), so PlanDryRun's count matches what Plan queues.
+			if seen[id] {
+				continue
 			}
 
 			done, err := p.Store.IsDownloaded(ctx, id)
@@ -131,6 +146,7 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 					return enqueued, fmt.Errorf("enqueue lesson %d: %w", id, err)
 				}
 			}
+			seen[id] = true
 			enqueued++
 			fNew++
 		}

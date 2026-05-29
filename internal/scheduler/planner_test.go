@@ -338,6 +338,50 @@ func TestPlanDryRunRecordsButEnqueuesNothing(t *testing.T) {
 	}
 }
 
+func TestPlanAndDryRunAgreeOnDuplicateAcrossFollows(t *testing.T) {
+	// The same lesson id appears under two follows. A real Plan enqueues it once
+	// (the second occurrence is deduped by ActiveJobExists after the first
+	// EnqueueJob). PlanDryRun enqueues nothing, so without an in-run seen-set it
+	// would double-count the duplicate; the seen-set must make its count match
+	// Plan's.
+	f1 := nodeFollow()       // ID 1
+	f2 := instructorFollow() // ID 2
+
+	// Same id (500) under both follows, plus a unique id per follow.
+	expIDs := map[int64][]int{
+		f1.ID: {500, 501},
+		f2.ID: {500, 502},
+	}
+
+	planStore := &fakePlannerStore{follows: []database.Follow{f1, f2}}
+	planExp := fakeExpander{ids: expIDs}
+	planP := &Planner{Store: planStore, Expander: planExp, PermIDs: "perm"}
+	enqueued, err := planP.Plan(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+
+	dryStore := &fakePlannerStore{follows: []database.Follow{f1, f2}}
+	dryExp := fakeExpander{ids: expIDs}
+	dryP := &Planner{Store: dryStore, Expander: dryExp, PermIDs: "perm"}
+	would, err := dryP.PlanDryRun(context.Background())
+	if err != nil {
+		t.Fatalf("PlanDryRun returned error: %v", err)
+	}
+
+	// Three distinct lessons (500, 501, 502): the duplicate 500 counts once.
+	if enqueued != 3 {
+		t.Errorf("Plan enqueued = %d, want 3 (duplicate 500 counted once)", enqueued)
+	}
+	if would != enqueued {
+		t.Errorf("PlanDryRun = %d, Plan = %d; they must agree", would, enqueued)
+	}
+	// Plan actually enqueued 500 exactly once.
+	if got, want := enqueuedIDs(planStore.enqueued), []int{500, 501, 502}; !reflect.DeepEqual(got, want) {
+		t.Errorf("enqueued ids = %v, want %v", got, want)
+	}
+}
+
 func TestPlanLogDefaultsToDiscard(t *testing.T) {
 	// A Planner with no Log must not panic and must behave identically.
 	store := &fakePlannerStore{follows: []database.Follow{nodeFollow()}}

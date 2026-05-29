@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -41,6 +44,8 @@ type markDownloadedCall struct {
 	id        int
 	quality   string
 	outputDir string
+	videoPath string
+	bytes     int64
 }
 
 func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
@@ -116,7 +121,13 @@ func (s *fakeWorkerStore) MarkDownloading(ctx context.Context, id int) error {
 }
 
 func (s *fakeWorkerStore) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
-	s.markDownloaded = append(s.markDownloaded, markDownloadedCall{id: id, quality: quality, outputDir: outputDir})
+	s.markDownloaded = append(s.markDownloaded, markDownloadedCall{
+		id:        id,
+		quality:   quality,
+		outputDir: outputDir,
+		videoPath: videoPath,
+		bytes:     bytes,
+	})
 	return nil
 }
 
@@ -173,6 +184,11 @@ type fakeDownloader struct {
 	failsBefore map[int]int // railcontent id → number of leading failures
 	alwaysFail  bool        // every attempt fails
 
+	// writeMP4, when non-nil, is written to the mp4 path DownloadLesson would
+	// produce (Dir/<base>/<base>.mp4) on a successful download, so tests can
+	// assert the worker stats it and records a real video_path + bytes.
+	writeMP4 []byte
+
 	attempts map[int]int // railcontent id → attempts seen so far
 	calls    []musora.DownloadOpts
 }
@@ -189,6 +205,17 @@ func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error
 	}
 	if d.attempts[l.ID] <= d.failsBefore[l.ID] {
 		return errors.New("transient download error")
+	}
+	if d.writeMP4 != nil && !o.ResourcesOnly {
+		// Mirror DownloadLesson's layout: Dir/<base>/<base>.mp4.
+		base := fmt.Sprintf("%02d - %s", o.Index, musora.Sanitize(l.Title))
+		dir := filepath.Join(o.Dir, base)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -610,5 +637,157 @@ func TestWorkerQualityAndResourcesOnlyOverride(t *testing.T) {
 	}
 	if got := store.markDownloaded[0].quality; got != "best" {
 		t.Errorf("MarkDownloaded quality = %q, want best", got)
+	}
+}
+
+func TestWorkerBackoffClampsToLastEntry(t *testing.T) {
+	// With MaxAttempts=5 and the default 3-entry backoff [5s,30s,2m], an
+	// always-failing download retries before attempts 2..5, so four sleeps fire:
+	// backoff(0)=5s, backoff(1)=30s, backoff(2)=2m, backoff(3)→clamped to the last
+	// entry=2m. This exercises both the third (2m) entry and the clamp.
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.alwaysFail = true
+	sleeper := &recordingSleeper{}
+
+	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w.Cfg.MaxAttempts = 5 // raise above the 3-entry backoff to reach the clamp
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	// Five attempts, four sleeps following the clamped schedule.
+	if len(dl.calls) != 5 {
+		t.Errorf("download calls = %d, want 5", len(dl.calls))
+	}
+	wantSleeps := []time.Duration{
+		5 * time.Second,
+		30 * time.Second,
+		2 * time.Minute,
+		2 * time.Minute, // backoff(3) clamped to the last entry
+	}
+	if !reflect.DeepEqual(sleeper.durations, wantSleeps) {
+		t.Errorf("sleeps = %v, want %v", sleeper.durations, wantSleeps)
+	}
+}
+
+func TestWorkerCancelDuringBackoffAbortsRetries(t *testing.T) {
+	// A context cancelled while waiting out a retry backoff must abort the
+	// remaining attempts promptly, leaving the job to be re-queued next cycle
+	// rather than burning through every attempt.
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.alwaysFail = true // force a retry so the backoff wait is reached
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The first backoff wait cancels the context, simulating a SIGINT arriving
+	// mid-backoff; waitBackoff must then return false and stop retrying.
+	sleeper := &recordingSleeper{}
+	cancelling := func(d time.Duration) {
+		sleeper.sleep(d)
+		cancel()
+	}
+
+	w := newTestWorker(store, res, dl, cancelling)
+	w.Cfg.MaxAttempts = 5
+
+	processed, err := w.RunOnce(ctx, 0)
+	if err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("processed = %d, want 1 (the one claimed job)", processed)
+	}
+
+	// Attempt 1 ran, then one backoff wait fired and cancelled: no further
+	// attempts, so exactly one sleep and two download calls (attempt 1 + the
+	// attempt-2 download is never reached after the abort).
+	if len(sleeper.durations) != 1 {
+		t.Errorf("sleeps = %v, want exactly 1 before the cancel aborts retries", sleeper.durations)
+	}
+	if len(dl.calls) != 1 {
+		t.Errorf("download calls = %d, want 1 (retries aborted by cancel during backoff)", len(dl.calls))
+	}
+	// The job is left untouched by the failed-paths: it is neither marked done nor
+	// marked failed, so the next cycle re-queues it.
+	if len(store.markDone) != 0 {
+		t.Errorf("MarkJobDone called %v, want none on cancellation", store.markDone)
+	}
+	if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 {
+		t.Errorf("no failed marks expected on cancellation: markFailed=%v markJobFailed=%v", store.markFailed, store.markJobFailed)
+	}
+}
+
+func TestWorkerMarkDownloadedRecordsVideoMetadata(t *testing.T) {
+	// On a successful real download the worker stats the produced mp4 and records
+	// a non-empty video_path and non-zero byte count (the write-only-columns fix).
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes") // 14 bytes
+
+	// Point DownloadsDir at a real temp dir so the produced mp4 can be stat'd.
+	tmp := t.TempDir()
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = tmp
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("MarkDownloaded calls = %d, want 1", len(store.markDownloaded))
+	}
+	got := store.markDownloaded[0]
+	wantDir := filepath.Join(tmp, "Beginner Course", "01 - Lesson A")
+	wantVideo := filepath.Join(wantDir, "01 - Lesson A.mp4")
+	if got.outputDir != wantDir {
+		t.Errorf("outputDir = %q, want %q", got.outputDir, wantDir)
+	}
+	if got.videoPath != wantVideo {
+		t.Errorf("videoPath = %q, want %q", got.videoPath, wantVideo)
+	}
+	if got.bytes != int64(len(dl.writeMP4)) {
+		t.Errorf("bytes = %d, want %d", got.bytes, len(dl.writeMP4))
+	}
+}
+
+func TestWorkerMarkDownloadedNoVideoWhenResourcesOnly(t *testing.T) {
+	// ResourcesOnly produces no mp4, so MarkDownloaded must record an empty
+	// video_path and zero bytes even though the download succeeded.
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("should not be written in resources-only")
+
+	tmp := t.TempDir()
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = tmp
+	w.Cfg.ResourcesOnly = true
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("MarkDownloaded calls = %d, want 1", len(store.markDownloaded))
+	}
+	got := store.markDownloaded[0]
+	if got.videoPath != "" || got.bytes != 0 {
+		t.Errorf("videoPath/bytes = %q/%d, want empty/0 on ResourcesOnly", got.videoPath, got.bytes)
 	}
 }

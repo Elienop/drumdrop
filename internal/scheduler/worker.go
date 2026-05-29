@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -43,6 +45,12 @@ func NewWorker(store Store, resolver Resolver, downloader Downloader, cfg Config
 	if log == nil {
 		log = io.Discard
 	}
+	// A zero-value or otherwise non-positive MaxAttempts would skip the per-attempt
+	// loop entirely and mark every job failed without a single real download.
+	// Clamp it to at least one genuine attempt.
+	if cfg.MaxAttempts < 1 {
+		cfg.MaxAttempts = 1
+	}
 	return &Worker{
 		Store:      store,
 		Resolver:   resolver,
@@ -63,13 +71,40 @@ func (w *Worker) log() io.Writer {
 	return w.Log
 }
 
-// sleepFor waits the given duration via the injected sleeper, defaulting to
-// time.Sleep when unset (e.g. a zero-value Worker built without NewWorker).
-func (w *Worker) sleepFor(d time.Duration) {
+// waitBackoff waits the given retry delay but stays responsive to cancellation:
+// it returns false (do not retry) the moment ctx is cancelled, leaving the job
+// to be re-queued and retried next cycle. A real Worker waits on time.After(d)
+// vs ctx.Done(); a Worker with an injected sleeper (tests) calls that sleeper so
+// the recorded backoff schedule is still observable, then re-checks ctx so a
+// cancelled context still aborts retries. Returns true when the wait completed
+// normally and the next attempt should proceed.
+func (w *Worker) waitBackoff(ctx context.Context, d time.Duration) bool {
 	if w.sleep == nil {
 		w.sleep = time.Sleep
 	}
+	if isTimeSleep(w.sleep) {
+		// Production path: race the real delay against cancellation so SIGINT/
+		// SIGTERM interrupts a job mid-backoff instead of blocking the full delay.
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	// Injected-sleeper path: invoke it so retry tests still record the schedule,
+	// then honor cancellation so a cancelled-context test aborts retries promptly.
 	w.sleep(d)
+	return ctx.Err() == nil
+}
+
+// isTimeSleep reports whether f is the real time.Sleep (the default), so the
+// production wait can use a cancellable timer while injected sleepers keep their
+// recordable, instant behavior.
+func isTimeSleep(f func(time.Duration)) bool {
+	return reflect.ValueOf(f).Pointer() == reflect.ValueOf(time.Sleep).Pointer()
 }
 
 // backoff returns Cfg.Backoff[min(i, len-1)] — the delay schedule clamped to its
@@ -162,6 +197,13 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 
 	var lastErr error
 	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
+		// Abort promptly on cancellation: leave the job in its current state (it
+		// is not downloaded and, after a re-mark, may be running) so the next
+		// planner/requeue cycle re-queues and retries it.
+		if err := ctx.Err(); err != nil {
+			return
+		}
+
 		// Attempt #1 was already claimed (running, attempts=1). Re-mark running
 		// only for retries, then wait the backoff for this retry.
 		if attempt > 1 {
@@ -170,8 +212,11 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			}
 			// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
 			// last entry for any further retries. See the doc comment: Backoff[i]
-			// is the delay before attempt i+2.
-			w.sleepFor(w.backoff(attempt - 2))
+			// is the delay before attempt i+2. A cancellation mid-backoff aborts
+			// the retry early, leaving the job to be re-queued next cycle.
+			if !w.waitBackoff(ctx, w.backoff(attempt-2)) {
+				return
+			}
 		}
 
 		if err := w.Store.MarkDownloading(ctx, id); err != nil {
@@ -187,7 +232,8 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		})
 		if derr == nil {
 			lessonDir := filepath.Join(outDir, fmt.Sprintf("%02d - %s", 1, musora.Sanitize(lesson.Title)))
-			if err := w.Store.MarkDownloaded(ctx, id, quality, lessonDir, "", 0); err != nil {
+			videoPath, bytes := w.producedVideo(lessonDir)
+			if err := w.Store.MarkDownloaded(ctx, id, quality, lessonDir, videoPath, bytes); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
 			}
 			if err := w.Store.MarkJobDone(ctx, job.ID); err != nil {
@@ -233,6 +279,25 @@ func (w *Worker) outDir(f database.Follow, job database.Job, lesson *musora.Less
 // follow) has none of these and triggers the lesson-parent-title fallback.
 func hasFollow(f database.Follow) bool {
 	return f.Title != "" || f.Slug.Valid || f.RailcontentID.Valid
+}
+
+// producedVideo returns the path and size of the mp4 DownloadLesson writes for a
+// successfully downloaded lesson. The video lives at lessonDir/<base>.mp4 where
+// <base> is lessonDir's own "NN - Sanitized title" base name (DownloadLesson
+// uses base for both the folder and the file). On ResourcesOnly (no video is
+// produced) or any os.Stat error (e.g. a different container extension) it
+// returns "" and 0 so MarkDownloaded records no video metadata rather than a
+// path that does not exist.
+func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64) {
+	if w.Cfg.ResourcesOnly {
+		return "", 0
+	}
+	p := filepath.Join(lessonDir, filepath.Base(lessonDir)+".mp4")
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", 0
+	}
+	return p, info.Size()
 }
 
 // lessonParentTitle returns the first parent content title of a lesson, used as

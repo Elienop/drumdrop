@@ -212,7 +212,7 @@ func TestDaemonRunOncePlansThenDrains(t *testing.T) {
 	if store.planRuns != 1 {
 		t.Errorf("planRuns = %d, want 1", store.planRuns)
 	}
-	if len(store.ops) == 0 || !containsOp(ops, "job-done") {
+	if len(ops) == 0 || !containsOp(ops, "job-done") {
 		t.Errorf("expected the enqueued lesson to be downloaded (job-done): %v", ops)
 	}
 	// RunOnce alone never reclaims stale jobs — that is Run's startup-only job.
