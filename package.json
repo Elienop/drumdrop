@@ -1,0 +1,16 @@
+{
+  "name": "drumdrop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal-archival downloader for Drumeo/Musora lessons (proof-of-concept core engine).",
+  "bin": {
+    "musora-dl": "src/cli.mjs"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

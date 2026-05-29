@@ -1,0 +1,3 @@
+*[railcontent_id == 409918]{
+      'top_parent': coalesce(parent_content_reference[1]->railcontent_id, parent_content_reference[0]->railcontent_id, railcontent_id),
+    }

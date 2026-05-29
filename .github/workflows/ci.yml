@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax check
+        run: for f in src/*.mjs; do node --check "$f"; done
+
+      - name: CLI smoke (--help)
+        run: node src/cli.mjs --help
+
+      # When lint/tests are added (full-app phase), add the gates here:
+      # - run: npm ci
+      # - run: npm run lint
+      # - run: npm test
