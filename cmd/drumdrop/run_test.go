@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"reflect"
 	"testing"
 )
@@ -98,25 +97,18 @@ func TestSplitArgs(t *testing.T) {
 
 // TestFlagOrderingAfterID proves the regression is fixed end-to-end: splitting
 // then parsing must honor flags placed after the positional id, exactly as the
-// Node reference (src/cli.mjs parseArgs) does.
+// Node reference (src/cli.mjs parseArgs) does. It drives parseDownloadArgs — the
+// SAME parser cmdDownload runs — so a real parser regression is caught.
 func TestFlagOrderingAfterID(t *testing.T) {
 	parse := func(argv []string) (id string, out, quality string, limit int, whole, resourcesOnly, dryRun bool, err error) {
-		fs := flag.NewFlagSet("drumdrop", flag.ContinueOnError)
-		o := fs.String("out", "./downloads", "")
-		q := fs.String("quality", "best", "")
-		l := fs.Int("limit", 0, "")
-		w := fs.Bool("whole-course", false, "")
-		r := fs.Bool("resources-only", false, "")
-		d := fs.Bool("dry-run", false, "")
-		positionals, flags := splitArgs(argv)
-		if err = fs.Parse(flags); err != nil {
-			return
+		args, err := parseDownloadArgs(argv)
+		if err != nil {
+			return "", "", "", 0, false, false, false, err
 		}
-		rest := append(positionals, fs.Args()...)
-		if len(rest) > 0 {
-			id = rest[0]
+		if len(args.positionals) > 0 {
+			id = args.positionals[0]
 		}
-		return id, *o, *q, *l, *w, *r, *d, nil
+		return id, args.out, args.quality, args.limit, args.whole, args.resourcesOnly, args.dryRun, nil
 	}
 
 	t.Run("dry-run after id", func(t *testing.T) {

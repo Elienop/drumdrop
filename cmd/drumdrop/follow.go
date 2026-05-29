@@ -33,10 +33,20 @@ func openStore() (*database.Store, error) {
 	return database.NewStore(db), nil
 }
 
-// cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
-// (leading @slug, or --instructor slug). Both are idempotent: re-following an
-// already-followed target reports "already following" rather than erroring.
-func cmdFollow(argv []string) error {
+// followArgs holds the parsed positionals and flag values for the follow
+// command. Extracted so cmdFollow and its tests drive the same parser.
+type followArgs struct {
+	positionals []string
+	brand       string
+	quality     string
+	instructor  string
+}
+
+// parseFollowArgs splits argv into positionals and flags (so flags may appear
+// after the positional target — see splitArgs) and parses the follow flags. This
+// is the exact parse cmdFollow runs; tests call it so a parser regression is
+// caught against production code rather than a re-implementation.
+func parseFollowArgs(argv []string) (followArgs, error) {
 	fs := flag.NewFlagSet("drumdrop follow", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	brand := fs.String("brand", "drumeo", "musora brand (drumeo|pianote|guitareo|singeo|playbass)")
@@ -45,12 +55,29 @@ func cmdFollow(argv []string) error {
 
 	positionals, flags := splitArgs(argv)
 	if err := fs.Parse(flags); err != nil {
+		return followArgs{}, err
+	}
+	return followArgs{
+		positionals: positionals,
+		brand:       *brand,
+		quality:     *quality,
+		instructor:  *instructor,
+	}, nil
+}
+
+// cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
+// (leading @slug, or --instructor slug). Both are idempotent: re-following an
+// already-followed target reports "already following" rather than erroring.
+func cmdFollow(argv []string) error {
+	args, err := parseFollowArgs(argv)
+	if err != nil {
 		return err
 	}
+	positionals := args.positionals
 
 	// Determine the slug for an instructor follow: --instructor <slug> wins, else
 	// a leading @slug positional.
-	slug := *instructor
+	slug := args.instructor
 	if slug == "" && len(positionals) > 0 && strings.HasPrefix(positionals[0], "@") {
 		slug = strings.TrimPrefix(positionals[0], "@")
 	}
@@ -63,13 +90,13 @@ func cmdFollow(argv []string) error {
 	ctx := context.Background()
 
 	if slug != "" {
-		return followInstructor(ctx, store, slug, *brand, *quality)
+		return followInstructor(ctx, store, slug, args.brand, args.quality)
 	}
 
 	if len(positionals) == 0 {
 		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
 	}
-	return followNode(ctx, store, positionals[0], *brand, *quality)
+	return followNode(ctx, store, positionals[0], args.brand, args.quality)
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is

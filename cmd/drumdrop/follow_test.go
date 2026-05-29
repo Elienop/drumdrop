@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"flag"
 	"strings"
 	"testing"
 
@@ -16,25 +15,23 @@ import (
 // ---- flag handling -------------------------------------------------------
 
 // TestFollowFlagSplitting proves --brand is honored alongside the existing
-// value flags whether it appears before or after the positional target.
+// value flags whether it appears before or after the positional target. It
+// drives parseFollowArgs — the SAME parser cmdFollow runs — so a real parser
+// regression is caught.
 func TestFollowFlagSplitting(t *testing.T) {
 	if !valueFlags["--brand"] {
 		t.Fatal("--brand must be registered in valueFlags so its value is not orphaned")
 	}
 
 	parse := func(argv []string) (target, brand, quality, instructor string, err error) {
-		fs := flag.NewFlagSet("follow", flag.ContinueOnError)
-		b := fs.String("brand", "drumeo", "")
-		q := fs.String("quality", "best", "")
-		ins := fs.String("instructor", "", "")
-		positionals, flags := splitArgs(argv)
-		if err = fs.Parse(flags); err != nil {
-			return
+		args, err := parseFollowArgs(argv)
+		if err != nil {
+			return "", "", "", "", err
 		}
-		if len(positionals) > 0 {
-			target = positionals[0]
+		if len(args.positionals) > 0 {
+			target = args.positionals[0]
 		}
-		return target, *b, *q, *ins, nil
+		return target, args.brand, args.quality, args.instructor, nil
 	}
 
 	t.Run("brand value after target is kept", func(t *testing.T) {
