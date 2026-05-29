@@ -299,6 +299,45 @@ func TestPlanExpandFailureIsolated(t *testing.T) {
 	}
 }
 
+func TestPlanDryRunRecordsButEnqueuesNothing(t *testing.T) {
+	// PlanDryRun expands + upserts every lesson (record-keeping) but enqueues
+	// NOTHING and stamps NO follow, while reporting the would-be queue count with
+	// the same dedupe/skip rules as a real Plan.
+	store := &fakePlannerStore{
+		follows: []database.Follow{nodeFollow()},
+		downloaded: map[int]bool{
+			11: true, // already downloaded → not counted
+		},
+		active: map[int]bool{
+			12: true, // already queued/running → deduped, not counted
+		},
+	}
+	exp := fakeExpander{ids: map[int64][]int{1: {10, 11, 12, 13}}}
+
+	p := &Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	would, err := p.PlanDryRun(context.Background())
+	if err != nil {
+		t.Fatalf("PlanDryRun returned error: %v", err)
+	}
+
+	// Only 10 and 13 would be queued (11 downloaded, 12 has an active job).
+	if would != 2 {
+		t.Errorf("wouldEnqueue = %d, want 2", would)
+	}
+	// Nothing was actually enqueued.
+	if len(store.enqueued) != 0 {
+		t.Errorf("PlanDryRun must enqueue nothing; enqueued=%v", store.enqueued)
+	}
+	// Every lesson is still upserted (record-keeping).
+	if len(store.upserts) != 4 {
+		t.Errorf("upserts = %d, want 4 (all seen lessons recorded)", len(store.upserts))
+	}
+	// No follow is stamped — nothing was actually synced.
+	if len(store.touched) != 0 {
+		t.Errorf("PlanDryRun must not stamp last_synced; touched=%v", store.touched)
+	}
+}
+
 func TestPlanLogDefaultsToDiscard(t *testing.T) {
 	// A Planner with no Log must not panic and must behave identically.
 	store := &fakePlannerStore{follows: []database.Follow{nodeFollow()}}

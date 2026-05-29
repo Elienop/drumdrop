@@ -76,11 +76,39 @@ drumdrop sync --dry-run                 # record what would be downloaded, downl
 
 | `sync` option | Description |
 | --- | --- |
-| `--out <dir>` | Output directory (default `./downloads`) |
+| `--out <dir>` | Output directory (default `$DRUMDROP_DOWNLOADS_DIR`, else `./downloads`) |
 | `--quality <q>` | Override each follow's saved quality |
 | `--limit <N>` | Cap the number of NEW downloads this run (`0` = unlimited) |
 | `--dry-run` | Expand + record in the database, download nothing |
 | `--resources-only` | Skip video; fetch only resources |
+
+### Daemon (unattended auto-sync)
+
+`drumdrop daemon` runs the same plan + download machinery as `sync`, but on a
+loop: it periodically re-checks every follow for new lessons, queues them, and
+downloads them **one at a time** with **automatic retry** (3 attempts, backoff
+5s → 30s → 2m). `sync` is the one-shot equivalent of a single daemon cycle. On
+startup the daemon reclaims any job left `running` by a previous crash, then runs
+a cycle immediately and again every `--interval`. `Ctrl-C` (SIGINT) or SIGTERM
+shuts it down cleanly after the in-flight download finishes.
+
+```bash
+drumdrop daemon                         # auto-sync every 12h until stopped
+drumdrop daemon --interval 6h           # check every 6 hours
+drumdrop daemon --once                  # one plan+drain cycle then exit (cron-friendly)
+DRUMDROP_DOWNLOADS_DIR=/media/archive drumdrop daemon
+```
+
+| `daemon` option | Description |
+| --- | --- |
+| `--interval <dur>` | Re-check interval as a Go duration, e.g. `6h`, `30m` (default `12h`) |
+| `--once` | Run one plan+drain cycle then exit (external cron / testing) |
+| `--out <dir>` | Output directory (default `$DRUMDROP_DOWNLOADS_DIR`, else `./downloads`) |
+| `--quality <q>` | Override each follow's saved quality |
+| `--resources-only` | Skip video; fetch only resources |
+
+Set `DRUMDROP_DOWNLOADS_DIR` to choose the download root without passing `--out`
+on every run (handy for a long-running daemon); `--out` still overrides it per run.
 
 ## Development
 

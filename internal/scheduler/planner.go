@@ -53,6 +53,27 @@ func (p *Planner) log() io.Writer {
 // IsDownloaded, ActiveJobExists, EnqueueJob); per-follow expansion errors are
 // non-fatal.
 func (p *Planner) Plan(ctx context.Context, limit int) (enqueued int, err error) {
+	return p.plan(ctx, limit, false)
+}
+
+// PlanDryRun is the report-only sibling of Plan: it lists follows, expands each,
+// and records every lesson (UpsertLesson) exactly as Plan does, but it NEVER
+// enqueues a job — a queued job would otherwise be drained later by a daemon,
+// which is surprising for a "dry run". It returns the number of lessons that
+// WOULD be enqueued (not downloaded, not already covered by an active job). It
+// also does not stamp last_synced_at, since nothing was actually synced.
+//
+// Dedupe and skip-already-downloaded behavior is identical to Plan, so the count
+// it reports matches what a real Plan would queue.
+func (p *Planner) PlanDryRun(ctx context.Context) (wouldEnqueue int, err error) {
+	return p.plan(ctx, 0, true)
+}
+
+// plan is the shared core of Plan and PlanDryRun. In dry-run mode it counts the
+// lessons that would be enqueued but performs no EnqueueJob and no
+// TouchLastSynced; otherwise it enqueues (deduped) up to limit lessons and
+// stamps each reached follow.
+func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued int, err error) {
 	follows, err := p.Store.ListFollows(ctx)
 	if err != nil {
 		return enqueued, fmt.Errorf("list follows: %w", err)
@@ -105,11 +126,18 @@ func (p *Planner) Plan(ctx context.Context, limit int) (enqueued int, err error)
 				break
 			}
 
-			if _, err := p.Store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id); err != nil {
-				return enqueued, fmt.Errorf("enqueue lesson %d: %w", id, err)
+			if !dryRun {
+				if _, err := p.Store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id); err != nil {
+					return enqueued, fmt.Errorf("enqueue lesson %d: %w", id, err)
+				}
 			}
 			enqueued++
 			fNew++
+		}
+
+		if dryRun {
+			fmt.Fprintf(p.log(), "follow #%d %s: %d new lesson(s) would be queued\n", f.ID, f.Kind, fNew)
+			continue
 		}
 
 		// The follow was reached and processed (even if the limit truncated its
