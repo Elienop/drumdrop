@@ -5,3 +5,8 @@ downloads/
 .secrets*
 *.har
 docs/superpowers/
+
+# Go
+/drumdrop
+/dist/
+*.test
