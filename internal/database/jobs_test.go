@@ -22,7 +22,7 @@ func seedFollow(t *testing.T, s *Store, railcontentID int) int64 {
 func countJobs(t *testing.T, s *Store) int {
 	t.Helper()
 	var n int
-	if err := s.DB().QueryRow("SELECT count(*) FROM jobs").Scan(&n); err != nil {
+	if err := s.rawDB().QueryRow("SELECT count(*) FROM jobs").Scan(&n); err != nil {
 		t.Fatalf("count jobs: %v", err)
 	}
 	return n
@@ -223,7 +223,7 @@ func TestMarkJobMissing(t *testing.T) {
 func TestJobRejectsBadStatus(t *testing.T) {
 	s := newTestStore(t)
 
-	if _, err := s.DB().Exec(
+	if _, err := s.rawDB().Exec(
 		"INSERT INTO jobs(railcontent_id, status) VALUES(1, 'bogus')",
 	); err == nil {
 		t.Error("inserting a job with status='bogus' succeeded, want CHECK violation")
@@ -231,7 +231,7 @@ func TestJobRejectsBadStatus(t *testing.T) {
 	for i, st := range []string{
 		JobQueued, JobRunning, JobDone, JobFailed, JobCanceled,
 	} {
-		if _, err := s.DB().Exec(
+		if _, err := s.rawDB().Exec(
 			"INSERT INTO jobs(railcontent_id, status) VALUES(?, ?)", i+1, st,
 		); err != nil {
 			t.Errorf("inserting a job with valid status %q failed: %v", st, err)

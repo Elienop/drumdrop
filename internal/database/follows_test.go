@@ -238,7 +238,7 @@ func TestTouchLastSynced(t *testing.T) {
 // then read back; mutations under test still go through Store methods.
 func mustExec(t *testing.T, s *Store, query string, args ...any) {
 	t.Helper()
-	if _, err := s.DB().Exec(query, args...); err != nil {
+	if _, err := s.rawDB().Exec(query, args...); err != nil {
 		t.Fatalf("exec %q: %v", query, err)
 	}
 }

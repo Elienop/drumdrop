@@ -11,7 +11,7 @@ import (
 func countLessons(t *testing.T, s *Store) int {
 	t.Helper()
 	var n int
-	if err := s.DB().QueryRow("SELECT count(*) FROM lessons").Scan(&n); err != nil {
+	if err := s.rawDB().QueryRow("SELECT count(*) FROM lessons").Scan(&n); err != nil {
 		t.Fatalf("count lessons: %v", err)
 	}
 	return n
@@ -274,7 +274,7 @@ func TestMarkTransitionMissing(t *testing.T) {
 func TestUpsertLessonRejectsBadStatus(t *testing.T) {
 	s := newTestStore(t)
 
-	if _, err := s.DB().Exec(
+	if _, err := s.rawDB().Exec(
 		"INSERT INTO lessons(railcontent_id, status) VALUES(1, 'bogus')",
 	); err == nil {
 		t.Error("inserting a lesson with status='bogus' succeeded, want CHECK violation")
@@ -283,7 +283,7 @@ func TestUpsertLessonRejectsBadStatus(t *testing.T) {
 	for _, st := range []string{
 		StatusPending, StatusDownloading, StatusDownloaded, StatusFailed, StatusSkipped,
 	} {
-		if _, err := s.DB().Exec(
+		if _, err := s.rawDB().Exec(
 			"INSERT INTO lessons(railcontent_id, status) VALUES(?, ?)",
 			idForStatus(st), st,
 		); err != nil {
@@ -347,7 +347,7 @@ func TestListByStatus(t *testing.T) {
 func statusOf(t *testing.T, s *Store, id int) string {
 	t.Helper()
 	var st string
-	if err := s.DB().QueryRow("SELECT status FROM lessons WHERE railcontent_id = ?", id).Scan(&st); err != nil {
+	if err := s.rawDB().QueryRow("SELECT status FROM lessons WHERE railcontent_id = ?", id).Scan(&st); err != nil {
 		t.Fatalf("read status of lesson %d: %v", id, err)
 	}
 	return st
