@@ -14,7 +14,10 @@ import (
 //go:embed queries/*.groq
 var queryFS embed.FS
 
-const sanityBase = "https://sanity.musora.com/4032r8py/apicdn/v2021-06-07/production_v2/v4"
+// sanityBase is the GROQ read endpoint. It is a var (not const) so tests can
+// point Query at an httptest server; production never reassigns it.
+var sanityBase = "https://sanity.musora.com/4032r8py/apicdn/v2021-06-07/production_v2/v4"
+
 const browserUA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 const getMax = 1500
 
