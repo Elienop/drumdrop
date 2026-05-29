@@ -16,6 +16,20 @@ func TestWithIDReplacesFirstFilterOnly(t *testing.T) {
 	}
 }
 
+func TestWithIDReplacesOnlyFirstOfMultipleFilters(t *testing.T) {
+	tpl := "a[railcontent_id == 1] b[railcontent_id == 2]"
+	out := WithID(tpl, 99)
+	if !strings.Contains(out, "a[railcontent_id == 99]") {
+		t.Fatalf("first filter not replaced: %s", out)
+	}
+	if !strings.Contains(out, "b[railcontent_id == 2]") {
+		t.Fatalf("second filter should be left untouched: %s", out)
+	}
+	if strings.Contains(out, "b[railcontent_id == 99]") {
+		t.Fatalf("second filter was wrongly replaced: %s", out)
+	}
+}
+
 func TestApplyPermissionsDefaultAndNoop(t *testing.T) {
 	q := "x array::intersects(permission_v2, [92]) y"
 	if got := ApplyPermissions(q, ""); got != q {

@@ -29,9 +29,15 @@ func LoadQuery(name string) (string, error) {
 	return string(b), err
 }
 
-// WithID replaces only the first `railcontent_id == <n>` filter.
+// WithID replaces only the first `railcontent_id == <n>` filter, leaving any
+// later occurrences (e.g. nested projection references) intact. This mirrors
+// src/sanity.mjs withId, which uses String.replace without the /g flag.
 func WithID(template string, id int) string {
-	return reFirstID.ReplaceAllString(template, fmt.Sprintf("railcontent_id == %d", id))
+	loc := reFirstID.FindStringIndex(template)
+	if loc == nil {
+		return template
+	}
+	return template[:loc[0]] + fmt.Sprintf("railcontent_id == %d", id) + template[loc[1]:]
 }
 
 // ApplyPermissions rewrites array::intersects(...,[..]) to the configured ids (default "92").
