@@ -56,6 +56,32 @@ drumdrop whoami                 # show the logged-in account
 drumdrop logout                 # clear saved session + credentials
 ```
 
+### Follows (incremental, deduped archival)
+
+Track courses, series, single lessons, or whole instructors, then `sync` to pull
+only what you have not already downloaded. State lives in a local SQLite database
+(`<config-dir>/drumdrop.db`), so re-running `sync` never re-downloads a lesson.
+
+```bash
+drumdrop follow 409875                  # follow a node (course/series/lesson)
+drumdrop follow https://app.musora.com/drumeo/lessons/course/409875   # URL works too
+drumdrop follow @aaron-edgar            # follow an instructor by slug
+drumdrop follow @aaron-edgar --brand drumeo --quality 1080
+drumdrop follows                        # list everything you follow
+drumdrop unfollow 3                     # stop following (id from `drumdrop follows`)
+drumdrop sync                           # download every not-yet-downloaded lesson
+drumdrop sync --limit 5                 # cap NEW downloads this run
+drumdrop sync --dry-run                 # record what would be downloaded, download nothing
+```
+
+| `sync` option | Description |
+| --- | --- |
+| `--out <dir>` | Output directory (default `./downloads`) |
+| `--quality <q>` | Override each follow's saved quality |
+| `--limit <N>` | Cap the number of NEW downloads this run (`0` = unlimited) |
+| `--dry-run` | Expand + record in the database, download nothing |
+| `--resources-only` | Skip video; fetch only resources |
+
 ## How it works
 
 1. **Catalog** — Musora content lives in Sanity CMS as a tree keyed by numeric
