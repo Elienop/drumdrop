@@ -82,7 +82,9 @@ func cmdDownload(argv []string) error {
 	if err := fs.Parse(flags); err != nil {
 		return err
 	}
-	rest := append(positionals, fs.Args()...)
+	// splitArgs routes every non-flag token into positionals and passes only
+	// flags to fs.Parse, so fs.Args() is always empty here.
+	rest := positionals
 	if len(rest) == 0 {
 		fmt.Print(usage)
 		os.Exit(1)
@@ -191,11 +193,17 @@ func cmdDownload(argv []string) error {
 	return nil
 }
 
+// stdin is a single shared reader so that bytes buffered by one prompt (e.g. a
+// password line that arrives in the same OS pipe write as the email) survive
+// into the next prompt. Constructing a fresh bufio.Reader per call would drop
+// already-buffered piped input and read EOF on the second prompt.
+var stdin = bufio.NewReader(os.Stdin)
+
 // prompt reads a single trimmed line from stdin. For non-interactive use, set
 // MUSORA_EMAIL / MUSORA_PASSWORD instead of typing.
 func prompt(question string) (string, error) {
 	fmt.Print(question)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := stdin.ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
 	}
