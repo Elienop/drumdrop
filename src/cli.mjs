@@ -3,6 +3,10 @@ import { join } from 'node:path';
 import { resolveLessonIds } from './catalog.mjs';
 import { resolveLesson, downloadLesson } from './lesson.mjs';
 import { ensureDir, err, extractId, log, pad2, sanitizeName, warn } from './util.mjs';
+import { login, me, loadCookie, saveCreds } from './auth.mjs';
+import { rmSync, existsSync } from 'node:fs';
+import { credsPath, cookiePath } from './config.mjs';
+import { createInterface } from 'node:readline/promises';
 
 const HELP = `drumdrop — download a Drumeo/Musora lesson or whole course (personal archival)
 
@@ -17,6 +21,11 @@ Options:
   --resources-only     skip video; fetch only PDFs / play-along audio / sheet music
   --dry-run            list what would be downloaded, download nothing
   -h, --help           show this help
+
+Account:
+  node src/cli.mjs login       log in (prompts, or set MUSORA_EMAIL/MUSORA_PASSWORD)
+  node src/cli.mjs whoami      show the logged-in account
+  node src/cli.mjs logout      clear saved session + credentials
 
 Examples:
   node src/cli.mjs 409918                 # one lesson
@@ -49,8 +58,41 @@ function parseArgs(argv) {
   return args;
 }
 
+// For non-interactive/headless use, set MUSORA_EMAIL / MUSORA_PASSWORD instead of typing.
+async function prompt(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(question);
+  rl.close();
+  return answer.trim();
+}
+
+async function cmdLogin() {
+  const email = process.env.MUSORA_EMAIL || (await prompt('Musora email: '));
+  const password = process.env.MUSORA_PASSWORD || (await prompt('Musora password: '));
+  const { user } = await login(email, password);
+  saveCreds(email, password);
+  log(`✓ Logged in${user?.email ? ` as ${user.email}` : ''}. Session + credentials saved.`);
+}
+
+async function cmdWhoami() {
+  const cookie = loadCookie();
+  if (!cookie) { err('Not logged in. Run: drumdrop login'); process.exit(1); }
+  const user = await me(cookie);
+  if (!user) { err('Session expired. Run: drumdrop login'); process.exit(1); }
+  log(`Logged in as ${user.email || user.display_name || user.id || '(unknown)'}`);
+}
+
+async function cmdLogout() {
+  for (const p of [cookiePath(), credsPath()]) if (existsSync(p)) rmSync(p);
+  log('✓ Logged out (cleared saved session + credentials).');
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const cmd = args._[0];
+  if (cmd === 'login') return cmdLogin();
+  if (cmd === 'whoami') return cmdWhoami();
+  if (cmd === 'logout') return cmdLogout();
   if (args.help || args._.length === 0) {
     log(HELP);
     process.exit(args.help ? 0 : 1);
