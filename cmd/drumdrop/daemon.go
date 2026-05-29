@@ -19,20 +19,7 @@ import (
 // --interval until SIGINT/SIGTERM, then shuts down cleanly after the in-flight
 // download finishes.
 func cmdDaemon(argv []string) error {
-	fs := flag.NewFlagSet("drumdrop daemon", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	interval := fs.String("interval", "12h", "re-check interval (Go duration, e.g. 6h, 30m)")
-	once := fs.Bool("once", false, "run one plan+drain cycle then exit")
-	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
-	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
-	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")
-
-	_, flags := splitArgs(argv)
-	if err := fs.Parse(flags); err != nil {
-		return err
-	}
-
-	dur, err := parseInterval(*interval)
+	opts, err := parseDaemonArgs(argv)
 	if err != nil {
 		return err
 	}
@@ -43,7 +30,7 @@ func cmdDaemon(argv []string) error {
 	}
 	defer store.Close()
 
-	cfg := schedulerConfig(*out, *quality, *resourcesOnly)
+	cfg := schedulerConfig(opts.out, opts.quality, opts.resourcesOnly)
 	permIDs := permissionIDs()
 	planner := &scheduler.Planner{
 		Store:    store,
@@ -59,7 +46,7 @@ func cmdDaemon(argv []string) error {
 		Log:     os.Stdout,
 	}
 
-	if *once {
+	if opts.once {
 		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)
 		return daemon.RunOnce(context.Background())
 	}
@@ -69,12 +56,51 @@ func cmdDaemon(argv []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("drumdrop daemon: auto-syncing every %s into %s (Ctrl-C to stop)\n", dur, cfg.DownloadsDir)
-	if err := daemon.Run(ctx, dur); err != nil {
+	fmt.Printf("drumdrop daemon: auto-syncing every %s into %s (Ctrl-C to stop)\n", opts.interval, cfg.DownloadsDir)
+	if err := daemon.Run(ctx, opts.interval); err != nil {
 		return err
 	}
 	fmt.Println("drumdrop daemon: stopped cleanly.")
 	return nil
+}
+
+// daemonOpts holds the parsed daemon flags.
+type daemonOpts struct {
+	interval      time.Duration
+	once          bool
+	out           string
+	quality       string
+	resourcesOnly bool
+}
+
+// parseDaemonArgs parses the daemon flags from argv, honoring flags placed after
+// positionals (via splitArgs) and resolving --interval to a validated positive
+// duration. It is extracted from cmdDaemon so the daemon test can exercise the
+// exact production parser rather than a re-implementation.
+func parseDaemonArgs(argv []string) (daemonOpts, error) {
+	fs := flag.NewFlagSet("drumdrop daemon", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	interval := fs.String("interval", "12h", "re-check interval (Go duration, e.g. 6h, 30m)")
+	once := fs.Bool("once", false, "run one plan+drain cycle then exit")
+	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
+	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
+	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")
+
+	_, flags := splitArgs(argv)
+	if err := fs.Parse(flags); err != nil {
+		return daemonOpts{}, err
+	}
+	dur, err := parseInterval(*interval)
+	if err != nil {
+		return daemonOpts{}, err
+	}
+	return daemonOpts{
+		interval:      dur,
+		once:          *once,
+		out:           *out,
+		quality:       *quality,
+		resourcesOnly: *resourcesOnly,
+	}, nil
 }
 
 // parseInterval parses the --interval flag as a Go duration and rejects
