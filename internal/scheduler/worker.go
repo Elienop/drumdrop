@@ -168,7 +168,10 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			if err := w.Store.MarkJobRunning(ctx, job.ID); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ job %d: re-mark running failed: %v\n", job.ID, err)
 			}
-			w.sleepFor(w.backoff(attempt - 1))
+			// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
+			// last entry for any further retries. See the doc comment: Backoff[i]
+			// is the delay before attempt i+2.
+			w.sleepFor(w.backoff(attempt - 2))
 		}
 
 		if err := w.Store.MarkDownloading(ctx, id); err != nil {

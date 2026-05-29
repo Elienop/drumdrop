@@ -308,8 +308,9 @@ func TestWorkerFailTwiceThenSucceed(t *testing.T) {
 	if got := store.jobs[1].Attempts; got != 3 {
 		t.Errorf("attempts = %d, want 3", got)
 	}
-	// Two sleeps, following backoff(attempt-1): backoff(1)=30s, backoff(2)=2m.
-	wantSleeps := []time.Duration{30 * time.Second, 2 * time.Minute}
+	// Two sleeps, following backoff(attempt-2): backoff(0)=5s, backoff(1)=30s.
+	// (The 2m third entry is only reached if MaxAttempts is raised above 3.)
+	wantSleeps := []time.Duration{5 * time.Second, 30 * time.Second}
 	if !reflect.DeepEqual(sleeper.durations, wantSleeps) {
 		t.Errorf("sleeps = %v, want %v", sleeper.durations, wantSleeps)
 	}
