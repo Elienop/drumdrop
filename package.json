@@ -8,7 +8,9 @@
     "musora-dl": "src/cli.mjs"
   },
   "scripts": {
-    "start": "node src/cli.mjs"
+    "start": "node src/cli.mjs",
+    "test": "node --test",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=20"
