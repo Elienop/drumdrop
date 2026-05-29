@@ -36,17 +36,26 @@ func YtDlpArgs(hls, quality, outTemplate string) []string {
 	}
 }
 
-var reUnsafe = regexp.MustCompile(`[/\\:*?"<>|\x00-\x1f]`)
+var (
+	// Node's sanitizeName removes control chars (\p{Cc}) entirely...
+	reControl = regexp.MustCompile(`[\x00-\x1f\x7f-\x9f]`)
+	// ...then replaces these filesystem-unsafe chars with '-'.
+	reUnsafe = regexp.MustCompile(`[/\\:*?"<>|]`)
+)
 
+// Sanitize mirrors src/util.mjs:sanitizeName: strip control chars, replace
+// unsafe chars with '-', collapse whitespace, trim trailing dots/spaces,
+// fall back to "untitled", then rune-safely cap at 150 chars and trim again.
 func Sanitize(name string) string {
-	s := reUnsafe.ReplaceAllString(name, "-")
+	s := reControl.ReplaceAllString(name, "")
+	s = reUnsafe.ReplaceAllString(s, "-")
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.TrimRight(s, ". ")
 	if s == "" {
-		return "untitled"
+		s = "untitled"
 	}
-	if len(s) > 150 {
-		s = s[:150]
+	if r := []rune(s); len(r) > 150 {
+		s = strings.TrimSpace(string(r[:150]))
 	}
 	return s
 }
@@ -101,7 +110,12 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 	}
 	for _, r := range l.Resources {
 		if r.URL != "" {
-			_ = fetchToFile(r.URL, filepath.Join(dir, "resources", Sanitize(r.Name)))
+			// Node: sanitizeName(r.resource_name || r.resource_url.split('/').pop())
+			name := r.Name
+			if name == "" {
+				name = urlBasename(r.URL)
+			}
+			_ = fetchToFile(r.URL, filepath.Join(dir, "resources", Sanitize(name)))
 		}
 	}
 	mp3s := map[string]string{
@@ -115,10 +129,20 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 			_ = fetchToFile(u, filepath.Join(dir, "play-along", name))
 		}
 	}
-	for i, a := range l.Assignments {
-		if a.SheetMusicImageURL != "" {
-			_ = fetchToFile(a.SheetMusicImageURL, filepath.Join(dir, "sheet-music", fmt.Sprintf("%02d - %s", i+1, Sanitize(a.Title))))
+	sheetNo := 0
+	for _, a := range l.Assignments {
+		if a.SheetMusicImageURL == "" {
+			continue
 		}
+		sheetNo++
+		// Node: ext = url.split('?')[0].split('.').pop() (|| 'png'), .slice(0,4)
+		ext := sheetExt(a.SheetMusicImageURL)
+		title := a.Title
+		if title == "" {
+			title = "assignment"
+		}
+		name := fmt.Sprintf("%02d - %s.%s", sheetNo, Sanitize(title), ext)
+		_ = fetchToFile(a.SheetMusicImageURL, filepath.Join(dir, "sheet-music", name))
 	}
 	return os.WriteFile(filepath.Join(dir, base+".nfo"), []byte(BuildNFO(l)), 0o644)
 }
@@ -130,4 +154,34 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// urlBasename mirrors Node's url.split('/').pop(): the last '/'-delimited
+// segment of the raw URL string (query string included, as in the reference).
+func urlBasename(u string) string {
+	if i := strings.LastIndex(u, "/"); i >= 0 {
+		return u[i+1:]
+	}
+	return u
+}
+
+// sheetExt mirrors Node's (url.split('?')[0].split('.').pop() || 'png').slice(0,4):
+// drop the query, take the segment after the last '.', default to "png" when
+// empty, then cap at 4 chars.
+func sheetExt(u string) string {
+	path := u
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	ext := path
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		ext = path[i+1:]
+	}
+	if ext == "" {
+		ext = "png"
+	}
+	if r := []rune(ext); len(r) > 4 {
+		ext = string(r[:4])
+	}
+	return ext
 }
