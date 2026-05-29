@@ -27,3 +27,20 @@ test('pad2 zero-pads single digits', () => {
   assert.equal(pad2(1), '01');
   assert.equal(pad2(12), '12');
 });
+
+import { extractId } from '../src/util.mjs';
+
+test('extractId parses a bare numeric id', () => {
+  assert.equal(extractId('409918'), 409918);
+});
+
+test('extractId takes the last numeric segment of a Musora URL', () => {
+  assert.equal(
+    extractId('https://app.musora.com/drumeo/lessons/course/409875/409918'),
+    409918
+  );
+});
+
+test('extractId returns null when there is no number', () => {
+  assert.equal(extractId('nope'), null);
+});

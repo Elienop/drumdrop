@@ -2,7 +2,7 @@
 import { join } from 'node:path';
 import { resolveLessonIds } from './catalog.mjs';
 import { resolveLesson, downloadLesson } from './lesson.mjs';
-import { ensureDir, err, log, pad2, sanitizeName, warn } from './util.mjs';
+import { ensureDir, err, extractId, log, pad2, sanitizeName, warn } from './util.mjs';
 
 const HELP = `drumdrop — download a Drumeo/Musora lesson or whole course (personal archival)
 
@@ -47,13 +47,6 @@ function parseArgs(argv) {
     else args._.push(a);
   }
   return args;
-}
-
-// Accept a bare numeric id or a Musora URL; take the last numeric path segment.
-function extractId(input) {
-  if (/^\d+$/.test(input)) return Number(input);
-  const nums = (String(input).match(/\d+/g) || []).map(Number);
-  return nums.length ? nums[nums.length - 1] : null;
 }
 
 async function main() {
