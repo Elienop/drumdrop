@@ -20,6 +20,19 @@ app (web UI, job queue, scheduler, auto-sync) built around this engine.
 - Go ≥ 1.26 (only to build from source; the release is a single static binary)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and `ffmpeg` on `PATH`
 
+## Environment
+
+All configuration is read from the environment at call time. Everything is optional —
+the defaults give a working setup with no env at all.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DRUMDROP_CONFIG_DIR` | `~/.config/drumdrop` | Directory for all at-rest state: `drumdrop.db` (follow/download state), `secret.key` (credential-encryption key), `credentials.enc` (encrypted login), `session.cookie` (saved session). Override to relocate the whole config directory. |
+| `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. |
+| `DRUMDROP_PERMISSION_IDS` | `92` | Comma-separated permission ids substituted into the catalog/resolve GROQ queries; gates which content is resolvable. Malformed values fall back to the default. |
+| `MUSORA_EMAIL` | _(none)_ | Login email for non-interactive `login` (skips the prompt). |
+| `MUSORA_PASSWORD` | _(none)_ | Login password for non-interactive `login` (skips the prompt). |
+
 ## Usage
 
 ```bash

@@ -10,3 +10,11 @@ docs/superpowers/
 /drumdrop
 /dist/
 *.test
+
+# At-rest state files, in case DRUMDROP_CONFIG_DIR points into the repo
+*.db
+*.db-wal
+*.db-shm
+secret.key
+credentials.enc
+session.cookie

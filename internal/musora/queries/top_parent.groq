@@ -1,3 +1,4 @@
+// The embedded sample railcontent_id (the first id filter) is a PLACEHOLDER, rewritten at runtime by WithID (first id filter only); ApplyPermissions also rewrites any 92 permission list, though this query carries none.
 *[railcontent_id == 409918]{
       'top_parent': coalesce(parent_content_reference[1]->railcontent_id, parent_content_reference[0]->railcontent_id, railcontent_id),
     }

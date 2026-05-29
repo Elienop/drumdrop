@@ -1,3 +1,4 @@
+// The embedded sample railcontent_id (the first id filter) and the 92 permission list are PLACEHOLDERS, rewritten at runtime by WithID (first id filter only) and ApplyPermissions.
 *[railcontent_id == 409918 && status in ['scheduled','published','unlisted'] && !defined(deprecated_railcontent_id) &&  (membership_tier in ['plus','basic'] || ((!defined(permission_v2) || count(permission_v2) == 0) || array::intersects(permission_v2, [92]))  )]{
         'sanity_id' : _id,'id': railcontent_id,'artist_name': coalesce(artist->name, instructor[0]->name),'artist': select(
           defined(artist) => artist->{ 'name': name, 'slug': slug.current, 'thumbnail': thumbnail_url.asset->url},

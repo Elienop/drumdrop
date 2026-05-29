@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Enforce Conventional Commits on the commit SUBJECT line (first real line).
-# Mirrors the type list/style of .git/hooks/pre-push so local commits and the
-# CI "Conventional title" check stay in sync.
+# Mirrors the type list/style of scripts/hooks/pre-push (the authoritative hook
+# via core.hooksPath) so local commits and the CI "Conventional title" check stay
+# in sync.
 # Bypass once with:  git commit --no-verify
 set -uo pipefail
 
