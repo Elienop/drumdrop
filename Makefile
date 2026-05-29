@@ -1,5 +1,6 @@
-.PHONY: build test vet lint run
+.PHONY: build test vet lint run hooks
 build: ; go build -o dist/drumdrop ./cmd/drumdrop
 test:  ; go test ./...
 vet:   ; go vet ./...
 run:   ; go run ./cmd/drumdrop
+hooks: ; git config core.hooksPath scripts/hooks && echo "✓ git hooks enabled (scripts/hooks): commit-msg + pre-push"

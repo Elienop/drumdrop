@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Verify the PR title is Conventional Commits BEFORE pushing, so the CI
+# "Conventional title" check (pr-title.yml) never fails by surprise.
+#   - If a PR already exists for this branch: validate its title; block the push if non-conventional.
+#   - If no PR yet: warn that the title (GitHub defaults to the branch name) must be conventional.
+# Bypass once with:  git push --no-verify
+set -uo pipefail
+
+TYPES='feat|fix|chore|docs|refactor|perf|test|build|ci|style|revert'
+CONV="^(${TYPES})(\([^)]+\))?!?: .+"
+branch="$(git symbolic-ref --short HEAD 2>/dev/null || echo '')"
+
+is_conv() { printf '%s' "$1" | grep -Eq "$CONV"; }
+
+if command -v gh >/dev/null 2>&1 && [ -n "$branch" ]; then
+  title="$(gh pr view "$branch" --json title -q .title 2>/dev/null || true)"
+  if [ -n "$title" ]; then
+    if is_conv "$title"; then
+      echo "pre-push ✓ PR title is conventional: \"$title\""
+    else
+      echo "pre-push ✖ PR title is NOT Conventional Commits: \"$title\"" >&2
+      echo "  CI 'Conventional title' will fail. Fix it first:" >&2
+      echo "    gh pr edit \"$branch\" --title \"feat: ...\"" >&2
+      echo "  Allowed types: ${TYPES//|/ }" >&2
+      echo "  (push anyway: git push --no-verify)" >&2
+      exit 1
+    fi
+  else
+    subject="$(git log -1 --pretty=%s 2>/dev/null || echo '')"
+    if ! is_conv "$subject"; then
+      echo "pre-push ⚠ No PR yet — when you open it, set a Conventional title" >&2
+      echo "  (GitHub defaults the title to the branch name, which fails CI)." >&2
+      echo "  e.g.  gh pr create --title \"feat: ...\"   (latest commit: \"$subject\")" >&2
+    fi
+  fi
+fi
+exit 0

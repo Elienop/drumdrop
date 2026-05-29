@@ -82,6 +82,19 @@ drumdrop sync --dry-run                 # record what would be downloaded, downl
 | `--dry-run` | Expand + record in the database, download nothing |
 | `--resources-only` | Skip video; fetch only resources |
 
+## Development
+
+Git hooks live in `scripts/hooks/` (tracked) and enforce [Conventional Commits](https://www.conventionalcommits.org/). Enable them once per clone:
+
+```bash
+make hooks   # git config core.hooksPath scripts/hooks
+```
+
+- **`commit-msg`** rejects a non-conventional commit subject before the commit is created.
+- **`pre-push`** checks the PR title matches the convention (the CI "Conventional title" check) before pushing.
+
+Both use the same rule: `type(scope)!: description` with types `feat fix chore docs refactor perf test build ci style revert`. Bypass once with `git commit --no-verify` / `git push --no-verify`.
+
 ## How it works
 
 1. **Catalog** — Musora content lives in Sanity CMS as a tree keyed by numeric
