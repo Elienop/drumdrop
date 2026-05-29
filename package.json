@@ -8,9 +8,15 @@
     "musora-dl": "src/cli.mjs"
   },
   "scripts": {
-    "start": "node src/cli.mjs"
+    "start": "node src/cli.mjs",
+    "test": "node --test",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "eslint": "^9.39.4"
   }
 }

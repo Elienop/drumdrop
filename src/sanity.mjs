@@ -36,16 +36,26 @@ export function withId(template, id) {
   return template.replace(/railcontent_id\s*==\s*\d+/, `railcontent_id == ${id}`);
 }
 
+// Default permission id observed in captured queries; override via env.
+const PERMISSION_IDS = (process.env.DRUMDROP_PERMISSION_IDS || '92')
+  .split(',').map((s) => s.trim()).filter(Boolean).join(', ');
+
+// Rewrite the captured `array::intersects(..., [92])` literals to the configured ids.
+export function applyPermissions(query) {
+  return query.replace(/(array::intersects\([^,]+,\s*)\[[\d,\s]*\]/g, `$1[${PERMISSION_IDS}]`);
+}
+
 export async function groq(query) {
+  const q = applyPermissions(query);
   let res;
-  if (query.length <= GET_MAX) {
-    const url = `${SANITY_BASE}?perspective=published&query=${encodeURIComponent(query)}`;
+  if (q.length <= GET_MAX) {
+    const url = `${SANITY_BASE}?perspective=published&query=${encodeURIComponent(q)}`;
     res = await fetch(url, { headers: REQ_HEADERS });
   } else {
     res = await fetch(`${SANITY_BASE}?perspective=published`, {
       method: 'POST',
       headers: { ...REQ_HEADERS, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query: q }),
     });
   }
   if (!res.ok) {
