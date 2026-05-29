@@ -11,19 +11,26 @@ resources (charts, play-along stems, sheet music), and a Plex/Jellyfin-ready `.n
 
 ## Status
 
-Proof-of-concept **core engine** (the catalog → resolve → download pipeline), validated
-end-to-end on real content. The roadmap is a Youtarr-style self-hosted app (web UI, job
-queue, scheduler, auto-sync) built around this engine.
+A pure-Go CLI built around a validated **core engine** (the catalog → resolve → download
+pipeline), proven end-to-end on real content. The roadmap is a Youtarr-style self-hosted
+app (web UI, job queue, scheduler, auto-sync) built around this engine.
 
 ## Requirements
 
-- Node.js ≥ 20 (uses built-in `fetch`)
+- Go ≥ 1.26 (only to build from source; the release is a single static binary)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and `ffmpeg` on `PATH`
 
 ## Usage
 
 ```bash
-node src/cli.mjs <lessonOrCourseId | musoraUrl> [options]
+go run ./cmd/drumdrop <lessonOrCourseId | musoraUrl> [options]
+```
+
+Or build a binary once and run it directly:
+
+```bash
+go build -o dist/drumdrop ./cmd/drumdrop   # or: make build
+drumdrop <lessonOrCourseId | musoraUrl> [options]
 ```
 
 | Option | Description |
@@ -36,18 +43,26 @@ node src/cli.mjs <lessonOrCourseId | musoraUrl> [options]
 | `--dry-run` | List what would be downloaded, download nothing |
 
 ```bash
-node src/cli.mjs 409918                 # a single lesson
-node src/cli.mjs 409875                 # a whole course (all its lessons)
-node src/cli.mjs 409875 --dry-run       # preview the course tree
+drumdrop 409918                 # a single lesson
+drumdrop 409875                 # a whole course (all its lessons)
+drumdrop 409875 --dry-run       # preview the course tree
+```
+
+### Account
+
+```bash
+drumdrop login                  # log in (prompts, or set MUSORA_EMAIL/MUSORA_PASSWORD)
+drumdrop whoami                 # show the logged-in account
+drumdrop logout                 # clear saved session + credentials
 ```
 
 ## How it works
 
 1. **Catalog** — Musora content lives in Sanity CMS as a tree keyed by numeric
    `railcontent_id`. The engine walks the subtree under a given node to enumerate leaf
-   lessons (`src/catalog.mjs`).
+   lessons (`internal/musora`).
 2. **Resolve** — one GROQ query per lesson returns the playable HLS manifest URL plus
-   metadata and resource links (`src/lesson.mjs`, `queries/`).
+   metadata and resource links (`internal/musora`, embedded `internal/musora/queries/`).
 3. **Download** — `yt-dlp` pulls the manifest (best quality + subtitles); resources,
    play-along stems, sheet music, and a poster are fetched alongside; an `.nfo` is
    written for media servers.
