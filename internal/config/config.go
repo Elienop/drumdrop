@@ -17,3 +17,6 @@ func ConfigDir() string {
 func SecretKeyPath() string { return filepath.Join(ConfigDir(), "secret.key") }
 func CredsPath() string     { return filepath.Join(ConfigDir(), "credentials.enc") }
 func CookiePath() string    { return filepath.Join(ConfigDir(), "session.cookie") }
+
+// DBPath is the path to the SQLite database file.
+func DBPath() string { return filepath.Join(ConfigDir(), "drumdrop.db") }
