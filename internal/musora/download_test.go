@@ -30,6 +30,141 @@ func TestYtDlpArgs(t *testing.T) {
 	}
 }
 
+// The end-of-options token "--" must appear immediately before the URL so a URL
+// beginning with a dash cannot be parsed as a yt-dlp option.
+func TestYtDlpArgsEndOfOptionsBeforeURL(t *testing.T) {
+	const hls = "-evil://m3u8"
+	args := YtDlpArgs(hls, "720", "/out/%(ext)s")
+	if len(args) < 2 {
+		t.Fatalf("args too short: %v", args)
+	}
+	if args[len(args)-1] != hls {
+		t.Fatalf("URL must be the final arg: got %q, want %q", args[len(args)-1], hls)
+	}
+	if args[len(args)-2] != "--" {
+		t.Fatalf("expected %q immediately before URL, got %q (args: %v)", "--", args[len(args)-2], args)
+	}
+	// "--" must appear exactly once and only as the penultimate arg.
+	for i := 0; i < len(args)-2; i++ {
+		if args[i] == "--" {
+			t.Fatalf("stray %q token at index %d: %v", "--", i, args)
+		}
+	}
+}
+
+// A non-http(s) HLS URL must be rejected before yt-dlp is ever invoked.
+func TestDownloadLessonRejectsNonHTTPHLS(t *testing.T) {
+	for _, bad := range []string{"-evil://m3u8", "file:///etc/passwd", "ftp://x/y.m3u8", "javascript:alert(1)"} {
+		l := &Lesson{ID: 7, Title: "Bad", Video: Video{HLSManifestURL: bad}}
+		err := DownloadLesson(l, DownloadOpts{Dir: t.TempDir(), Index: 1})
+		if err == nil {
+			t.Fatalf("DownloadLesson accepted non-http(s) HLS URL %q, want error", bad)
+		}
+		if !strings.Contains(err.Error(), bad) {
+			t.Errorf("error for %q should mention the URL: %v", bad, err)
+		}
+	}
+}
+
+// fetchAuxArtifacts must surface a failing fetch as an auxFailure while still
+// attempting (and succeeding at) the other artifacts.
+func TestFetchAuxArtifactsSurfacesFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "broken") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	l := &Lesson{
+		ID:        1,
+		Title:     "My Lesson",
+		Thumbnail: srv.URL + "/thumb.jpg",
+		Resources: []Resource{
+			{Name: "Good", URL: srv.URL + "/good.pdf"},
+			{Name: "Broken", URL: srv.URL + "/broken.pdf"}, // 404 -> failure
+		},
+	}
+
+	dir := t.TempDir()
+	base := "01 - My Lesson"
+	if err := os.MkdirAll(filepath.Join(dir, base), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failures := fetchAuxArtifacts(l, filepath.Join(dir, base), base)
+
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want exactly 1", failures)
+	}
+	f := failures[0]
+	if f.Artifact != "resource" {
+		t.Errorf("failure artifact = %q, want %q", f.Artifact, "resource")
+	}
+	if f.URL != srv.URL+"/broken.pdf" {
+		t.Errorf("failure URL = %q, want %q", f.URL, srv.URL+"/broken.pdf")
+	}
+	if f.Err == nil {
+		t.Error("failure Err is nil")
+	}
+	// The good artifacts must still have been written despite the failing one.
+	for _, p := range []string{
+		filepath.Join(dir, base, base+"-poster.jpg"),
+		filepath.Join(dir, base, "resources", "Good"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected good artifact missing: %s (%v)", p, err)
+		}
+	}
+	// The broken resource must not have left a file behind.
+	if _, err := os.Stat(filepath.Join(dir, base, "resources", "Broken")); err == nil {
+		t.Error("broken resource should not have produced a file")
+	}
+}
+
+// Even when an aux fetch fails, DownloadLesson (video disabled) must succeed and
+// still produce the completed layout (NFO + the artifacts that did fetch).
+func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "broken") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	l := &Lesson{
+		ID:        2,
+		Title:     "Mostly OK",
+		Thumbnail: srv.URL + "/thumb.jpg",
+		Resources: []Resource{
+			{Name: "Good", URL: srv.URL + "/good.pdf"},
+			{Name: "Broken", URL: srv.URL + "/broken.pdf"}, // 500 -> failure, non-fatal
+		},
+	}
+
+	dir := t.TempDir()
+	if err := DownloadLesson(l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
+		t.Fatalf("DownloadLesson must not fail on aux fetch failure: %v", err)
+	}
+
+	base := "04 - Mostly OK"
+	lessonDir := filepath.Join(dir, base)
+	for _, p := range []string{
+		filepath.Join(lessonDir, base+".nfo"),        // completed layout written
+		filepath.Join(lessonDir, base+"-poster.jpg"), // good artifact fetched
+		filepath.Join(lessonDir, "resources", "Good"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected file missing after non-fatal aux failure: %s (%v)", p, err)
+		}
+	}
+}
+
 func TestSanitize(t *testing.T) {
 	if got := Sanitize("Rock/Roll: 1"); got != "Rock-Roll- 1" {
 		t.Fatalf("Sanitize = %q", got)

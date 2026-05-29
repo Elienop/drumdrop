@@ -22,7 +22,9 @@ func FormatSelector(quality string) string {
 	return "bv*+ba/b"
 }
 
-// YtDlpArgs builds the yt-dlp argv for a lesson's HLS manifest.
+// YtDlpArgs builds the yt-dlp argv for a lesson's HLS manifest. A literal
+// end-of-options token ("--") is inserted immediately before the URL so that
+// an HLS URL beginning with a dash cannot be parsed as a yt-dlp option.
 func YtDlpArgs(hls, quality, outTemplate string) []string {
 	return []string{
 		"--user-agent", browserUA,
@@ -32,6 +34,7 @@ func YtDlpArgs(hls, quality, outTemplate string) []string {
 		"--write-subs", "--sub-langs", "all",
 		"--no-warnings", "--newline",
 		"-o", outTemplate,
+		"--",
 		hls,
 	}
 }
@@ -90,23 +93,29 @@ type DownloadOpts struct {
 	ResourcesOnly bool
 }
 
-// DownloadLesson downloads video (yt-dlp) + resources/stems/sheet-music/poster + writes NFO.
-func DownloadLesson(l *Lesson, o DownloadOpts) error {
-	base := fmt.Sprintf("%02d - %s", o.Index, Sanitize(l.Title))
-	dir := filepath.Join(o.Dir, base)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	if !o.ResourcesOnly && l.Video.HLSManifestURL != "" {
-		args := YtDlpArgs(l.Video.HLSManifestURL, o.Quality, filepath.Join(dir, base+".%(ext)s"))
-		cmd := exec.Command("yt-dlp", args...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			return err
+// auxFailure records a single auxiliary artifact whose fetch failed. Auxiliary
+// fetches are best-effort: a failure is surfaced (logged) but never fatal, so a
+// permanently-missing resource can never trigger infinite lesson re-downloads.
+type auxFailure struct {
+	Artifact string
+	URL      string
+	Err      error
+}
+
+// fetchAuxArtifacts downloads every non-video artifact for a lesson (poster,
+// resources, mp3 play-along stems, sheet-music) into dir and returns the list
+// of (artifact, url, error) failures. It does not return early on failure: it
+// attempts all artifacts so a single bad URL never hides the rest.
+func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
+	var failures []auxFailure
+	record := func(artifact, url string, err error) {
+		if err != nil {
+			failures = append(failures, auxFailure{Artifact: artifact, URL: url, Err: err})
 		}
 	}
+
 	if thumb := firstNonEmpty(l.Thumbnail, l.Video.PosterImageURL); thumb != "" {
-		_ = fetchToFile(thumb, filepath.Join(dir, base+"-poster.jpg"))
+		record("poster", thumb, fetchToFile(thumb, filepath.Join(dir, base+"-poster.jpg")))
 	}
 	for _, r := range l.Resources {
 		if r.URL != "" {
@@ -115,7 +124,7 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 			if name == "" {
 				name = urlBasename(r.URL)
 			}
-			_ = fetchToFile(r.URL, filepath.Join(dir, "resources", Sanitize(name)))
+			record("resource", r.URL, fetchToFile(r.URL, filepath.Join(dir, "resources", Sanitize(name))))
 		}
 	}
 	mp3s := map[string]string{
@@ -126,7 +135,7 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 	}
 	for name, u := range mp3s {
 		if u != "" {
-			_ = fetchToFile(u, filepath.Join(dir, "play-along", name))
+			record("mp3", u, fetchToFile(u, filepath.Join(dir, "play-along", name)))
 		}
 	}
 	sheetNo := 0
@@ -142,7 +151,37 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 			title = "assignment"
 		}
 		name := fmt.Sprintf("%02d - %s.%s", sheetNo, Sanitize(title), ext)
-		_ = fetchToFile(a.SheetMusicImageURL, filepath.Join(dir, "sheet-music", name))
+		record("sheet-music", a.SheetMusicImageURL, fetchToFile(a.SheetMusicImageURL, filepath.Join(dir, "sheet-music", name)))
+	}
+	return failures
+}
+
+// DownloadLesson downloads video (yt-dlp) + resources/stems/sheet-music/poster + writes NFO.
+//
+// Only the yt-dlp video download is fatal: a non-nil return means the video
+// could not be fetched. Auxiliary-artifact failures are logged to os.Stderr but
+// never make DownloadLesson fail, so the lesson is not endlessly re-downloaded
+// over a permanently-missing resource.
+func DownloadLesson(l *Lesson, o DownloadOpts) error {
+	base := fmt.Sprintf("%02d - %s", o.Index, Sanitize(l.Title))
+	dir := filepath.Join(o.Dir, base)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if !o.ResourcesOnly && l.Video.HLSManifestURL != "" {
+		hls := l.Video.HLSManifestURL
+		if !strings.HasPrefix(hls, "http://") && !strings.HasPrefix(hls, "https://") {
+			return fmt.Errorf("refusing to invoke yt-dlp: HLS URL is not http(s): %q", hls)
+		}
+		args := YtDlpArgs(hls, o.Quality, filepath.Join(dir, base+".%(ext)s"))
+		cmd := exec.Command("yt-dlp", args...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	for _, f := range fetchAuxArtifacts(l, dir, base) {
+		fmt.Fprintf(os.Stderr, "drumdrop: lesson %d: failed to fetch %s %s: %v\n", l.ID, f.Artifact, f.URL, f.Err)
 	}
 	return os.WriteFile(filepath.Join(dir, base+".nfo"), []byte(BuildNFO(l)), 0o644)
 }
