@@ -25,9 +25,16 @@ Follows (incremental, deduped archival):
                                   flags: --brand (default drumeo), --quality (default best)
   drumdrop unfollow <followId>    stop following (id from 'drumdrop follows')
   drumdrop follows                list everything you follow
-  drumdrop sync [options]         download every not-yet-downloaded lesson under
-                                  each follow. Flags: --out (default ./downloads),
-                                  --quality, --limit N (cap new downloads), --dry-run,
+  drumdrop sync [options]         one-shot: download every not-yet-downloaded
+                                  lesson under each follow. Flags: --out (default
+                                  $DRUMDROP_DOWNLOADS_DIR or ./downloads),
+                                  --quality, --limit N (cap new downloads),
+                                  --dry-run, --resources-only
+  drumdrop daemon [options]       unattended auto-sync: periodically check every
+                                  follow for new lessons and download them, one at
+                                  a time, with retry. sync is the one-shot
+                                  equivalent. Flags: --interval (default 12h),
+                                  --once (one cycle then exit), --out, --quality,
                                   --resources-only
 
 Account:
@@ -42,6 +49,8 @@ Examples:
   drumdrop follow 409875          # track a course; new lessons sync later
   drumdrop follow @aaron-edgar    # track an instructor's lessons
   drumdrop sync --limit 5         # download up to 5 new lessons across all follows
+  drumdrop daemon                 # run unattended, auto-syncing every 12h
+  drumdrop daemon --once          # one plan+drain cycle then exit (cron-friendly)
 `
 
 func main() {
@@ -68,6 +77,8 @@ func main() {
 		exit(cmdFollows())
 	case "sync":
 		exit(cmdSync(args[1:]))
+	case "daemon":
+		exit(cmdDaemon(args[1:]))
 	default:
 		exit(cmdDownload(args))
 	}

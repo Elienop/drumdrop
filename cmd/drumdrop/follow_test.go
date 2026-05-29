@@ -4,38 +4,34 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"errors"
-	"flag"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/musora"
+	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
 // ---- flag handling -------------------------------------------------------
 
 // TestFollowFlagSplitting proves --brand is honored alongside the existing
-// value flags whether it appears before or after the positional target.
+// value flags whether it appears before or after the positional target. It
+// drives parseFollowArgs — the SAME parser cmdFollow runs — so a real parser
+// regression is caught.
 func TestFollowFlagSplitting(t *testing.T) {
 	if !valueFlags["--brand"] {
 		t.Fatal("--brand must be registered in valueFlags so its value is not orphaned")
 	}
 
 	parse := func(argv []string) (target, brand, quality, instructor string, err error) {
-		fs := flag.NewFlagSet("follow", flag.ContinueOnError)
-		b := fs.String("brand", "drumeo", "")
-		q := fs.String("quality", "best", "")
-		ins := fs.String("instructor", "", "")
-		positionals, flags := splitArgs(argv)
-		if err = fs.Parse(flags); err != nil {
-			return
+		args, err := parseFollowArgs(argv)
+		if err != nil {
+			return "", "", "", "", err
 		}
-		if len(positionals) > 0 {
-			target = positionals[0]
+		if len(args.positionals) > 0 {
+			target = args.positionals[0]
 		}
-		return target, *b, *q, *ins, nil
+		return target, args.brand, args.quality, args.instructor, nil
 	}
 
 	t.Run("brand value after target is kept", func(t *testing.T) {
@@ -65,136 +61,165 @@ func TestFollowFlagSplitting(t *testing.T) {
 	})
 }
 
-// ---- pure decision helper ------------------------------------------------
+// TestSchedulerConfigDefaults verifies the flag → scheduler.Config mapping:
+// an empty --out falls back to DownloadsDir() (env-driven), an empty --quality
+// stays empty (use each follow's saved quality), and --resources-only flows
+// through. The retry tunables come from DefaultConfig.
+func TestSchedulerConfigDefaults(t *testing.T) {
+	t.Setenv("DRUMDROP_DOWNLOADS_DIR", "/tmp/dd")
 
-func TestShouldDownload(t *testing.T) {
-	cases := []struct {
-		isDownloaded bool
-		dryRun       bool
-		want         bool
-	}{
-		{isDownloaded: false, dryRun: false, want: true}, // fresh, real run -> download
-		{isDownloaded: true, dryRun: false, want: false}, // already downloaded -> skip (dedup)
-		{isDownloaded: false, dryRun: true, want: false}, // dry-run -> never download
-		{isDownloaded: true, dryRun: true, want: false},  // both -> skip
+	cfg := schedulerConfig("", "", false)
+	if cfg.DownloadsDir != "/tmp/dd" {
+		t.Errorf("DownloadsDir = %q, want /tmp/dd (from env fallback)", cfg.DownloadsDir)
 	}
-	for _, c := range cases {
-		if got := shouldDownload(c.isDownloaded, c.dryRun); got != c.want {
-			t.Errorf("shouldDownload(downloaded=%v, dryRun=%v) = %v, want %v",
-				c.isDownloaded, c.dryRun, got, c.want)
+	if cfg.Quality != "" {
+		t.Errorf("Quality = %q, want empty", cfg.Quality)
+	}
+	if cfg.ResourcesOnly {
+		t.Error("ResourcesOnly = true, want false")
+	}
+	if cfg.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts = %d, want 3 (from DefaultConfig)", cfg.MaxAttempts)
+	}
+
+	cfg = schedulerConfig("/explicit/out", "best", true)
+	if cfg.DownloadsDir != "/explicit/out" {
+		t.Errorf("DownloadsDir = %q, want /explicit/out (--out wins over env)", cfg.DownloadsDir)
+	}
+	if cfg.Quality != "best" {
+		t.Errorf("Quality = %q, want best", cfg.Quality)
+	}
+	if !cfg.ResourcesOnly {
+		t.Error("ResourcesOnly = false, want true")
+	}
+}
+
+// ---- runSync via the scheduler -------------------------------------------
+//
+// The full behavioral guarantees (skip already-downloaded, dedupe active jobs,
+// retry/backoff, never-abort) are exercised in internal/scheduler's planner and
+// worker tests. These CLI tests prove that runSync wires the Planner + Worker
+// correctly: dry-run records but neither enqueues nor downloads, and a real run
+// plans then drains with --limit capping NEW downloads end to end.
+
+// cliStore is an in-memory scheduler.Store covering both the planner and worker
+// sides, just enough to drive runSync's plan-then-drain path with no database.
+type cliStore struct {
+	follows    []database.Follow
+	downloaded map[int]bool
+
+	upserts    []int
+	enqueued   []int
+	queue      []database.Job
+	jobs       map[int64]database.Job
+	markedDLed []int
+	touched    []int64
+	nextJobID  int64
+}
+
+func newCLIStore(follows []database.Follow) *cliStore {
+	return &cliStore{
+		follows:    follows,
+		downloaded: map[int]bool{},
+		jobs:       map[int64]database.Job{},
+	}
+}
+
+func (s *cliStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
+	return s.follows, nil
+}
+func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
+	s.upserts = append(s.upserts, id)
+	return nil
+}
+func (s *cliStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
+	return s.downloaded[id], nil
+}
+func (s *cliStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
+	for _, j := range s.jobs {
+		if j.RailcontentID == id && (j.Status == database.JobQueued || j.Status == database.JobRunning) {
+			return true, nil
 		}
 	}
+	return false, nil
 }
-
-// ---- fakes ---------------------------------------------------------------
-
-// fakeStore records the sync-relevant mutations and answers IsDownloaded from a
-// preset set, so runSync can be exercised with no real database.
-type fakeStore struct {
-	follows    []database.Follow
-	downloaded map[int]bool // ids already downloaded
-
-	upserts       []int
-	enqueued      []int
-	markedDLing   []int
-	markedDLed    []int
-	markedFailed  []int
-	markedSkipped []int
-	touched       []int64
-	jobsRun       int
-	jobsDone      int
-	jobsFailed    int
-	nextJobID     int64
+func (s *cliStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, error) {
+	s.nextJobID++
+	j := database.Job{ID: s.nextJobID, FollowID: followID, RailcontentID: id, Status: database.JobQueued}
+	s.queue = append(s.queue, j)
+	s.jobs[j.ID] = j
+	s.enqueued = append(s.enqueued, id)
+	return j.ID, nil
 }
-
-func (f *fakeStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
-	return f.follows, nil
-}
-func (f *fakeStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
-	f.upserts = append(f.upserts, id)
+func (s *cliStore) TouchLastSynced(ctx context.Context, id int64) error {
+	s.touched = append(s.touched, id)
 	return nil
 }
-func (f *fakeStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
-	return f.downloaded[id], nil
-}
-func (f *fakeStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, error) {
-	f.enqueued = append(f.enqueued, id)
-	f.nextJobID++
-	return f.nextJobID, nil
-}
-func (f *fakeStore) MarkJobRunning(ctx context.Context, id int64) error { f.jobsRun++; return nil }
-func (f *fakeStore) MarkJobDone(ctx context.Context, id int64) error    { f.jobsDone++; return nil }
-func (f *fakeStore) MarkJobFailed(ctx context.Context, id int64, msg string) error {
-	f.jobsFailed++
-	return nil
-}
-func (f *fakeStore) MarkDownloading(ctx context.Context, id int) error {
-	f.markedDLing = append(f.markedDLing, id)
-	return nil
-}
-func (f *fakeStore) MarkDownloaded(ctx context.Context, id int, q, dir, vp string, b int64) error {
-	f.markedDLed = append(f.markedDLed, id)
-	f.downloaded[id] = true
-	return nil
-}
-func (f *fakeStore) MarkFailed(ctx context.Context, id int, msg string) error {
-	f.markedFailed = append(f.markedFailed, id)
-	return nil
-}
-func (f *fakeStore) MarkSkipped(ctx context.Context, id int, reason string) error {
-	f.markedSkipped = append(f.markedSkipped, id)
-	return nil
-}
-func (f *fakeStore) TouchLastSynced(ctx context.Context, id int64) error {
-	f.touched = append(f.touched, id)
-	return nil
-}
-
-// fakeExpander returns a fixed id list per follow.
-type fakeExpander struct {
-	ids map[int64][]int // keyed by follow.ID
-	err error
-}
-
-func (e fakeExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
-	if e.err != nil {
-		return nil, e.err
+func (s *cliStore) ClaimNextJob(ctx context.Context) (database.Job, bool, error) {
+	if len(s.queue) == 0 {
+		return database.Job{}, false, nil
 	}
+	j := s.queue[0]
+	s.queue = s.queue[1:]
+	j.Status = database.JobRunning
+	j.Attempts++
+	s.jobs[j.ID] = j
+	return j, true, nil
+}
+func (s *cliStore) GetFollow(ctx context.Context, id int64) (database.Follow, error) {
+	for _, f := range s.follows {
+		if f.ID == id {
+			return f, nil
+		}
+	}
+	return database.Follow{}, sql.ErrNoRows
+}
+func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
+func (s *cliStore) MarkJobDone(ctx context.Context, id int64) error {
+	j := s.jobs[id]
+	j.Status = database.JobDone
+	s.jobs[id] = j
+	return nil
+}
+func (s *cliStore) MarkJobFailed(ctx context.Context, id int64, msg string) error {
+	j := s.jobs[id]
+	j.Status = database.JobFailed
+	s.jobs[id] = j
+	return nil
+}
+func (s *cliStore) MarkDownloading(ctx context.Context, id int) error { return nil }
+func (s *cliStore) MarkDownloaded(ctx context.Context, id int, q, dir, vp string, b int64) error {
+	s.markedDLed = append(s.markedDLed, id)
+	s.downloaded[id] = true
+	return nil
+}
+func (s *cliStore) MarkFailed(ctx context.Context, id int, msg string) error     { return nil }
+func (s *cliStore) MarkSkipped(ctx context.Context, id int, reason string) error { return nil }
+func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error)         { return 0, nil }
+
+// cliExpander returns a fixed id list per follow id.
+type cliExpander struct{ ids map[int64][]int }
+
+func (e cliExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
 	return e.ids[f.ID], nil
 }
 
-// fakeResolver returns a stub lesson for every id (or nil for ids in the
-// unresolvable set) without touching the network.
-type fakeResolver struct {
-	unresolvable map[int]bool
-	err          error
+// cliResolver returns a stub lesson for every id without touching the network.
+type cliResolver struct{}
+
+func (cliResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
+	return &musora.Lesson{ID: id, Title: "L"}, nil
 }
 
-func (r fakeResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	if r.unresolvable[id] {
-		return nil, nil
-	}
-	return &musora.Lesson{ID: id, Title: fmt.Sprintf("Lesson %d", id)}, nil
-}
+// cliDownloader records every download and never touches yt-dlp.
+type cliDownloader struct{ calls []int }
 
-// fakeDownloader records each download and never touches yt-dlp.
-type fakeDownloader struct {
-	calls   []int
-	failIDs map[int]bool
-}
-
-func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
+func (d *cliDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, l.ID)
-	if d.failIDs[l.ID] {
-		return errors.New("boom")
-	}
 	return nil
 }
 
-func nodeFollow(id int64, rc int) database.Follow {
+func cliNodeFollow(id int64, rc int) database.Follow {
 	return database.Follow{
 		ID:            id,
 		Kind:          "node",
@@ -205,76 +230,24 @@ func nodeFollow(id int64, rc int) database.Follow {
 	}
 }
 
-// ---- runSync behavior ----------------------------------------------------
-
-// TestSyncSkipsAlreadyDownloaded: an id already downloaded is never enqueued or
-// handed to the downloader, but it is still upserted (so its metadata refreshes)
-// and reported as skipped.
-func TestSyncSkipsAlreadyDownloaded(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100)},
-		downloaded: map[int]bool{11: true},
-	}
-	exp := fakeExpander{ids: map[int64][]int{1: {11, 12}}}
-	dl := &fakeDownloader{}
-	deps := syncDeps{store: store, expander: exp, resolver: fakeResolver{}, downloader: dl}
-
-	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x"}, &buf); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(store.upserts) != 2 {
-		t.Errorf("upserts = %v, want both ids upserted", store.upserts)
-	}
-	if len(dl.calls) != 1 || dl.calls[0] != 12 {
-		t.Errorf("downloaded = %v, want only [12] (11 was already downloaded)", dl.calls)
-	}
-	if !containsInt(store.markedDLed, 12) {
-		t.Errorf("MarkDownloaded ids = %v, want 12", store.markedDLed)
-	}
-	if !strings.Contains(buf.String(), "already downloaded 11") {
-		t.Errorf("output should log the skip; got:\n%s", buf.String())
-	}
+func newSyncHarness(store *cliStore, exp cliExpander, dl *cliDownloader) (*scheduler.Planner, *scheduler.Worker) {
+	planner := &scheduler.Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	cfg := scheduler.DefaultConfig()
+	cfg.DownloadsDir = "/tmp/x"
+	worker := scheduler.NewWorker(store, cliResolver{}, dl, cfg, "perm", nil)
+	return planner, worker
 }
 
-// TestSyncLimitCapsNewDownloads: --limit caps the number of NEW downloads across
-// the whole run, regardless of how many follows/ids remain.
-func TestSyncLimitCapsNewDownloads(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100), nodeFollow(2, 200)},
-		downloaded: map[int]bool{},
-	}
-	exp := fakeExpander{ids: map[int64][]int{
-		1: {11, 12, 13},
-		2: {21, 22},
-	}}
-	dl := &fakeDownloader{}
-	deps := syncDeps{store: store, expander: exp, resolver: fakeResolver{}, downloader: dl}
+// TestRunSyncDryRunDownloadsNothing: dry-run records every lesson but enqueues no
+// jobs, downloads nothing, marks nothing downloaded, and does not stamp follows.
+func TestRunSyncDryRunDownloadsNothing(t *testing.T) {
+	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
+	exp := cliExpander{ids: map[int64][]int{1: {11, 12, 13}}}
+	dl := &cliDownloader{}
+	planner, worker := newSyncHarness(store, exp, dl)
 
 	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x", limit: 2}, &buf); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(dl.calls) != 2 {
-		t.Errorf("downloaded %d lessons, want exactly 2 (the --limit cap); calls=%v", len(dl.calls), dl.calls)
-	}
-}
-
-// TestSyncDryRunDownloadsNothing: dry-run upserts every id but downloads none,
-// enqueues no jobs, and marks nothing downloaded.
-func TestSyncDryRunDownloadsNothing(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100)},
-		downloaded: map[int]bool{},
-	}
-	exp := fakeExpander{ids: map[int64][]int{1: {11, 12, 13}}}
-	dl := &fakeDownloader{}
-	deps := syncDeps{store: store, expander: exp, resolver: fakeResolver{}, downloader: dl}
-
-	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x", dryRun: true}, &buf); err != nil {
+	if err := runSync(context.Background(), planner, worker, true /* dryRun */, 0, &buf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -290,84 +263,41 @@ func TestSyncDryRunDownloadsNothing(t *testing.T) {
 	if len(store.markedDLed) != 0 {
 		t.Errorf("dry-run must mark nothing downloaded; markedDLed=%v", store.markedDLed)
 	}
+	if len(store.touched) != 0 {
+		t.Errorf("dry-run must not stamp last_synced; touched=%v", store.touched)
+	}
+	if !strings.Contains(buf.String(), "3 new lesson(s) would be queued") {
+		t.Errorf("dry-run summary should report the would-be count; got:\n%s", buf.String())
+	}
 }
 
-// TestSyncUnresolvableLessonSkippedNotAborting: a lesson that resolves to nil is
-// marked skipped (job failed) and the run continues to the next lesson.
-func TestSyncUnresolvableLessonSkippedNotAborting(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100)},
-		downloaded: map[int]bool{},
-	}
-	exp := fakeExpander{ids: map[int64][]int{1: {11, 12}}}
-	res := fakeResolver{unresolvable: map[int]bool{11: true}}
-	dl := &fakeDownloader{}
-	deps := syncDeps{store: store, expander: exp, resolver: res, downloader: dl}
+// TestRunSyncLimitCapsNewDownloads: --limit caps the number of NEW downloads
+// across the whole run, end to end through the Planner + Worker. Already
+// downloaded lessons are skipped (dedup) and never handed to the downloader.
+func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
+	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100), cliNodeFollow(2, 200)})
+	store.downloaded[11] = true // already downloaded → skipped, not re-downloaded
+	exp := cliExpander{ids: map[int64][]int{
+		1: {11, 12, 13},
+		2: {21, 22},
+	}}
+	dl := &cliDownloader{}
+	planner, worker := newSyncHarness(store, exp, dl)
 
 	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x"}, &buf); err != nil {
+	if err := runSync(context.Background(), planner, worker, false, 2 /* limit */, &buf); err != nil {
 		t.Fatal(err)
 	}
 
-	if !containsInt(store.markedSkipped, 11) {
-		t.Errorf("unresolvable lesson 11 should be marked skipped; markedSkipped=%v", store.markedSkipped)
+	if len(dl.calls) != 2 {
+		t.Errorf("downloaded %d lessons, want exactly 2 (the --limit cap); calls=%v", len(dl.calls), dl.calls)
 	}
-	if len(dl.calls) != 1 || dl.calls[0] != 12 {
-		t.Errorf("run should continue past the unresolvable lesson; downloaded=%v", dl.calls)
-	}
-	if store.jobsFailed == 0 {
-		t.Error("the unresolvable lesson's job should be marked failed")
-	}
-}
-
-// TestSyncDownloadFailureRecordedNotAborting: a download error marks the lesson
-// + job failed and the run continues.
-func TestSyncDownloadFailureRecordedNotAborting(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100)},
-		downloaded: map[int]bool{},
-	}
-	exp := fakeExpander{ids: map[int64][]int{1: {11, 12}}}
-	dl := &fakeDownloader{failIDs: map[int]bool{11: true}}
-	deps := syncDeps{store: store, expander: exp, resolver: fakeResolver{}, downloader: dl}
-
-	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x"}, &buf); err != nil {
-		t.Fatal(err)
-	}
-
-	if !containsInt(store.markedFailed, 11) {
-		t.Errorf("failed download 11 should be marked failed; markedFailed=%v", store.markedFailed)
-	}
-	if !containsInt(store.markedDLed, 12) {
-		t.Errorf("run should continue and download 12; markedDLed=%v", store.markedDLed)
-	}
-}
-
-// TestSyncTouchesEveryProcessedFollow: each follow that was successfully expanded
-// gets its last_synced stamped.
-func TestSyncTouchesEveryProcessedFollow(t *testing.T) {
-	store := &fakeStore{
-		follows:    []database.Follow{nodeFollow(1, 100), nodeFollow(2, 200)},
-		downloaded: map[int]bool{},
-	}
-	exp := fakeExpander{ids: map[int64][]int{1: {11}, 2: {21}}}
-	deps := syncDeps{store: store, expander: exp, resolver: fakeResolver{}, downloader: &fakeDownloader{}}
-
-	var buf bytes.Buffer
-	if err := runSync(context.Background(), deps, syncOpts{out: "/tmp/x"}, &buf); err != nil {
-		t.Fatal(err)
-	}
-	if len(store.touched) != 2 {
-		t.Errorf("both follows should be touched; touched=%v", store.touched)
-	}
-}
-
-func containsInt(xs []int, v int) bool {
-	for _, x := range xs {
-		if x == v {
-			return true
+	for _, id := range dl.calls {
+		if id == 11 {
+			t.Errorf("already-downloaded lesson 11 must not be downloaded; calls=%v", dl.calls)
 		}
 	}
-	return false
+	if !strings.Contains(buf.String(), "Sync complete") {
+		t.Errorf("real run should print a completion summary; got:\n%s", buf.String())
+	}
 }

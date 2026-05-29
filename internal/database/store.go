@@ -24,12 +24,6 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB exposes the underlying handle for read-only helpers and tests. Callers must
-// not use it to bypass withTx for mutations.
-func (s *Store) DB() *sql.DB {
-	return s.db
-}
-
 // withTx runs fn inside a single transaction. The transaction is rolled back if
 // fn returns an error (or panics, via the deferred Rollback) and committed only
 // when fn returns nil. This is the one place mutations are allowed to commit, so

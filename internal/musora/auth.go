@@ -71,7 +71,11 @@ func Login(email, password string) (cookie string, err error) {
 		User    map[string]any `json:"user"`
 		Message string         `json:"message"`
 	}
-	json.NewDecoder(resp.Body).Decode(&parsed)
+	// Surface a malformed 2xx body as a decode error rather than a confusing
+	// "login failed: 200": a decode failure means we cannot trust the response.
+	if decErr := json.NewDecoder(resp.Body).Decode(&parsed); decErr != nil && resp.StatusCode/100 == 2 {
+		return "", fmt.Errorf("login: decode response: %w", decErr)
+	}
 	if resp.StatusCode/100 != 2 || parsed.User == nil {
 		msg := parsed.Message
 		if msg == "" {
@@ -107,17 +111,4 @@ func Me(cookie string) (bool, error) {
 		return false, nil
 	}
 	return resp.StatusCode/100 == 2, nil
-}
-
-func EnsureSession() (string, error) {
-	if c := LoadCookie(); c != "" {
-		if ok, _ := Me(c); ok {
-			return c, nil
-		}
-	}
-	email, password, ok := LoadCreds()
-	if !ok {
-		return "", errors.New("not logged in — run `drumdrop login` first")
-	}
-	return Login(email, password)
 }

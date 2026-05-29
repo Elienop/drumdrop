@@ -1,3 +1,4 @@
+// The embedded sample railcontent_id (the first id filter) and the 92 permission list are PLACEHOLDERS, rewritten at runtime by WithID (first id filter only) and ApplyPermissions.
 *[railcontent_id == 409875]{ 
   railcontent_id,
   'metadata': { brand, 'type': _type, 'parent_id': coalesce(parent_content_reference[0]->railcontent_id, 0) }

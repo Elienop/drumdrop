@@ -2,18 +2,17 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/musora"
+	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
 // openStore prepares the config directory, opens the SQLite database with the
@@ -34,10 +33,20 @@ func openStore() (*database.Store, error) {
 	return database.NewStore(db), nil
 }
 
-// cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
-// (leading @slug, or --instructor slug). Both are idempotent: re-following an
-// already-followed target reports "already following" rather than erroring.
-func cmdFollow(argv []string) error {
+// followArgs holds the parsed positionals and flag values for the follow
+// command. Extracted so cmdFollow and its tests drive the same parser.
+type followArgs struct {
+	positionals []string
+	brand       string
+	quality     string
+	instructor  string
+}
+
+// parseFollowArgs splits argv into positionals and flags (so flags may appear
+// after the positional target — see splitArgs) and parses the follow flags. This
+// is the exact parse cmdFollow runs; tests call it so a parser regression is
+// caught against production code rather than a re-implementation.
+func parseFollowArgs(argv []string) (followArgs, error) {
 	fs := flag.NewFlagSet("drumdrop follow", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	brand := fs.String("brand", "drumeo", "musora brand (drumeo|pianote|guitareo|singeo|playbass)")
@@ -46,12 +55,29 @@ func cmdFollow(argv []string) error {
 
 	positionals, flags := splitArgs(argv)
 	if err := fs.Parse(flags); err != nil {
+		return followArgs{}, err
+	}
+	return followArgs{
+		positionals: positionals,
+		brand:       *brand,
+		quality:     *quality,
+		instructor:  *instructor,
+	}, nil
+}
+
+// cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
+// (leading @slug, or --instructor slug). Both are idempotent: re-following an
+// already-followed target reports "already following" rather than erroring.
+func cmdFollow(argv []string) error {
+	args, err := parseFollowArgs(argv)
+	if err != nil {
 		return err
 	}
+	positionals := args.positionals
 
 	// Determine the slug for an instructor follow: --instructor <slug> wins, else
 	// a leading @slug positional.
-	slug := *instructor
+	slug := args.instructor
 	if slug == "" && len(positionals) > 0 && strings.HasPrefix(positionals[0], "@") {
 		slug = strings.TrimPrefix(positionals[0], "@")
 	}
@@ -64,13 +90,13 @@ func cmdFollow(argv []string) error {
 	ctx := context.Background()
 
 	if slug != "" {
-		return followInstructor(ctx, store, slug, *brand, *quality)
+		return followInstructor(ctx, store, slug, args.brand, args.quality)
 	}
 
 	if len(positionals) == 0 {
 		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
 	}
-	return followNode(ctx, store, positionals[0], *brand, *quality)
+	return followNode(ctx, store, positionals[0], args.brand, args.quality)
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is
@@ -211,80 +237,15 @@ func lastSynced(f database.Follow) string {
 }
 
 // ---- sync ----------------------------------------------------------------
+//
+// sync is the one-shot equivalent of the daemon's per-cycle work: build a
+// scheduler Planner + Worker over the real store and adapters, plan once (record
+// + enqueue new lessons), then drain the queue once (download them, with retry).
+// The behavioral guarantees — skip already-downloaded, dedupe active jobs, cap
+// NEW downloads via --limit, never abort on one bad lesson, and dry-run records
+// but downloads nothing — live in and are tested by the scheduler package.
 
-// expander turns one follow into the ids of the lessons under it. Node follows
-// expand via the catalog walk; instructor follows via the instructor-lessons
-// query. Defined as an interface so sync is testable offline.
-type expander interface {
-	Expand(f database.Follow, permIDs string) (ids []int, err error)
-}
-
-// resolver fetches the full lesson metadata needed to download. A nil lesson
-// (with nil error) means the lesson could not be resolved (gated/missing) and
-// must be skipped, matching musora.ResolveLesson's contract.
-type resolver interface {
-	Resolve(id int, permIDs string) (*musora.Lesson, error)
-}
-
-// downloader performs the actual download of a resolved lesson.
-type downloader interface {
-	Download(l *musora.Lesson, o musora.DownloadOpts) error
-}
-
-// syncStore is the subset of the database Store that sync mutates. Declaring it
-// as an interface lets tests inject a fake with no real database.
-type syncStore interface {
-	ListFollows(ctx context.Context) ([]database.Follow, error)
-	UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error
-	IsDownloaded(ctx context.Context, id int) (bool, error)
-	EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error)
-	MarkJobRunning(ctx context.Context, id int64) error
-	MarkJobDone(ctx context.Context, id int64) error
-	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
-	MarkDownloading(ctx context.Context, id int) error
-	MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error
-	MarkFailed(ctx context.Context, id int, errMsg string) error
-	MarkSkipped(ctx context.Context, id int, reason string) error
-	TouchLastSynced(ctx context.Context, id int64) error
-}
-
-// syncDeps bundles everything runSync needs so the orchestration is decoupled
-// from the network and yt-dlp for testing.
-type syncDeps struct {
-	store      syncStore
-	expander   expander
-	resolver   resolver
-	downloader downloader
-	permIDs    string
-}
-
-// syncOpts holds the parsed sync flags.
-type syncOpts struct {
-	out           string
-	quality       string
-	limit         int // 0 = unlimited
-	dryRun        bool
-	resourcesOnly bool
-}
-
-// syncSummary accumulates per-run counts for the grand summary.
-type syncSummary struct {
-	follows  int
-	seen     int // lessons discovered (after dedup within a follow's expansion)
-	newDL    int // new downloads that succeeded
-	skipped  int // already-downloaded or could-not-resolve
-	failed   int // download attempts that errored
-	limitHit bool
-}
-
-// shouldDownload is the pure per-lesson decision: a lesson is downloaded only
-// when it is not already downloaded and we are not in dry-run mode. The
-// already-downloaded check is the dedup chokepoint; dry-run downloads nothing.
-func shouldDownload(isDownloaded, dryRun bool) bool {
-	return !isDownloaded && !dryRun
-}
-
-// realExpander adapts the musora package to the expander interface.
+// realExpander adapts the musora package to scheduler.Expander.
 type realExpander struct{}
 
 func (realExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
@@ -313,25 +274,50 @@ func (realExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
 	}
 }
 
-// realResolver adapts musora.ResolveLesson.
+// realResolver adapts musora.ResolveLesson to scheduler.Resolver.
 type realResolver struct{}
 
 func (realResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 	return musora.ResolveLesson(id, permIDs)
 }
 
-// realDownloader adapts musora.DownloadLesson.
+// realDownloader adapts musora.DownloadLesson to scheduler.Downloader.
 type realDownloader struct{}
 
 func (realDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
 	return musora.DownloadLesson(l, o)
 }
 
-// cmdSync parses the sync flags, wires the real dependencies, and runs sync.
+// Compile-time assertions that the real adapters satisfy the scheduler
+// interfaces. They wrap the same musora calls the engine has always used.
+var (
+	_ scheduler.Expander   = realExpander{}
+	_ scheduler.Resolver   = realResolver{}
+	_ scheduler.Downloader = realDownloader{}
+)
+
+// schedulerConfig builds a scheduler.Config from the shared download flags. An
+// empty out falls back to config.DownloadsDir() (the DRUMDROP_DOWNLOADS_DIR env
+// or ./downloads); an empty quality means "use each follow's saved quality".
+func schedulerConfig(out, quality string, resourcesOnly bool) scheduler.Config {
+	cfg := scheduler.DefaultConfig()
+	cfg.DownloadsDir = out
+	if cfg.DownloadsDir == "" {
+		cfg.DownloadsDir = config.DownloadsDir()
+	}
+	cfg.Quality = quality
+	cfg.ResourcesOnly = resourcesOnly
+	return cfg
+}
+
+// cmdSync parses the sync flags, builds a scheduler Planner + Worker over the
+// real store and adapters, and runs one plan+drain cycle (the daemon's per-cycle
+// work, one-shot). --dry-run records what would be downloaded but enqueues and
+// downloads nothing; otherwise --limit caps the number of NEW downloads.
 func cmdSync(argv []string) error {
 	fs := flag.NewFlagSet("drumdrop sync", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	out := fs.String("out", "./downloads", "output directory")
+	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
 	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
 	limit := fs.Int("limit", 0, "cap NEW downloads this run (0 = unlimited)")
 	dryRun := fs.Bool("dry-run", false, "expand + record, download nothing")
@@ -348,188 +334,42 @@ func cmdSync(argv []string) error {
 	}
 	defer store.Close()
 
-	deps := syncDeps{
-		store:      store,
-		expander:   realExpander{},
-		resolver:   realResolver{},
-		downloader: realDownloader{},
-		permIDs:    permissionIDs(),
+	cfg := schedulerConfig(*out, *quality, *resourcesOnly)
+	permIDs := permissionIDs()
+	planner := &scheduler.Planner{
+		Store:    store,
+		Expander: realExpander{},
+		PermIDs:  permIDs,
+		Log:      os.Stdout,
 	}
-	opts := syncOpts{
-		out:           *out,
-		quality:       *quality,
-		limit:         *limit,
-		dryRun:        *dryRun,
-		resourcesOnly: *resourcesOnly,
-	}
-	return runSync(context.Background(), deps, opts, os.Stdout)
+	worker := scheduler.NewWorker(store, realResolver{}, realDownloader{}, cfg, permIDs, os.Stdout)
+
+	return runSync(context.Background(), planner, worker, *dryRun, *limit, os.Stdout)
 }
 
-// runSync is the orchestration core, decoupled from process state so tests can
-// drive it with fakes. For each follow it expands to lesson ids, upserts each
-// (never downgrading an already-downloaded lesson), skips downloaded ones, and
-// — unless dry-run — resolves + downloads up to --limit NEW lessons. One bad
-// lesson never aborts the run. Each follow is stamped via TouchLastSynced.
-func runSync(ctx context.Context, deps syncDeps, opts syncOpts, w io.Writer) error {
-	follows, err := deps.store.ListFollows(ctx)
-	if err != nil {
-		return err
-	}
-	if len(follows) == 0 {
-		fmt.Fprintln(w, "No follows to sync. Add one with `drumdrop follow …`.")
+// runSync executes one sync cycle, decoupled from flag parsing so tests can drive
+// it with fakes. Dry-run reports what would be downloaded but enqueues and
+// downloads nothing (a queued job would otherwise be drained later by a daemon).
+// A real run plans (records + enqueues new lessons, deduped) then drains the
+// queue, downloading up to limit NEW lessons.
+func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.Worker, dryRun bool, limit int, w io.Writer) error {
+	if dryRun {
+		enqueued, err := planner.PlanDryRun(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "\n[dry-run] %d new lesson(s) would be queued; downloaded nothing\n", enqueued)
 		return nil
 	}
 
-	var sum syncSummary
-	sum.follows = len(follows)
-
-	for _, f := range follows {
-		fmt.Fprintf(w, "\n▶ follow #%d %s %s%s\n", f.ID, f.Kind, followTarget(f), titleSuffix(f.Title))
-
-		ids, err := deps.expander.Expand(f, deps.permIDs)
-		if err != nil {
-			fmt.Fprintf(w, "  ⚠ expand failed: %v\n", err)
-			// Still touch last-synced? No — expansion failure means we did not
-			// process this follow; leave its timestamp so it retries next run.
-			continue
-		}
-
-		folderTitle := f.Title
-		if folderTitle == "" {
-			folderTitle = followTarget(f)
-		}
-		outDir := filepath.Join(opts.out, musora.Sanitize(folderTitle))
-
-		quality := opts.quality
-		if quality == "" {
-			quality = f.Quality
-		}
-
-		var parent sql.NullInt64
-		if f.Kind == "node" && f.RailcontentID.Valid {
-			parent = f.RailcontentID
-		}
-
-		fNew, fSkip, fFail := 0, 0, 0
-		for i, id := range ids {
-			sum.seen++
-
-			if err := deps.store.UpsertLesson(ctx, id, "", parent, f.Brand); err != nil {
-				fmt.Fprintf(w, "  ✖ upsert lesson %d: %v\n", id, err)
-				fFail++
-				sum.failed++
-				continue
-			}
-
-			done, err := deps.store.IsDownloaded(ctx, id)
-			if err != nil {
-				fmt.Fprintf(w, "  ✖ check lesson %d: %v\n", id, err)
-				fFail++
-				sum.failed++
-				continue
-			}
-			if done {
-				fmt.Fprintf(w, "  ↳ already downloaded %d\n", id)
-				fSkip++
-				sum.skipped++
-				continue
-			}
-
-			if !shouldDownload(done, opts.dryRun) {
-				// dry-run: recorded via upsert, downloaded nothing.
-				fmt.Fprintf(w, "  · [dry-run] would download %d\n", id)
-				fNew++ // would-be new download
-				continue
-			}
-
-			// Respect --limit on NEW downloads across the whole run.
-			if opts.limit > 0 && sum.newDL >= opts.limit {
-				sum.limitHit = true
-				fmt.Fprintf(w, "  ⏸ limit %d reached; stopping\n", opts.limit)
-				break
-			}
-
-			if downloadOne(ctx, deps, f, id, i+1, outDir, quality, opts.resourcesOnly, w) {
-				fNew++
-				sum.newDL++
-			} else {
-				fFail++
-				sum.failed++
-			}
-		}
-
-		if err := deps.store.TouchLastSynced(ctx, f.ID); err != nil {
-			fmt.Fprintf(w, "  ⚠ touch last_synced: %v\n", err)
-		}
-		fmt.Fprintf(w, "  follow #%d: new %d, skipped %d, failed %d\n", f.ID, fNew, fSkip, fFail)
-
-		if sum.limitHit {
-			break
-		}
-	}
-
-	fmt.Fprintf(w, "\nSync complete — follows %d, seen %d, new %d, skipped %d, failed %d\n",
-		sum.follows, sum.seen, sum.newDL, sum.skipped, sum.failed)
-	return nil
-}
-
-// downloadOne runs the full enqueue→resolve→download→mark pipeline for a single
-// lesson and reports whether it counts as a new successful download. It never
-// returns an error: a failure is recorded on the lesson + job and logged, so the
-// caller can keep going.
-func downloadOne(
-	ctx context.Context, deps syncDeps, f database.Follow,
-	id, index int, outDir, quality string, resourcesOnly bool, w io.Writer,
-) (ok bool) {
-	jobID, err := deps.store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id)
+	planned, err := planner.Plan(ctx, limit)
 	if err != nil {
-		fmt.Fprintf(w, "  ✖ enqueue %d: %v\n", id, err)
-		return false
+		return err
 	}
-	if err := deps.store.MarkJobRunning(ctx, jobID); err != nil {
-		fmt.Fprintf(w, "  ✖ start job for %d: %v\n", id, err)
-		return false
+	processed, err := worker.RunOnce(ctx, limit)
+	if err != nil {
+		return err
 	}
-
-	lesson, err := deps.resolver.Resolve(id, deps.permIDs)
-	if err != nil || lesson == nil {
-		reason := "could not resolve (gated or missing)"
-		if err != nil {
-			reason = err.Error()
-		}
-		fmt.Fprintf(w, "  ↳ skipping %d: %s\n", id, reason)
-		_ = deps.store.MarkSkipped(ctx, id, reason)
-		_ = deps.store.MarkJobFailed(ctx, jobID, reason)
-		return false
-	}
-
-	if err := deps.store.MarkDownloading(ctx, id); err != nil {
-		fmt.Fprintf(w, "  ✖ mark downloading %d: %v\n", id, err)
-		_ = deps.store.MarkJobFailed(ctx, jobID, err.Error())
-		return false
-	}
-
-	fmt.Fprintf(w, "  ▼ [%02d] %d %s\n", index, id, lesson.Title)
-	dlErr := deps.downloader.Download(lesson, musora.DownloadOpts{
-		Dir:           outDir,
-		Index:         index,
-		Quality:       quality,
-		ResourcesOnly: resourcesOnly,
-	})
-	if dlErr != nil {
-		fmt.Fprintf(w, "  ✖ download %d failed: %v\n", id, dlErr)
-		_ = deps.store.MarkFailed(ctx, id, dlErr.Error())
-		_ = deps.store.MarkJobFailed(ctx, jobID, dlErr.Error())
-		return false
-	}
-
-	lessonDir := filepath.Join(outDir, fmt.Sprintf("%02d - %s", index, musora.Sanitize(lesson.Title)))
-	if err := deps.store.MarkDownloaded(ctx, id, quality, lessonDir, "", 0); err != nil {
-		fmt.Fprintf(w, "  ⚠ mark downloaded %d: %v\n", id, err)
-	}
-	if err := deps.store.MarkJobDone(ctx, jobID); err != nil {
-		fmt.Fprintf(w, "  ⚠ mark job done for %d: %v\n", id, err)
-	}
-	fmt.Fprintf(w, "  ✓ %d\n", id)
-	return true
+	fmt.Fprintf(w, "\nSync complete — queued %d, downloaded %d\n", planned, processed)
+	return nil
 }

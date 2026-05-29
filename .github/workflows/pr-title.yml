@@ -1,36 +1,68 @@
 name: PR Title
 
-# Lints the PR title against Conventional Commits (reused from the SpenDrop/
-# MusicDrop project convention). Keeps history and any future release tooling
-# honest: feat -> minor, fix -> patch, breaking change -> major.
+# Keeps the PR title Conventional Commits — but SELF-HEALS instead of just
+# failing. GitHub pre-fills a new PR's title with the branch name (e.g.
+# "Scheduler"), which is not "type: description", so a strict check fails on
+# every creation. Here, when the title is not conventional, it is rewritten to
+# the PR's first conventional commit subject (every commit is conventional via
+# the repo's commit-msg hook) and the check passes. A title that is already
+# conventional is left untouched; it only fails if no conventional commit exists
+# to derive a title from.
+#
+# The squash-merge commit uses the PR title, so keeping it conventional keeps
+# main's history (and any release tooling) honest. The regex below is the SAME
+# one used by scripts/hooks/{commit-msg,pre-push} — one source of truth.
 
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  contents: read
+  pull-requests: write
 
 jobs:
   conventional-title:
     name: Conventional title
     runs-on: ubuntu-latest
     steps:
-      - name: Lint PR title
-        uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825 # v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout (full history to read PR commits)
+        uses: actions/checkout@v4
         with:
-          types: |
-            feat
-            fix
-            chore
-            docs
-            refactor
-            perf
-            test
-            build
-            ci
-            style
-            revert
-          requireScope: false
+          fetch-depth: 0
+
+      - name: Ensure a Conventional Commits PR title (auto-fix from first commit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          TYPES='feat|fix|chore|docs|refactor|perf|test|build|ci|style|revert'
+          CONV="^(${TYPES})(\([^)]+\))?!?: .+"
+
+          title="$(gh pr view "$PR" --json title --jq .title)"
+          if printf '%s' "$title" | grep -Eq "$CONV"; then
+            echo "PR title is conventional: $title"
+            exit 0
+          fi
+
+          echo "PR title is not Conventional Commits: \"$title\""
+          echo "Deriving one from the PR's first conventional commit…"
+
+          derived=""
+          while IFS= read -r subject; do
+            if printf '%s' "$subject" | grep -Eq "$CONV"; then
+              derived="$subject"
+              break
+            fi
+          done < <(git log --reverse --format=%s "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -z "$derived" ]; then
+            echo "::error::No conventional commit found to derive a PR title from. Set a Conventional Commits title, e.g. 'feat: …'. Allowed types: ${TYPES//|/ }"
+            exit 1
+          fi
+
+          gh pr edit "$PR" --title "$derived"
+          echo "PR title was not conventional; set it to the first commit: \"$derived\""

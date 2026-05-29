@@ -20,3 +20,14 @@ func CookiePath() string    { return filepath.Join(ConfigDir(), "session.cookie"
 
 // DBPath is the path to the SQLite database file.
 func DBPath() string { return filepath.Join(ConfigDir(), "drumdrop.db") }
+
+// DownloadsDir is the root directory under which the daemon writes downloads.
+// It is resolved at call time so it can be overridden via DRUMDROP_DOWNLOADS_DIR;
+// when unset it defaults to ./downloads (relative to the process working dir).
+// sync --out still overrides this per run.
+func DownloadsDir() string {
+	if d := os.Getenv("DRUMDROP_DOWNLOADS_DIR"); d != "" {
+		return d
+	}
+	return "./downloads"
+}

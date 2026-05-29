@@ -1,1 +1,2 @@
+// The slug/brand sentinels and the 92 permission list are PLACEHOLDERS, rewritten at runtime by buildInstructorQuery and ApplyPermissions (WithID substitutes only the first railcontent_id filter, which this query has none of).
 *[references(*[_type=='instructor' && slug.current=='$SLUG$'][0]._id) && brand=='$BRAND$' && status=='published' && defined(video.external_id) && ((!defined(permission_v2) || count(permission_v2)==0) || array::intersects(permission_v2,[92]))]{ 'id': railcontent_id, 'type': _type, title } | order(published_on desc)

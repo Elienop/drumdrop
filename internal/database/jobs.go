@@ -76,6 +76,141 @@ func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcont
 	return id, nil
 }
 
+// ClaimNextJob atomically takes the oldest queued job and marks it running. In
+// a single transaction it selects the lowest-id job in status='queued', stamps
+// started_at, increments attempts (so a fresh claim records attempt #1), and
+// re-reads the row to return its post-update state. The bool is false when the
+// queue holds no queued job (sql.ErrNoRows), in which case the returned Job is
+// the zero value and err is nil.
+//
+// Select-then-update inside one tx makes the claim atomic, and the
+// running-transition UPDATE is itself guarded by `status = JobQueued`: if a
+// concurrent worker has already moved the row out of 'queued' since this tx
+// selected it, the UPDATE touches zero rows. That lost race is treated as a
+// no-claim (ok=false, nil) rather than a half-claimed job, so adding a worker
+// pool later cannot let two workers both believe they claimed the same job.
+// With SetMaxOpenConns(1) only one worker runs at a time today, so the guard is
+// dormant; it exists so the same query stays correct under future concurrency.
+func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
+	var claimed Job
+	var ok bool
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		j, err := scanJob(tx.QueryRowContext(ctx,
+			`SELECT `+jobColumns+` FROM jobs WHERE status = ? ORDER BY id LIMIT 1`,
+			JobQueued,
+		))
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil // queue empty: ok stays false
+			}
+			return fmt.Errorf("select next queued job: %w", err)
+		}
+
+		n, err := markRunningTx(ctx, tx, j.ID, JobQueued)
+		if err != nil {
+			return fmt.Errorf("claim job %d: %w", j.ID, err)
+		}
+		if n != 1 {
+			// Lost race: another worker moved this row out of 'queued'
+			// between our SELECT and UPDATE. Leave ok=false so the caller
+			// treats it as "nothing claimed" rather than half-claiming a row
+			// that is now owned by someone else.
+			return nil
+		}
+
+		// Re-read inside the same tx so the returned row reflects the new
+		// status, attempts, and started_at exactly as persisted.
+		claimed, err = scanJob(tx.QueryRowContext(ctx,
+			`SELECT `+jobColumns+` FROM jobs WHERE id = ?`, j.ID,
+		))
+		if err != nil {
+			return fmt.Errorf("re-read claimed job %d: %w", j.ID, err)
+		}
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return Job{}, false, err
+	}
+	return claimed, ok, nil
+}
+
+// markRunningTx applies the running-transition UPDATE for job id inside tx:
+// status -> 'running', started_at -> CURRENT_TIMESTAMP, attempts incremented. It
+// returns the number of rows affected (1 on success, 0 when no row matched) so
+// callers can detect a lost claim race or an unknown id. This is the single
+// place the running transition lives; ClaimNextJob and MarkJobRunning both go
+// through it.
+//
+// guardStatus narrows the WHERE clause: a non-empty value requires the row to
+// still be in that status for the UPDATE to fire (ClaimNextJob passes JobQueued
+// so a row another worker already moved out of 'queued' is left untouched). An
+// empty guardStatus matches the row by id alone, which is what MarkJobRunning
+// needs to re-stamp an already-running job on a retry.
+func markRunningTx(ctx context.Context, tx *sql.Tx, id int64, guardStatus string) (int64, error) {
+	const setClause = `UPDATE jobs
+		    SET status = ?,
+		        started_at = CURRENT_TIMESTAMP,
+		        attempts = attempts + 1
+		  WHERE id = ?`
+
+	var (
+		res sql.Result
+		err error
+	)
+	if guardStatus == "" {
+		res, err = tx.ExecContext(ctx, setClause, JobRunning, id)
+	} else {
+		res, err = tx.ExecContext(ctx, setClause+` AND status = ?`, JobRunning, id, guardStatus)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RequeueStaleRunning moves every job stuck in status='running' back to
+// 'queued' and clears its started_at, returning how many rows it touched. The
+// daemon calls this once at startup to recover jobs orphaned mid-download by a
+// crash or kill, so they are retried rather than lost.
+func (s *Store) RequeueStaleRunning(ctx context.Context) (int, error) {
+	var n int
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE jobs SET status = ?, started_at = NULL WHERE status = ?`,
+			JobQueued, JobRunning,
+		)
+		if err != nil {
+			return fmt.Errorf("requeue stale running jobs: %w", err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected requeuing stale jobs: %w", err)
+		}
+		n = int(affected)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// ActiveJobExists reports whether any job for the given lesson is still queued
+// or running. The planner uses it to avoid enqueuing a duplicate job for a
+// lesson that already has work outstanding.
+func (s *Store) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM jobs WHERE railcontent_id = ? AND status IN (?, ?)`,
+		railcontentID, JobQueued, JobRunning,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("count active jobs for lesson %d: %w", railcontentID, err)
+	}
+	return count > 0, nil
+}
+
 // ListQueued returns every job still in status='queued', oldest first (by id),
 // so the scheduler processes them in enqueue order.
 func (s *Store) ListQueued(ctx context.Context) ([]Job, error) {
@@ -114,22 +249,28 @@ func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	return j, nil
 }
 
-// MarkJobRunning transitions a job to status='running', stamps started_at with
-// CURRENT_TIMESTAMP, and increments attempts. Incrementing here (rather than at
-// enqueue) means attempts counts actual run starts, so a retried job records
-// each attempt. It returns an error if no job row matched.
+// MarkJobRunning re-stamps an already-claimed job for a retry: status='running',
+// started_at=CURRENT_TIMESTAMP, attempts incremented. The FIRST attempts
+// increment is performed by ClaimNextJob when the job is taken off the queue
+// (attempts 0 -> 1); MarkJobRunning is only called for subsequent retries, so in
+// the production flow it runs against an already-running job and pushes attempts
+// to 2 or higher. It returns an error if no job row matched.
 //
-// The "Job" suffix disambiguates from the lessons store's status mutators
+// It shares markRunningTx with ClaimNextJob but passes an empty guard so the
+// re-stamp matches by id alone, independent of the job's current status. The
+// "Job" suffix disambiguates from the lessons store's status mutators
 // (MarkDownloading/MarkFailed/…), which share the same *Store receiver.
 func (s *Store) MarkJobRunning(ctx context.Context, id int64) error {
-	return s.updateJob(ctx,
-		`UPDATE jobs
-		    SET status = ?,
-		        started_at = CURRENT_TIMESTAMP,
-		        attempts = attempts + 1
-		  WHERE id = ?`,
-		JobRunning, id,
-	)
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		n, err := markRunningTx(ctx, tx, id, "")
+		if err != nil {
+			return fmt.Errorf("mark job %d running: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("no job matched the status update")
+		}
+		return nil
+	})
 }
 
 // MarkJobDone transitions a job to status='done' and stamps finished_at. It

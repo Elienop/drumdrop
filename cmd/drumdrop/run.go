@@ -42,11 +42,13 @@ var valueFlags = map[string]bool{
 	"--limit":      true,
 	"--brand":      true,
 	"--instructor": true,
+	"--interval":   true,
 	"-out":         true,
 	"-quality":     true,
 	"-limit":       true,
 	"-brand":       true,
 	"-instructor":  true,
+	"-interval":    true,
 }
 
 // splitArgs separates positional arguments from flag tokens, preserving order
@@ -69,8 +71,23 @@ func splitArgs(argv []string) (positionals, flags []string) {
 	return positionals, flags
 }
 
-// cmdDownload resolves a lesson or course and downloads each lesson.
-func cmdDownload(argv []string) error {
+// downloadArgs holds the parsed positionals and flag values for the download
+// command. Extracted so cmdDownload and its tests drive the same parser.
+type downloadArgs struct {
+	positionals   []string
+	out           string
+	quality       string
+	limit         int
+	whole         bool
+	resourcesOnly bool
+	dryRun        bool
+}
+
+// parseDownloadArgs splits argv into positionals and flags (so flags may appear
+// after the positional id — see splitArgs) and parses the download flags. This
+// is the exact parse cmdDownload runs; tests call it so a parser regression is
+// caught against production code rather than a re-implementation.
+func parseDownloadArgs(argv []string) (downloadArgs, error) {
 	fs := flag.NewFlagSet("drumdrop", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	out := fs.String("out", "./downloads", "output directory")
@@ -84,11 +101,35 @@ func cmdDownload(argv []string) error {
 	// placed after the positional id (e.g. `drumdrop 409875 --dry-run`) is honored.
 	positionals, flags := splitArgs(argv)
 	if err := fs.Parse(flags); err != nil {
-		return err
+		return downloadArgs{}, err
 	}
 	// splitArgs routes every non-flag token into positionals and passes only
 	// flags to fs.Parse, so fs.Args() is always empty here.
-	rest := positionals
+	return downloadArgs{
+		positionals:   positionals,
+		out:           *out,
+		quality:       *quality,
+		limit:         *limit,
+		whole:         *whole,
+		resourcesOnly: *resourcesOnly,
+		dryRun:        *dryRun,
+	}, nil
+}
+
+// cmdDownload resolves a lesson or course and downloads each lesson.
+func cmdDownload(argv []string) error {
+	args, err := parseDownloadArgs(argv)
+	if err != nil {
+		return err
+	}
+	out := &args.out
+	quality := &args.quality
+	limit := &args.limit
+	whole := &args.whole
+	resourcesOnly := &args.resourcesOnly
+	dryRun := &args.dryRun
+
+	rest := args.positionals
 	if len(rest) == 0 {
 		fmt.Print(usage)
 		os.Exit(1)

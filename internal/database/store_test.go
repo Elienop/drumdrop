@@ -21,7 +21,7 @@ func newTestStore(t *testing.T) *Store {
 func countFollows(t *testing.T, s *Store) int {
 	t.Helper()
 	var n int
-	if err := s.DB().QueryRow("SELECT count(*) FROM follows").Scan(&n); err != nil {
+	if err := s.rawDB().QueryRow("SELECT count(*) FROM follows").Scan(&n); err != nil {
 		t.Fatalf("count follows: %v", err)
 	}
 	return n
@@ -84,7 +84,7 @@ func TestStoreClose(t *testing.T) {
 	}
 
 	// After Close the handle is unusable; a query should fail rather than panic.
-	if err := s.DB().Ping(); err == nil {
+	if err := s.rawDB().Ping(); err == nil {
 		t.Error("Ping after Close succeeded, want error")
 	}
 }
