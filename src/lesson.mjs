@@ -18,7 +18,7 @@ export async function resolveLesson(id) {
   return result?.[0] ?? null;
 }
 
-function formatSelector(quality) {
+export function formatSelector(quality) {
   if (!quality || quality === 'best') return 'bv*+ba/b';
   const h = parseInt(quality, 10);
   if (!Number.isFinite(h)) return 'bv*+ba/b';
