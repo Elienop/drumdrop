@@ -19,6 +19,17 @@ Options:
   --dry-run            list what would be downloaded, download nothing
   -h, --help           show this help
 
+Follows (incremental, deduped archival):
+  drumdrop follow <id|url>        follow a node (course/series/lesson)
+  drumdrop follow @<slug>         follow an instructor (or --instructor <slug>)
+                                  flags: --brand (default drumeo), --quality (default best)
+  drumdrop unfollow <followId>    stop following (id from 'drumdrop follows')
+  drumdrop follows                list everything you follow
+  drumdrop sync [options]         download every not-yet-downloaded lesson under
+                                  each follow. Flags: --out (default ./downloads),
+                                  --quality, --limit N (cap new downloads), --dry-run,
+                                  --resources-only
+
 Account:
   drumdrop login       log in (prompts, or set MUSORA_EMAIL/MUSORA_PASSWORD)
   drumdrop whoami      show the logged-in account
@@ -28,6 +39,9 @@ Examples:
   drumdrop 409918                 # one lesson
   drumdrop 409875                 # a whole course (all its lessons)
   drumdrop https://app.musora.com/drumeo/lessons/course/409875/409918 --whole-course
+  drumdrop follow 409875          # track a course; new lessons sync later
+  drumdrop follow @aaron-edgar    # track an instructor's lessons
+  drumdrop sync --limit 5         # download up to 5 new lessons across all follows
 `
 
 func main() {
@@ -46,6 +60,14 @@ func main() {
 		exit(cmdWhoami())
 	case "logout":
 		exit(cmdLogout())
+	case "follow":
+		exit(cmdFollow(args[1:]))
+	case "unfollow":
+		exit(cmdUnfollow(args[1:]))
+	case "follows":
+		exit(cmdFollows())
+	case "sync":
+		exit(cmdSync(args[1:]))
 	default:
 		exit(cmdDownload(args))
 	}

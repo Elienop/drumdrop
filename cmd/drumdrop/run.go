@@ -37,12 +37,16 @@ func permissionIDs() string { return os.Getenv("DRUMDROP_PERMISSION_IDS") }
 // (Go's flag.Parse stops at the first non-flag token; the Node reference loops
 // over all argv regardless of position — see src/cli.mjs parseArgs).
 var valueFlags = map[string]bool{
-	"--out":     true,
-	"--quality": true,
-	"--limit":   true,
-	"-out":      true,
-	"-quality":  true,
-	"-limit":    true,
+	"--out":        true,
+	"--quality":    true,
+	"--limit":      true,
+	"--brand":      true,
+	"--instructor": true,
+	"-out":         true,
+	"-quality":     true,
+	"-limit":       true,
+	"-brand":       true,
+	"-instructor":  true,
 }
 
 // splitArgs separates positional arguments from flag tokens, preserving order

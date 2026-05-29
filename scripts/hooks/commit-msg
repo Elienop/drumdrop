@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Enforce Conventional Commits on the commit SUBJECT line (first real line).
+# Mirrors the type list/style of .git/hooks/pre-push so local commits and the
+# CI "Conventional title" check stay in sync.
+# Bypass once with:  git commit --no-verify
+set -uo pipefail
+
+TYPES='feat|fix|chore|docs|refactor|perf|test|build|ci|style|revert'
+CONV="^(${TYPES})(\([^)]+\))?!?: .+"
+
+msg_file="${1:-}"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  echo "commit-msg ✖ no commit message file provided" >&2
+  exit 1
+fi
+
+# Find the SUBJECT: first line that is non-empty after trimming whitespace and
+# does not start with '#'. Skip leading blank/comment lines.
+subject=''
+while IFS= read -r line || [ -n "$line" ]; do
+  # Trim leading and trailing whitespace.
+  trimmed="${line#"${line%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  [ -z "$trimmed" ] && continue       # skip blank lines
+  case "$trimmed" in
+    '#'*) continue ;;                  # skip comment lines
+  esac
+  subject="$trimmed"
+  break
+done < "$msg_file"
+
+# Empty / all-comment message.
+if [ -z "$subject" ]; then
+  echo "commit-msg ✖ commit message is empty" >&2
+  echo "  Write a Conventional Commits subject, e.g.  feat: add new feature" >&2
+  echo "  (bypass once: git commit --no-verify)" >&2
+  exit 1
+fi
+
+# Skip mechanical / auto-generated commits that are reshaped or not author-written.
+case "$subject" in
+  'Merge '*|'Revert "'*|'fixup!'*|'squash!'*|'amend!'*)
+    echo "commit-msg ✓ skipped (mechanical/auto commit): \"$subject\"" >&2
+    exit 0
+    ;;
+esac
+
+# Validate against Conventional Commits.
+if printf '%s' "$subject" | grep -Eq "$CONV"; then
+  echo "commit-msg ✓ ok: \"$subject\"" >&2
+  exit 0
+fi
+
+# Mismatch: friendly, actionable error.
+{
+  echo "commit-msg ✖ subject is NOT Conventional Commits:"
+  echo "    \"$subject\""
+  echo
+  echo "  Required format:  type(scope)!: description"
+  echo "    - scope and '!' are optional; the colon MUST be followed by a space."
+  echo "  Allowed types: ${TYPES//|/ }"
+  echo
+  echo "  Example:  feat(parser): add ability to parse arrays"
+  echo
+  echo "  Bypass once with:  git commit --no-verify"
+} >&2
+exit 1
