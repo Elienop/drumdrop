@@ -39,7 +39,7 @@ func TestSanitize(t *testing.T) {
 	}
 }
 
-// Control chars are removed (matching Node's \p{Cc} -> ''), not replaced with '-'.
+// Control chars are removed (matching Node's \p{Cc} -> ”), not replaced with '-'.
 func TestSanitizeControlChars(t *testing.T) {
 	if got := Sanitize("Lesson\t"); got != "Lesson" {
 		t.Fatalf("control char: Sanitize = %q, want %q", got, "Lesson")
@@ -63,9 +63,9 @@ func TestSanitizeRuneSafeTruncation(t *testing.T) {
 
 func TestUrlBasename(t *testing.T) {
 	cases := map[string]string{
-		"https://cdn/x.pdf":           "x.pdf",
+		"https://cdn/x.pdf":            "x.pdf",
 		"https://cdn/dir/pack.zip?a=1": "pack.zip?a=1",
-		"noslash":                     "noslash",
+		"noslash":                      "noslash",
 	}
 	for in, want := range cases {
 		if got := urlBasename(in); got != want {
@@ -107,9 +107,9 @@ func TestDownloadLessonLayout(t *testing.T) {
 			{Name: "", URL: srv.URL + "/dir/pack.zip"}, // empty name -> URL basename
 		},
 		Assignments: []Assignment{
-			{Title: "No Sheet Here", SheetMusicImageURL: ""},        // skipped, must not shift numbering
+			{Title: "No Sheet Here", SheetMusicImageURL: ""}, // skipped, must not shift numbering
 			{Title: "Intro", SheetMusicImageURL: srv.URL + "/a.png?t=1"},
-			{Title: "", SheetMusicImageURL: srv.URL + "/b.jpeg"},    // empty title -> "assignment"
+			{Title: "", SheetMusicImageURL: srv.URL + "/b.jpeg"}, // empty title -> "assignment"
 		},
 		Mp3NoDrumsNoClick: srv.URL + "/m.mp3",
 	}

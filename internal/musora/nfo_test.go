@@ -10,7 +10,9 @@ func TestBuildNFO(t *testing.T) {
 		ID: 409918, Title: "Course Kick-Off", Description: "<p>Welcome &amp; enjoy</p>",
 		DifficultyString: "Intermediate", Brand: "drumeo", PublishedOn: "2024-06-11T15:00:00.000000Z",
 		LengthInSeconds: 90, Instructors: []Instructor{{Name: "El Estepario Siberiano"}},
-		ParentContentData: []struct{ Title string `json:"title"` }{{Title: "30-Day Independence"}},
+		ParentContentData: []struct {
+			Title string `json:"title"`
+		}{{Title: "30-Day Independence"}},
 	}
 	xml := BuildNFO(l)
 	for _, want := range []string{
