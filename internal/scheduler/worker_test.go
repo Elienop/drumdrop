@@ -252,6 +252,38 @@ func newTestWorker(store Store, res Resolver, dl Downloader, sleep func(time.Dur
 	return w
 }
 
+// TestNewWorkerClampsMaxAttempts verifies a non-positive MaxAttempts is clamped
+// to 1, so a zero-value Config still makes one real download attempt instead of
+// skipping the attempt loop entirely and marking every job failed without trying.
+func TestNewWorkerClampsMaxAttempts(t *testing.T) {
+	for _, in := range []int{0, -3} {
+		w := NewWorker(nil, nil, nil, Config{MaxAttempts: in}, "", nil)
+		if w.Cfg.MaxAttempts != 1 {
+			t.Errorf("NewWorker(MaxAttempts=%d) -> Cfg.MaxAttempts=%d, want 1", in, w.Cfg.MaxAttempts)
+		}
+	}
+
+	// Behavioral: a zero-value MaxAttempts still yields exactly one real attempt
+	// that completes the job (not an immediate no-attempt failure).
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+
+	w := NewWorker(store, res, dl, Config{MaxAttempts: 0, DownloadsDir: "/dl"}, "perm", nil)
+	w.sleep = (&recordingSleeper{}).sleep
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if len(dl.calls) != 1 {
+		t.Errorf("download calls = %d, want 1 (clamped to one attempt)", len(dl.calls))
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Errorf("job status = %q, want done", got)
+	}
+}
+
 func TestWorkerSuccessFirstTry(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
