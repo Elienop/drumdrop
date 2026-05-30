@@ -284,6 +284,37 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
 	return scanJobs(rows)
 }
 
+// CountJobsByState returns the number of jobs in each status, keyed by status.
+// Only statuses with at least one job appear in the map; a status with no rows
+// is absent rather than present with a zero count, so the caller fills in the
+// missing entries for the known enum set. An empty jobs table yields an empty
+// (non-nil) map.
+func (s *Store) CountJobsByState(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT status, count(*) FROM jobs GROUP BY status`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count jobs by state: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var (
+			status string
+			n      int
+		)
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan job state count: %w", err)
+		}
+		counts[status] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate job state counts: %w", err)
+	}
+	return counts, nil
+}
+
 // scanJobs drains a jobs *sql.Rows into a slice and closes it, so the listing
 // methods share one scan/iterate/close path.
 func scanJobs(rows *sql.Rows) ([]Job, error) {

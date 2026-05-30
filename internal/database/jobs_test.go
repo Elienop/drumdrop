@@ -841,3 +841,66 @@ func TestListQueuedOrderAndFilter(t *testing.T) {
 			queued[0].ID, queued[1].ID, first, third)
 	}
 }
+
+// TestCountJobsByState asserts the helper groups jobs by status and returns one
+// entry per present status with the correct count, omitting states with no rows
+// (the handler fills zeros for the known enum set).
+func TestCountJobsByState(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Enqueue three jobs (all queued), then move two to terminal states.
+	var ids []int64
+	for _, rc := range []int{101, 102, 103} {
+		id, err := s.EnqueueJob(ctx, sql.NullInt64{}, rc)
+		if err != nil {
+			t.Fatalf("EnqueueJob %d: %v", rc, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := s.MarkJobDone(ctx, ids[0]); err != nil {
+		t.Fatalf("MarkJobDone: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, ids[1], "boom"); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+
+	counts, err := s.CountJobsByState(ctx)
+	if err != nil {
+		t.Fatalf("CountJobsByState: %v", err)
+	}
+
+	want := map[string]int{
+		JobDone:   1,
+		JobFailed: 1,
+		JobQueued: 1,
+	}
+	if len(counts) != len(want) {
+		t.Fatalf("CountJobsByState returned %d states (%v), want %d", len(counts), counts, len(want))
+	}
+	for state, n := range want {
+		if counts[state] != n {
+			t.Errorf("count[%q] = %d, want %d", state, counts[state], n)
+		}
+	}
+	if _, ok := counts[JobRunning]; ok {
+		t.Errorf("count includes %q with no rows, want it omitted", JobRunning)
+	}
+}
+
+// TestCountJobsByStateEmpty asserts an empty jobs table yields an empty
+// (non-nil) map and no error.
+func TestCountJobsByStateEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	counts, err := s.CountJobsByState(context.Background())
+	if err != nil {
+		t.Fatalf("CountJobsByState: %v", err)
+	}
+	if counts == nil {
+		t.Fatal("CountJobsByState returned nil map, want empty non-nil map")
+	}
+	if len(counts) != 0 {
+		t.Errorf("CountJobsByState on empty table returned %v, want empty", counts)
+	}
+}

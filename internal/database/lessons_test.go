@@ -598,3 +598,66 @@ func idForStatus(status string) int {
 		return 0
 	}
 }
+
+// TestCountLessonsByStatus asserts the helper groups lessons by status and
+// returns one entry per present status with the correct count, and omits
+// statuses that have no rows (the handler fills zeros for the known enum set).
+func TestCountLessonsByStatus(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Two downloaded, one failed, one left pending. No downloading/skipped rows.
+	for _, id := range []int{1, 2, 3, 4} {
+		if err := s.UpsertLesson(ctx, id, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+			t.Fatalf("UpsertLesson %d: %v", id, err)
+		}
+	}
+	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 1); err != nil {
+		t.Fatalf("MarkDownloaded 1: %v", err)
+	}
+	if err := s.MarkDownloaded(ctx, 2, "best", "/d", "/d/v.mp4", 1); err != nil {
+		t.Fatalf("MarkDownloaded 2: %v", err)
+	}
+	if err := s.MarkFailed(ctx, 3, "boom"); err != nil {
+		t.Fatalf("MarkFailed 3: %v", err)
+	}
+
+	counts, err := s.CountLessonsByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountLessonsByStatus: %v", err)
+	}
+
+	want := map[string]int{
+		StatusDownloaded: 2,
+		StatusFailed:     1,
+		StatusPending:    1,
+	}
+	if len(counts) != len(want) {
+		t.Fatalf("CountLessonsByStatus returned %d statuses (%v), want %d", len(counts), counts, len(want))
+	}
+	for status, n := range want {
+		if counts[status] != n {
+			t.Errorf("count[%q] = %d, want %d", status, counts[status], n)
+		}
+	}
+	if _, ok := counts[StatusDownloading]; ok {
+		t.Errorf("count includes %q with no rows, want it omitted", StatusDownloading)
+	}
+}
+
+// TestCountLessonsByStatusEmpty asserts an empty lessons table yields an empty
+// (non-nil) map and no error.
+func TestCountLessonsByStatusEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	counts, err := s.CountLessonsByStatus(context.Background())
+	if err != nil {
+		t.Fatalf("CountLessonsByStatus: %v", err)
+	}
+	if counts == nil {
+		t.Fatal("CountLessonsByStatus returned nil map, want empty non-nil map")
+	}
+	if len(counts) != 0 {
+		t.Errorf("CountLessonsByStatus on empty table returned %v, want empty", counts)
+	}
+}

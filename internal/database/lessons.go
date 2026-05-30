@@ -238,6 +238,37 @@ func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, e
 	return scanLessons(rows)
 }
 
+// CountLessonsByStatus returns the number of lessons in each status, keyed by
+// status. Only statuses with at least one lesson appear in the map; a status
+// with no rows is absent rather than present with a zero count, so the caller
+// fills in the missing entries for the known enum set. An empty lessons table
+// yields an empty (non-nil) map.
+func (s *Store) CountLessonsByStatus(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT status, count(*) FROM lessons GROUP BY status`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count lessons by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var (
+			status string
+			n      int
+		)
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan lesson status count: %w", err)
+		}
+		counts[status] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate lesson status counts: %w", err)
+	}
+	return counts, nil
+}
+
 // scanLessons drains a lessons *sql.Rows into a slice and closes it, so the
 // listing methods share one scan/iterate/close path.
 func scanLessons(rows *sql.Rows) ([]Lesson, error) {
