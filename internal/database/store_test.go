@@ -70,6 +70,29 @@ func TestWithTxRollsBackOnError(t *testing.T) {
 	}
 }
 
+func TestStorePing(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping on open store: %v", err)
+	}
+}
+
+func TestStorePingAfterClose(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s := NewStore(db)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := s.Ping(context.Background()); err == nil {
+		t.Error("Ping after Close succeeded, want error")
+	}
+}
+
 func TestStoreClose(t *testing.T) {
 	// Open the DB directly (not via openMigrated, whose t.Cleanup would also
 	// Close it and turn this test's explicit Close into a double-close error).

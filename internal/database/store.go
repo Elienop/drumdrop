@@ -24,6 +24,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Ping verifies a live connection to the database, establishing one if needed.
+// It backs the server's /readyz readiness probe.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 // withTx runs fn inside a single transaction. The transaction is rolled back if
 // fn returns an error (or panics, via the deferred Rollback) and committed only
 // when fn returns nil. This is the one place mutations are allowed to commit, so
