@@ -1,6 +1,7 @@
 package musora
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,11 +89,81 @@ func fetchToFile(url, dest string) error {
 	return err
 }
 
+// DownloadProgress is a single yt-dlp progress observation for the active
+// video download. Total is 0 when yt-dlp does not yet know the size.
+type DownloadProgress struct {
+	Pct        float64
+	Downloaded int64
+	Total      int64
+	Speed      string
+}
+
 type DownloadOpts struct {
 	Dir           string
 	Index         int
 	Quality       string
 	ResourcesOnly bool
+	// OnProgress, when non-nil, receives a DownloadProgress for each yt-dlp
+	// progress line. When nil, yt-dlp's stdout goes straight to os.Stdout and
+	// no progress template is requested (exact pre-callback behaviour).
+	OnProgress func(DownloadProgress)
+}
+
+// progressSentinel prefixes the --progress-template output lines so the stdout
+// scanner can distinguish machine progress lines from yt-dlp's normal output.
+const progressSentinel = "DRUMDROP|"
+
+// progressArgs returns the extra yt-dlp args that emit machine-parsable
+// progress lines (one per render) prefixed with progressSentinel. The "download:"
+// scope restricts the custom template to download progress, leaving other
+// yt-dlp output formatting untouched.
+func progressArgs() []string {
+	return []string{
+		"--progress-template",
+		"download:" + progressSentinel + "%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s",
+	}
+}
+
+// parseProgressLine parses a single DRUMDROP-prefixed progress line into a
+// DownloadProgress. It reports ok=false for any line that is not a DRUMDROP
+// progress line. Fields that yt-dlp reports as "NA" (or are otherwise
+// unparsable as numbers) are left at their zero value.
+func parseProgressLine(line string) (DownloadProgress, bool) {
+	if !strings.HasPrefix(line, progressSentinel) {
+		return DownloadProgress{}, false
+	}
+	fields := strings.Split(strings.TrimPrefix(line, progressSentinel), "|")
+	if len(fields) != 4 {
+		return DownloadProgress{}, false
+	}
+	var p DownloadProgress
+	pctStr := strings.TrimSuffix(strings.TrimSpace(fields[0]), "%")
+	if v, err := strconv.ParseFloat(pctStr, 64); err == nil {
+		p.Pct = v
+	}
+	if v, err := strconv.ParseInt(strings.TrimSpace(fields[1]), 10, 64); err == nil {
+		p.Downloaded = v
+	}
+	if v, err := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64); err == nil {
+		p.Total = v
+	}
+	p.Speed = strings.TrimSpace(fields[3])
+	return p, true
+}
+
+// scanProgress reads yt-dlp stdout line-by-line: every line is mirrored to
+// os.Stdout (preserving the CLI's normal output) and any DRUMDROP progress line
+// is additionally parsed and delivered to onProgress.
+func scanProgress(r io.Reader, onProgress func(DownloadProgress)) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		fmt.Fprintln(os.Stdout, line)
+		if p, ok := parseProgressLine(line); ok {
+			onProgress(p)
+		}
+	}
 }
 
 // auxFailure records a single auxiliary artifact whose fetch failed. Auxiliary
@@ -176,10 +247,30 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 			return fmt.Errorf("refusing to invoke yt-dlp: HLS URL is not http(s): %q", hls)
 		}
 		args := YtDlpArgs(hls, o.Quality, filepath.Join(dir, base+".%(ext)s"))
+		if o.OnProgress != nil {
+			args = append(progressArgs(), args...)
+		}
 		cmd := exec.Command("yt-dlp", args...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			return err
+		cmd.Stderr = os.Stderr
+		if o.OnProgress != nil {
+			// Capture stdout so progress lines can be parsed; scanProgress still
+			// mirrors every line to os.Stdout, so the CLI output is preserved.
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				return err
+			}
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			scanProgress(stdout, o.OnProgress)
+			if err := cmd.Wait(); err != nil {
+				return err
+			}
+		} else {
+			cmd.Stdout = os.Stdout
+			if err := cmd.Run(); err != nil {
+				return err
+			}
 		}
 	}
 	for _, f := range fetchAuxArtifacts(l, dir, base) {
