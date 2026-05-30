@@ -1,4 +1,10 @@
 import "@testing-library/jest-dom/vitest"
+import { afterAll, afterEach, beforeAll } from "vitest"
+import { server } from "./msw"
+
+beforeAll(() => server.listen({ onUnhandledRequest: "error" }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
 
 // Node 26 exposes an experimental global `localStorage` that is `undefined`
 // (no `--localstorage-file`), shadowing jsdom's implementation. Install a
