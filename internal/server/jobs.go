@@ -49,6 +49,59 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobDTO(j))
 }
 
+// handleCancelJob serves POST /api/jobs/{id}/cancel: it moves a queued or
+// running job to canceled and returns the updated job with 200. It reads the
+// job first so an unknown id maps cleanly to 404; CancelJob's own miss is a
+// wrapped sql.ErrNoRows too, but the explicit GetJob keeps the 404/409 split
+// readable. A job already in a terminal status yields ErrJobNotActive, which
+// mapStoreErr turns into 409. A non-integer id is a 400.
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(w, r, "id")
+	if !ok {
+		return
+	}
+	if _, err := s.store.GetJob(r.Context(), id); err != nil {
+		writeErr(w, mapStoreErr(err), "job not found")
+		return
+	}
+	if err := s.store.CancelJob(r.Context(), id); err != nil {
+		writeErr(w, mapStoreErr(err), "job not cancelable")
+		return
+	}
+	j, err := s.store.GetJob(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, jobDTO(j))
+}
+
+// handleRetryJob serves POST /api/jobs/{id}/retry: it requeues a failed or
+// canceled job (and resets its lesson to pending) and returns the requeued job
+// with 202. It reads the job first so an unknown id maps cleanly to 404. A job
+// that is not in a retryable terminal status yields ErrJobNotTerminal, which
+// mapStoreErr turns into 409. A non-integer id is a 400.
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(w, r, "id")
+	if !ok {
+		return
+	}
+	if _, err := s.store.GetJob(r.Context(), id); err != nil {
+		writeErr(w, mapStoreErr(err), "job not found")
+		return
+	}
+	if err := s.store.RetryJob(r.Context(), id); err != nil {
+		writeErr(w, mapStoreErr(err), "job not retryable")
+		return
+	}
+	j, err := s.store.GetJob(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, jobDTO(j))
+}
+
 // lessonStatuses and jobStatuses are the known enum sets used to fill the
 // summary maps with zero counts for statuses that have no rows, so the wire
 // shape carries a stable bucket set regardless of what the database holds.
