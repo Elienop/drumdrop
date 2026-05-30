@@ -79,20 +79,27 @@ func GuardListen(addr, token string) error {
 }
 
 // isLoopbackAddr reports whether the host portion of a listen address is a
-// loopback target: a 127.0.0.0/8 / ::1 IP, "localhost", or an empty host (a bare
-// ":port" binds all interfaces in net/http but is treated as local-only intent
-// here, matching the plan).
+// loopback target: a 127.0.0.0/8 / ::1 IP or "localhost". An entirely empty
+// address (the Config{} zero value / unset listen) is loopback — that is the
+// in-process/test default with no real bind. But a bare ":port" (empty host
+// after a successful host:port split) is NOT loopback: net/http binds it on all
+// interfaces, so a tokenless ":8080" must be refused by GuardListen.
 func isLoopbackAddr(addr string) bool {
+	if addr == "" {
+		return true
+	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// No port present; treat the whole string as the host.
 		host = addr
 	}
-	if host == "" || host == "localhost" {
+	if host == "localhost" {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback()
 	}
+	// An empty host here came from a successful ":port" split, which binds all
+	// interfaces — not loopback.
 	return false
 }

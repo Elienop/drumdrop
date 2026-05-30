@@ -36,6 +36,12 @@ Follows (incremental, deduped archival):
                                   equivalent. Flags: --interval (default 12h),
                                   --once (one cycle then exit), --out, --quality,
                                   --resources-only
+  drumdrop serve [options]        run the HTTP API + auto-sync daemon together
+                                  until Ctrl-C. Flags: --listen (default
+                                  $DRUMDROP_LISTEN or 127.0.0.1:8080), --interval
+                                  (default 12h), --out, --quality,
+                                  --resources-only. A non-loopback bind requires
+                                  $DRUMDROP_API_TOKEN.
 
 Account:
   drumdrop login       log in (prompts, or set MUSORA_EMAIL/MUSORA_PASSWORD)
@@ -79,6 +85,8 @@ func main() {
 		exit(cmdSync(args[1:]))
 	case "daemon":
 		exit(cmdDaemon(args[1:]))
+	case "serve":
+		exit(cmdServe(args[1:]))
 	default:
 		exit(cmdDownload(args))
 	}
