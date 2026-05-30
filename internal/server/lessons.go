@@ -1,8 +1,13 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // handleListLessons serves GET /api/lessons. With ?status it returns every
@@ -48,6 +53,113 @@ func (s *Server) handleGetLesson(w http.ResponseWriter, r *http.Request) {
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
 		writeErr(w, mapStoreErr(err), "lesson not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, lessonDTO(l))
+}
+
+// skipLessonRequest is the optional POST /api/lessons/{id}/skip body. reason is
+// recorded in the lesson's error column; an absent or empty reason skips the
+// lesson with no recorded reason.
+type skipLessonRequest struct {
+	Reason string `json:"reason"`
+}
+
+// handleDownloadLesson serves POST /api/lessons/{id}/download: it manually
+// enqueues a download job for the lesson keyed by railcontent_id. An unknown id
+// is a 404. If the lesson already has a queued-or-running job (ActiveJobExists),
+// that existing job is returned with 200 rather than enqueuing a duplicate —
+// EnqueueJob does not dedup, so the handler does. Otherwise it enqueues a new
+// job (inheriting the lesson's follow_id) and returns it with 202. A non-integer
+// id is a 400.
+func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt(w, r, "id")
+	if !ok {
+		return
+	}
+	lesson, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeErr(w, mapStoreErr(err), "lesson not found")
+		return
+	}
+
+	active, err := s.store.ActiveJobExists(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if active {
+		job, ok := s.activeJobForLesson(w, r, id)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, jobDTO(job))
+		return
+	}
+
+	jobID, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	job, err := s.store.GetJob(r.Context(), jobID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, jobDTO(job))
+}
+
+// activeJobForLesson finds the lesson's outstanding job — queued first, then
+// running — so the download handler can return the existing work instead of
+// enqueuing a duplicate. It is only called after ActiveJobExists reported true,
+// so a miss is an internal inconsistency and is surfaced as a 500.
+func (s *Server) activeJobForLesson(w http.ResponseWriter, r *http.Request, railcontentID int) (database.Job, bool) {
+	for _, status := range []string{database.JobQueued, database.JobRunning} {
+		jobs, err := s.store.ListJobsByStatus(r.Context(), status)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return database.Job{}, false
+		}
+		for _, j := range jobs {
+			if j.RailcontentID == railcontentID {
+				return j, true
+			}
+		}
+	}
+	writeErr(w, http.StatusInternalServerError, "active job for lesson not found")
+	return database.Job{}, false
+}
+
+// handleSkipLesson serves POST /api/lessons/{id}/skip: it marks the lesson
+// skipped, recording the optional {reason} in the lesson's error column, and
+// returns the updated lesson with 200. It reads the lesson first so an unknown
+// id maps cleanly to 404 (MarkSkipped's own miss error is not a wrapped
+// sql.ErrNoRows). An empty or missing body is allowed and skips with no reason;
+// a malformed body is a 400. A non-integer id is a 400.
+func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var req skipLessonRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
+		writeErr(w, mapStoreErr(err), "lesson not found")
+		return
+	}
+	if err := s.store.MarkSkipped(r.Context(), id, req.Reason); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	l, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, lessonDTO(l))
