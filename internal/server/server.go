@@ -58,12 +58,12 @@ func NewServer(store *database.Store, deps Deps, hub *Hub, cfg Config, version s
 		mux:     http.NewServeMux(),
 	}
 	s.routes()
-	return s.mux
+	return s.withMiddleware(s.mux)
 }
 
 // routes registers the HTTP handlers on the server's mux. Health endpoints are
-// unauthenticated; the /api/* routes and their auth wrapper are added by later
-// tasks.
+// unauthenticated; the /api/* routes are guarded by the auth middleware
+// NewServer wraps around this mux (see withMiddleware).
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
