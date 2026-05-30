@@ -55,11 +55,16 @@ func (s *Server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
 // handleFollowLessons serves GET /api/follows/{id}/lessons: the lessons linked
 // to the follow, ordered by railcontent_id. An optional ?status filter keeps
 // only lessons in that status (filtered in the handler so the store method stays
-// status-agnostic). A non-integer id is a 400. An unknown follow id simply
-// yields an empty list, matching the store's follow-id scan.
+// status-agnostic). A non-integer id is a 400. It reads the follow first so an
+// unknown id maps to 404 (mirroring handleDeleteFollow/handleSkipLesson) rather
+// than a misleading 200 with an empty list.
 func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
+		return
+	}
+	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
+		writeStoreErr(w, err, "follow not found")
 		return
 	}
 	lessons, err := s.store.ListLessonsByFollow(r.Context(), id)

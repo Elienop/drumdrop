@@ -94,6 +94,18 @@ func cmdServe(argv []string) error {
 // so the shutdown-ordering test can drive the exact production sequence against
 // a fake daemon and an in-process listener.
 func gracefulServe(ctx context.Context, srv *http.Server, ln net.Listener, daemon daemonRunner, interval time.Duration, onClose func() error) error {
+	// serverCtx is the base context every inbound request descends from. We cancel
+	// it at the start of shutdown so long-lived streaming handlers (the SSE
+	// /api/events endpoint, which otherwise blocks on its own request context for
+	// the full Shutdown timeout) observe the cancellation and return at once,
+	// letting srv.Shutdown drain promptly instead of timing out with a misleading
+	// DeadlineExceeded. handleEvents selects on this context alongside its request
+	// context (see server.handleEvents).
+	serverCtx, cancelServer := context.WithCancel(context.Background())
+	defer cancelServer()
+	baseCtx := server.WithServerContext(serverCtx)
+	srv.BaseContext = func(net.Listener) context.Context { return baseCtx }
+
 	// The daemon gets its own cancelable context so we can stop it independently
 	// of the HTTP server's shutdown context.
 	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
@@ -132,6 +144,11 @@ func gracefulServe(ctx context.Context, srv *http.Server, ln net.Listener, daemo
 		// Signal received: drain the HTTP server, then stop the daemon and wait
 		// for its goroutine to return before closing the store.
 	}
+
+	// Cancel the base context first so in-flight streaming handlers unblock
+	// immediately; then drain. Without this, Shutdown would wait the full timeout
+	// for an open SSE stream and return DeadlineExceeded.
+	cancelServer()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

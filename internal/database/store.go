@@ -17,6 +17,13 @@ import (
 // constraint explicit in Go rather than relying on SQLITE_BUSY/busy_timeout
 // retries, which keeps writes deterministic and avoids "database is locked"
 // surfacing to callers. Reads (plain QueryContext, not withTx) never take mu.
+//
+// Writers may originate from BOTH the auto-sync daemon goroutine and the inbound
+// HTTP API's handler goroutines; mu serializes all of them, so concurrent writes
+// are safe. Note, however, that a lock-free read (a plain QueryContext outside
+// withTx) followed by a withTx write is NOT one atomic operation — mu is dropped
+// between the two — so check-then-act sequences that must be atomic have to live
+// inside a single withTx (see how the queue-dedup TOCTOU is closed there).
 type Store struct {
 	mu sync.Mutex
 	db *sql.DB

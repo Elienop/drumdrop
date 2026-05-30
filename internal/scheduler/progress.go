@@ -32,8 +32,10 @@ type ProgressEvent struct {
 	Bytes      int64   `json:"bytes"`
 	TotalBytes int64   `json:"total_bytes"`
 	Speed      string  `json:"speed"`
-	// Err is the failure reason for attempt_failed / lesson_skipped events.
-	Err string `json:"err"`
+	// Err is the failure reason for attempt_failed / lesson_skipped events. The
+	// JSON tag is "error" (not "err") so SSE frames and REST error DTOs share one
+	// error vocabulary on the wire; the Go field name stays Err.
+	Err string `json:"error"`
 	// Planned and Processed carry the per-cycle counts on cycle_done.
 	Planned   int `json:"planned"`
 	Processed int `json:"processed"`
@@ -44,6 +46,13 @@ type ProgressEvent struct {
 // ProgressSink receives ProgressEvents. Implementations must be safe to call
 // from the worker's single goroutine and must not block it (the broadcast hub
 // drops on a full subscriber buffer rather than stalling the download loop).
+//
+// In the serve entrypoint events originate from BOTH the daemon goroutine and
+// HTTP-handler goroutines (any path that drives the worker), so an Emit may be
+// called concurrently from more than one goroutine; implementations must be
+// safe for concurrent callers. Database writes those callers make are serialized
+// by Store.mu, but note a lock-free read followed by a withTx write is NOT
+// atomic (see the Store doc comment).
 type ProgressSink interface {
 	Emit(ProgressEvent)
 }

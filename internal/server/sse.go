@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,31 @@ import (
 // pingInterval is how often the SSE stream writes a ": ping" comment frame to
 // keep idle connections (and any intervening proxies) from timing out.
 const pingInterval = 20 * time.Second
+
+// serverCtxKey is the context key under which the serve entrypoint stashes the
+// server-closing context on each request's base context (see WithServerContext).
+type ctxKey int
+
+const serverCtxKey ctxKey = iota
+
+// WithServerContext returns base annotated so handlers can recover the
+// server-closing context via serverClosingContext. The serve entrypoint sets
+// http.Server.BaseContext to return this, so every request descends from a
+// context the entrypoint cancels at shutdown start. The long-lived SSE handler
+// selects on that context to unblock promptly instead of pinning Shutdown for
+// the full timeout.
+func WithServerContext(base context.Context) context.Context {
+	return context.WithValue(base, serverCtxKey, base)
+}
+
+// serverClosingContext recovers the server-closing context stashed by
+// WithServerContext, or nil when none was set (e.g. httptest servers that do not
+// install the BaseContext). A nil context is never ready, so a nil-guarded
+// select case is a no-op.
+func serverClosingContext(ctx context.Context) context.Context {
+	c, _ := ctx.Value(serverCtxKey).(context.Context)
+	return c
+}
 
 // handleEvents streams the scheduler's progress events to the client as
 // Server-Sent Events. It first writes a "ready" frame carrying the hub's current
@@ -53,9 +79,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer ping.Stop()
 
 	ctx := r.Context()
+	// srvDone fires when the server enters shutdown, so an open stream tears down
+	// at once rather than pinning srv.Shutdown for the full timeout. It is nil
+	// (a never-ready select case) when no BaseContext was installed.
+	var srvDone <-chan struct{}
+	if sc := serverClosingContext(ctx); sc != nil {
+		srvDone = sc.Done()
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-srvDone:
 			return
 		case <-ping.C:
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {

@@ -52,8 +52,8 @@ func TestPreviewNode(t *testing.T) {
 	if got.Kind != "node" {
 		t.Errorf("Kind = %q, want node", got.Kind)
 	}
-	if got.RootID != 42 {
-		t.Errorf("RootID = %d, want 42", got.RootID)
+	if got.RootID == nil || *got.RootID != 42 {
+		t.Errorf("RootID = %v, want 42", got.RootID)
 	}
 	if got.LessonCount != 1 {
 		t.Errorf("LessonCount = %d, want 1", got.LessonCount)
@@ -106,6 +106,9 @@ func TestPreviewInstructor(t *testing.T) {
 	}
 	if got.Kind != "instructor" {
 		t.Errorf("Kind = %q, want instructor", got.Kind)
+	}
+	if got.RootID != nil {
+		t.Errorf("RootID = %v, want nil for instructor preview", got.RootID)
 	}
 	if got.Title != "Jane" {
 		t.Errorf("Title = %q, want Jane", got.Title)

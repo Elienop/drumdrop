@@ -214,3 +214,19 @@ func TestFollowLessonsBadID(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
+
+// TestFollowLessonsUnknownID asserts an integer id for a follow that does not
+// exist yields 404 (mirroring DELETE /api/follows/{id} and POST .../skip)
+// rather than a 200 empty list, so the UI can distinguish "no such follow" from
+// "follow with no lessons".
+func TestFollowLessonsUnknownID(t *testing.T) {
+	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/follows/9999/lessons", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}

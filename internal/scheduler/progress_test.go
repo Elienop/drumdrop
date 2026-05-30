@@ -264,7 +264,7 @@ func TestProgressEventJSONIsSnakeCase(t *testing.T) {
 	}
 	for _, key := range []string{
 		"kind", "railcontent_id", "job_id", "follow_id", "title", "attempt",
-		"max_attempts", "pct", "bytes", "total_bytes", "speed", "err",
+		"max_attempts", "pct", "bytes", "total_bytes", "speed", "error",
 		"planned", "processed", "time",
 	} {
 		if _, ok := m[key]; !ok {

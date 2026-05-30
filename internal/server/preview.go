@@ -11,11 +11,11 @@ import (
 
 // previewResponse is the GET /api/preview shape: what a follow would resolve to
 // before it is created. kind is "node" or "instructor"; root_id is the content
-// id the follow would expand from (0 for an instructor follow, which has no
-// single root); title is a human label; lesson_count is how many downloadable
-// lessons the follow would track.
+// id a node follow would expand from and is omitted entirely for an instructor
+// follow (which has no single root); title is a human label; lesson_count is how
+// many downloadable lessons the follow would track.
 type previewResponse struct {
-	RootID      int    `json:"root_id"`
+	RootID      *int   `json:"root_id,omitempty"`
 	Title       string `json:"title"`
 	LessonCount int    `json:"lesson_count"`
 	Kind        string `json:"kind"`
@@ -74,7 +74,7 @@ func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 	}
 
 	writeJSON(w, http.StatusOK, previewResponse{
-		RootID:      rootID,
+		RootID:      &rootID,
 		Title:       title,
 		LessonCount: len(lessonIDs),
 		Kind:        "node",
