@@ -472,6 +472,103 @@ func TestActiveJobExists(t *testing.T) {
 	}
 }
 
+// TestListJobsByStatus asserts ListJobsByStatus returns only the jobs in the
+// requested status, in id (enqueue) order, and an empty slice when none match.
+func TestListJobsByStatus(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	queued1, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob queued1: %v", err)
+	}
+	running, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
+	if err != nil {
+		t.Fatalf("EnqueueJob running: %v", err)
+	}
+	queued2, err := s.EnqueueJob(ctx, sql.NullInt64{}, 3)
+	if err != nil {
+		t.Fatalf("EnqueueJob queued2: %v", err)
+	}
+
+	// Move the middle job to running.
+	if err := s.MarkJobRunning(ctx, running); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+
+	gotQueued, err := s.ListJobsByStatus(ctx, JobQueued)
+	if err != nil {
+		t.Fatalf("ListJobsByStatus(queued): %v", err)
+	}
+	if len(gotQueued) != 2 {
+		t.Fatalf("ListJobsByStatus(queued) returned %d jobs, want 2", len(gotQueued))
+	}
+	if gotQueued[0].ID != queued1 || gotQueued[1].ID != queued2 {
+		t.Errorf("queued ids = [%d, %d], want [%d, %d] in id order",
+			gotQueued[0].ID, gotQueued[1].ID, queued1, queued2)
+	}
+
+	gotRunning, err := s.ListJobsByStatus(ctx, JobRunning)
+	if err != nil {
+		t.Fatalf("ListJobsByStatus(running): %v", err)
+	}
+	if len(gotRunning) != 1 || gotRunning[0].ID != running {
+		t.Errorf("ListJobsByStatus(running) = %+v, want one job id %d", gotRunning, running)
+	}
+
+	// A status with no rows yields an empty slice and no error.
+	gotDone, err := s.ListJobsByStatus(ctx, JobDone)
+	if err != nil {
+		t.Fatalf("ListJobsByStatus(done): %v", err)
+	}
+	if len(gotDone) != 0 {
+		t.Errorf("ListJobsByStatus(done) returned %d jobs, want 0", len(gotDone))
+	}
+}
+
+// TestListJobsOrderAndLimit asserts ListJobs returns jobs most-recent first (by
+// id DESC), regardless of status, honoring an explicit limit and falling back to
+// the default cap when limit <= 0.
+func TestListJobsOrderAndLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		id, err := s.EnqueueJob(ctx, sql.NullInt64{}, i+1)
+		if err != nil {
+			t.Fatalf("EnqueueJob %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// limit <= 0 falls back to the default and returns all rows, newest first.
+	all, err := s.ListJobs(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListJobs(0): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("ListJobs(0) returned %d jobs, want 3", len(all))
+	}
+	if all[0].ID != ids[2] || all[1].ID != ids[1] || all[2].ID != ids[0] {
+		t.Errorf("ListJobs ids = [%d, %d, %d], want descending [%d, %d, %d]",
+			all[0].ID, all[1].ID, all[2].ID, ids[2], ids[1], ids[0])
+	}
+
+	// An explicit limit caps the page to the most recent rows.
+	page, err := s.ListJobs(ctx, 2)
+	if err != nil {
+		t.Fatalf("ListJobs(2): %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("ListJobs(2) returned %d jobs, want 2", len(page))
+	}
+	if page[0].ID != ids[2] || page[1].ID != ids[1] {
+		t.Errorf("ListJobs(2) ids = [%d, %d], want [%d, %d]",
+			page[0].ID, page[1].ID, ids[2], ids[1])
+	}
+}
+
 // TestListQueuedOrderAndFilter asserts ListQueued returns only queued jobs, in
 // enqueue (id) order, and excludes jobs that have moved on to running/done.
 func TestListQueuedOrderAndFilter(t *testing.T) {

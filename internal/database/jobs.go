@@ -237,6 +237,59 @@ func (s *Store) ListQueued(ctx context.Context) ([]Job, error) {
 	return jobs, nil
 }
 
+// ListJobsByStatus returns every job in the given status, oldest first (by id),
+// so the API can render a status-filtered queue in enqueue order. A status with
+// no matching rows yields an empty slice and no error.
+func (s *Store) ListJobsByStatus(ctx context.Context, status string) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+jobColumns+` FROM jobs WHERE status = ? ORDER BY id`,
+		status,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs by status %q: %w", status, err)
+	}
+	return scanJobs(rows)
+}
+
+// defaultJobListLimit caps a ListJobs call when the caller passes a non-positive
+// limit, so an unbounded query can never be issued by accident.
+const defaultJobListLimit = 100
+
+// ListJobs returns a page of jobs across all statuses, most recent first (by id
+// DESC). A limit <= 0 falls back to defaultJobListLimit.
+func (s *Store) ListJobs(ctx context.Context, limit int) ([]Job, error) {
+	if limit <= 0 {
+		limit = defaultJobListLimit
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+jobColumns+` FROM jobs ORDER BY id DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs (limit %d): %w", limit, err)
+	}
+	return scanJobs(rows)
+}
+
+// scanJobs drains a jobs *sql.Rows into a slice and closes it, so the listing
+// methods share one scan/iterate/close path.
+func scanJobs(rows *sql.Rows) ([]Job, error) {
+	defer rows.Close()
+
+	var jobs []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate jobs: %w", err)
+	}
+	return jobs, nil
+}
+
 // GetJob returns the job with the given id, or sql.ErrNoRows (wrapped) if none
 // exists. Used by tests and callers that need to inspect a job's full state.
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
