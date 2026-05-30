@@ -59,6 +59,17 @@ type JobDTO struct {
 	FinishedAt    *time.Time `json:"finished_at"`
 }
 
+// SummaryDTO is the JSON wire shape of the dashboard summary: lesson counts
+// keyed by lesson status, job counts keyed by job status, and the total follow
+// count. The Lessons and Jobs maps always carry every known enum value, with a
+// zero count for statuses that have no rows, so the client can render a stable
+// set of buckets without guessing the enum set.
+type SummaryDTO struct {
+	Follows int            `json:"follows"`
+	Lessons map[string]int `json:"lessons"`
+	Jobs    map[string]int `json:"jobs"`
+}
+
 // nullInt64 returns a *int64 that is nil when n is NULL, or points at the value
 // otherwise, so the field marshals to JSON null or a bare integer.
 func nullInt64(n sql.NullInt64) *int64 {

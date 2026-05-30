@@ -74,6 +74,11 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/lessons", s.handleListLessons)
 	s.mux.HandleFunc("GET /api/lessons/{id}", s.handleGetLesson)
+
+	s.mux.HandleFunc("GET /api/jobs", s.handleListJobs)
+	s.mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
+
+	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 }
 
 // handleHealthz is the liveness probe: it always reports ok plus the build
