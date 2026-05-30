@@ -54,6 +54,7 @@ func TestRunMigrationsCreatesSchema(t *testing.T) {
 		"idx_follows_instructor",
 		"idx_lessons_status",
 		"idx_lessons_parent",
+		"idx_lessons_follow_id",
 		"idx_jobs_status",
 	} {
 		if !objectExists(t, db, "index", idx) {
@@ -106,16 +107,82 @@ func TestRunMigrationsIdempotent(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("schema_migrations has %d rows, want 1", count)
+	if count != 2 {
+		t.Errorf("schema_migrations has %d rows, want 2", count)
 	}
 
-	var version string
-	if err := db.QueryRow("SELECT version FROM schema_migrations").Scan(&version); err != nil {
-		t.Fatalf("read version: %v", err)
+	// Versions are recorded in ascending filename order — the application order
+	// the runner guarantees.
+	rows, err := db.Query("SELECT version FROM schema_migrations ORDER BY version")
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
 	}
-	if version != "001_initial_schema.sql" {
-		t.Errorf("recorded version = %q, want %q", version, "001_initial_schema.sql")
+	defer rows.Close()
+	var versions []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate versions: %v", err)
+	}
+	want := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql"}
+	if len(versions) != len(want) {
+		t.Fatalf("recorded versions = %v, want %v", versions, want)
+	}
+	for i := range want {
+		if versions[i] != want[i] {
+			t.Errorf("recorded version[%d] = %q, want %q", i, versions[i], want[i])
+		}
+	}
+}
+
+// TestMigration002LinksLessonsToFollows verifies the follow_id column + its
+// foreign key behave: a lesson can record a follow_id, and deleting that follow
+// sets the lesson's follow_id back to NULL (ON DELETE SET NULL) rather than
+// cascading the lesson away.
+func TestMigration002LinksLessonsToFollows(t *testing.T) {
+	db := openMigrated(t)
+
+	res, err := db.Exec(
+		"INSERT INTO follows(kind, railcontent_id) VALUES('node', 4242)",
+	)
+	if err != nil {
+		t.Fatalf("insert follow: %v", err)
+	}
+	followID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("follow last id: %v", err)
+	}
+
+	if _, err := db.Exec(
+		"INSERT INTO lessons(railcontent_id, follow_id) VALUES(1, ?)", followID,
+	); err != nil {
+		t.Fatalf("insert lesson with follow_id: %v", err)
+	}
+
+	// Deleting the follow detaches the lesson (SET NULL), keeping the lesson row.
+	if _, err := db.Exec("DELETE FROM follows WHERE id = ?", followID); err != nil {
+		t.Fatalf("delete follow: %v", err)
+	}
+
+	var (
+		exists   int
+		followFK sql.NullInt64
+	)
+	if err := db.QueryRow(
+		"SELECT count(*), max(follow_id) FROM lessons WHERE railcontent_id = 1",
+	).Scan(&exists, &followFK); err != nil {
+		t.Fatalf("read lesson after follow delete: %v", err)
+	}
+	if exists != 1 {
+		t.Fatalf("lesson row count = %d after follow delete, want 1 (no cascade)", exists)
+	}
+	if followFK.Valid {
+		t.Errorf("lesson follow_id = %+v after follow delete, want NULL (ON DELETE SET NULL)", followFK)
 	}
 }
 

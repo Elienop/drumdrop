@@ -1,0 +1,56 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+)
+
+// syncRequest is the optional POST /api/sync body. dry_run flips the endpoint
+// from "kick the daemon" to "report what a sync would enqueue" without touching
+// the queue. An absent or empty body means a real (non-dry-run) sync.
+type syncRequest struct {
+	DryRun bool `json:"dry_run"`
+}
+
+// handleSync serves POST /api/sync. With {"dry_run":true} it runs the planner's
+// dry run synchronously and returns {"would_enqueue":N} — the number of lessons
+// a real sync would queue, having enqueued nothing. Otherwise it requests one
+// out-of-band daemon cycle via a non-blocking send on the kick channel and
+// returns 202 {"triggered":true}; if the kick buffer is already full a cycle is
+// pending, so it still reports 202 rather than failing. An empty or missing body
+// is a real sync; a malformed body is a 400.
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req syncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.DryRun {
+		if s.deps.Planner == nil {
+			writeErr(w, http.StatusServiceUnavailable, "dry-run sync unavailable: no planner attached")
+			return
+		}
+		would, err := s.deps.Planner.PlanDryRun(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "dry-run sync failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"would_enqueue": would})
+		return
+	}
+
+	if s.deps.Kick == nil {
+		writeErr(w, http.StatusServiceUnavailable, "sync unavailable: no daemon attached")
+		return
+	}
+	// Non-blocking send: a full buffer means a cycle is already pending, which is
+	// exactly what the caller asked for, so report success either way.
+	select {
+	case s.deps.Kick <- struct{}{}:
+	default:
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+}

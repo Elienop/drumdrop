@@ -5,39 +5,6 @@ import (
 	"testing"
 )
 
-func TestExtractID(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  int
-	}{
-		{"bare number", "409875", 409875},
-		{"url with two ids takes last", "https://app.musora.com/drumeo/lessons/course/409875/409918", 409918},
-		{"url with single id", "https://app.musora.com/drumeo/lessons/409918", 409918},
-		{"no digits", "https://app.musora.com/drumeo/lessons", 0},
-		{"empty", "", 0},
-		{"mixed alphanumeric", "lesson-42-final", 42},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := extractID(tt.input); got != tt.want {
-				t.Fatalf("extractID(%q) = %d, want %d", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestPermissionIDs(t *testing.T) {
-	t.Setenv("DRUMDROP_PERMISSION_IDS", "1,2,3")
-	if got := permissionIDs(); got != "1,2,3" {
-		t.Fatalf("permissionIDs() = %q, want %q", got, "1,2,3")
-	}
-	t.Setenv("DRUMDROP_PERMISSION_IDS", "")
-	if got := permissionIDs(); got != "" {
-		t.Fatalf("permissionIDs() = %q, want empty", got)
-	}
-}
-
 func TestSplitArgs(t *testing.T) {
 	tests := []struct {
 		name            string

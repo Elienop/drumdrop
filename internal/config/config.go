@@ -31,3 +31,21 @@ func DownloadsDir() string {
 	}
 	return "./downloads"
 }
+
+// ListenAddr is the host:port the HTTP API binds to. It is resolved at call
+// time via DRUMDROP_LISTEN; when unset it defaults to loopback 127.0.0.1:8080.
+func ListenAddr() string {
+	if a := os.Getenv("DRUMDROP_LISTEN"); a != "" {
+		return a
+	}
+	return "127.0.0.1:8080"
+}
+
+// APIToken is the bearer token required by the HTTP API, read at call time from
+// DRUMDROP_API_TOKEN. An empty result means no token is configured (allowed only
+// on loopback binds; enforced at startup by the server's listen guard).
+func APIToken() string { return os.Getenv("DRUMDROP_API_TOKEN") }
+
+// CORSOrigin is the allowed CORS origin for the HTTP API, read at call time from
+// DRUMDROP_CORS_ORIGIN. An empty result (the default) disables CORS headers.
+func CORSOrigin() string { return os.Getenv("DRUMDROP_CORS_ORIGIN") }

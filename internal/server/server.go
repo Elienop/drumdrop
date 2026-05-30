@@ -1,0 +1,120 @@
+package server
+
+import (
+	"net/http"
+
+	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/scheduler"
+)
+
+// Config carries the server's networking settings, resolved once at startup
+// from the config env helpers (DRUMDROP_LISTEN/_API_TOKEN/_CORS_ORIGIN). The
+// zero value is valid: no token, no CORS, and the listen guard left to the
+// caller. Auth and CORS tasks consume these fields.
+type Config struct {
+	ListenAddr string
+	APIToken   string
+	CORSOrigin string
+}
+
+// Deps bundles the engine handles the write/sync handlers need beyond the
+// store: the Planner for dry-run sync and the daemon kick channel for on-demand
+// sync. It is populated by the serve entrypoint; the read and health endpoints
+// do not use it, so the zero value is valid (a nil Planner/Kick degrades the
+// sync endpoint to a clear error rather than a panic).
+type Deps struct {
+	// Planner backs POST /api/sync?dry_run=true, reporting how many lessons a real
+	// sync would enqueue without touching the queue.
+	Planner *scheduler.Planner
+	// Kick is the buffered channel the daemon's Run select drains for an immediate
+	// out-of-band cycle. POST /api/sync does a non-blocking send on it. Nil when
+	// no daemon is attached (e.g. tests of read-only endpoints).
+	Kick chan<- struct{}
+}
+
+// Server holds the shared state behind drumdrop's inbound HTTP API: the database
+// store the handlers read and write, the engine deps the write/sync handlers
+// use, the in-memory progress Hub the SSE endpoint subscribes to, the resolved
+// networking Config, and the routing mux. Hub and Deps are wired in by later
+// tasks and are nil-tolerant until then; the health endpoints need only store
+// and version.
+type Server struct {
+	store   *database.Store
+	deps    Deps
+	hub     *Hub
+	cfg     Config
+	version string
+	mux     *http.ServeMux
+}
+
+// NewServer assembles the routing mux over the shared store, engine deps,
+// progress hub, and config, and returns it as an http.Handler. hub and deps may
+// be nil/zero until the tasks that use them land. version is surfaced by the
+// /healthz probe.
+func NewServer(store *database.Store, deps Deps, hub *Hub, cfg Config, version string) http.Handler {
+	s := &Server{
+		store:   store,
+		deps:    deps,
+		hub:     hub,
+		cfg:     cfg,
+		version: version,
+		mux:     http.NewServeMux(),
+	}
+	s.routes()
+	return s.withMiddleware(s.mux)
+}
+
+// routes registers the HTTP handlers on the server's mux. Health endpoints are
+// unauthenticated; the /api/* routes are guarded by the auth middleware
+// NewServer wraps around this mux (see withMiddleware).
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+
+	s.mux.HandleFunc("GET /api/follows", s.handleListFollows)
+	s.mux.HandleFunc("POST /api/follows", s.handleCreateFollow)
+	s.mux.HandleFunc("GET /api/follows/{id}", s.handleGetFollow)
+	s.mux.HandleFunc("DELETE /api/follows/{id}", s.handleDeleteFollow)
+	s.mux.HandleFunc("GET /api/follows/{id}/lessons", s.handleFollowLessons)
+
+	s.mux.HandleFunc("GET /api/lessons", s.handleListLessons)
+	s.mux.HandleFunc("GET /api/lessons/{id}", s.handleGetLesson)
+	s.mux.HandleFunc("POST /api/lessons/{id}/download", s.handleDownloadLesson)
+	s.mux.HandleFunc("POST /api/lessons/{id}/skip", s.handleSkipLesson)
+
+	s.mux.HandleFunc("GET /api/jobs", s.handleListJobs)
+	s.mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
+	s.mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancelJob)
+	s.mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
+
+	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
+
+	s.mux.HandleFunc("POST /api/sync", s.handleSync)
+
+	s.mux.HandleFunc("GET /api/preview", s.handlePreview)
+	s.mux.HandleFunc("GET /api/session", s.handleGetSession)
+	s.mux.HandleFunc("POST /api/session", s.handleLogin)
+
+	s.mux.HandleFunc("GET /api/events", s.handleEvents)
+}
+
+// handleHealthz is the liveness probe: it always reports ok plus the build
+// version, without touching the database. Unauthenticated.
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": s.version,
+	})
+}
+
+// handleReadyz is the readiness probe: it pings the database and reports ok on
+// success or 503 on failure. The raw ping error is not echoed (it can carry
+// driver/SQL internals); callers see a clean "database unavailable" message.
+// Unauthenticated.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Ping(r.Context()); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

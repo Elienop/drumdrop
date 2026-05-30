@@ -6,31 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/elienop/drumdrop/internal/config"
+	"github.com/elienop/drumdrop/internal/engine"
 	"github.com/elienop/drumdrop/internal/musora"
 )
-
-var reDigits = regexp.MustCompile(`\d+`)
-
-// extractID accepts a bare numeric id or a Musora URL and returns the last
-// numeric run found. Returns 0 when no digits are present.
-func extractID(input string) int {
-	if n, err := strconv.Atoi(input); err == nil {
-		return n
-	}
-	nums := reDigits.FindAllString(input, -1)
-	if len(nums) == 0 {
-		return 0
-	}
-	n, _ := strconv.Atoi(nums[len(nums)-1])
-	return n
-}
-
-func permissionIDs() string { return os.Getenv("DRUMDROP_PERMISSION_IDS") }
 
 // valueFlags lists the download flags that consume the following argument.
 // Used to split positionals from flags so that flags may appear after the id
@@ -43,12 +24,14 @@ var valueFlags = map[string]bool{
 	"--brand":      true,
 	"--instructor": true,
 	"--interval":   true,
+	"--listen":     true,
 	"-out":         true,
 	"-quality":     true,
 	"-limit":       true,
 	"-brand":       true,
 	"-instructor":  true,
 	"-interval":    true,
+	"-listen":      true,
 }
 
 // splitArgs separates positional arguments from flag tokens, preserving order
@@ -135,12 +118,12 @@ func cmdDownload(argv []string) error {
 		os.Exit(1)
 	}
 
-	targetID := extractID(rest[0])
+	targetID := engine.ExtractID(rest[0])
 	if targetID == 0 {
 		return fmt.Errorf("could not parse a content id from: %s", rest[0])
 	}
 
-	permIDs := permissionIDs()
+	permIDs := engine.PermissionIDs()
 	if *whole {
 		fmt.Printf("Resolving whole course for id %d …\n", targetID)
 	} else {

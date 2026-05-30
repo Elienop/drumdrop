@@ -5,8 +5,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 )
@@ -162,6 +164,128 @@ func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected file missing after non-fatal aux failure: %s (%v)", p, err)
 		}
+	}
+}
+
+// parseProgressLine must recognise DRUMDROP-templated lines, parse the percent
+// (with optional whitespace and trailing '%'), bytes, and speed, and reject any
+// line that is not a DRUMDROP progress line.
+func TestParseProgressLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		ok   bool
+		want DownloadProgress
+	}{
+		{
+			name: "mid download",
+			line: "DRUMDROP| 23.4%|12345|54321|1.20MiB/s",
+			ok:   true,
+			want: DownloadProgress{Pct: 23.4, Downloaded: 12345, Total: 54321, Speed: "1.20MiB/s"},
+		},
+		{
+			name: "complete",
+			line: "DRUMDROP|100%|54321|54321|2.00MiB/s",
+			ok:   true,
+			want: DownloadProgress{Pct: 100, Downloaded: 54321, Total: 54321, Speed: "2.00MiB/s"},
+		},
+		{
+			name: "total NA leaves total zero",
+			line: "DRUMDROP|  5.0%|1000|NA|512KiB/s",
+			ok:   true,
+			want: DownloadProgress{Pct: 5, Downloaded: 1000, Total: 0, Speed: "512KiB/s"},
+		},
+		{
+			name: "downloaded NA leaves downloaded zero",
+			line: "DRUMDROP|  0.0%|NA|NA|Unknown",
+			ok:   true,
+			want: DownloadProgress{Pct: 0, Downloaded: 0, Total: 0, Speed: "Unknown"},
+		},
+		{
+			name: "plain yt-dlp line is ignored",
+			line: "[download]  23.4% of 1.00MiB at 1.00MiB/s ETA 00:01",
+			ok:   false,
+		},
+		{
+			name: "empty line ignored",
+			line: "",
+			ok:   false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := parseProgressLine(c.line)
+			if ok != c.ok {
+				t.Fatalf("parseProgressLine(%q) ok = %v, want %v", c.line, ok, c.ok)
+			}
+			if !c.ok {
+				return
+			}
+			if got != c.want {
+				t.Fatalf("parseProgressLine(%q) = %+v, want %+v", c.line, got, c.want)
+			}
+		})
+	}
+}
+
+// Integration: with a fake yt-dlp on PATH emitting DRUMDROP progress lines,
+// DownloadLesson must deliver parsed DownloadProgress values to OnProgress.
+func TestDownloadLessonOnProgress(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake yt-dlp shell script is POSIX-only")
+	}
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"echo 'DRUMDROP|  0.0%|0|54321|512KiB/s'\n" +
+		"echo '[download] some normal line'\n" +
+		"echo 'DRUMDROP|100%|54321|54321|2.00MiB/s'\n"
+	fake := filepath.Join(binDir, "yt-dlp")
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var (
+		mu   sync.Mutex
+		seen []DownloadProgress
+	)
+	l := &Lesson{ID: 9, Title: "Prog", Video: Video{HLSManifestURL: "https://example.com/x.m3u8"}}
+	err := DownloadLesson(l, DownloadOpts{
+		Dir:   t.TempDir(),
+		Index: 1,
+		OnProgress: func(p DownloadProgress) {
+			mu.Lock()
+			seen = append(seen, p)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("DownloadLesson: %v", err)
+	}
+	want := []DownloadProgress{
+		{Pct: 0, Downloaded: 0, Total: 54321, Speed: "512KiB/s"},
+		{Pct: 100, Downloaded: 54321, Total: 54321, Speed: "2.00MiB/s"},
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("OnProgress called %d times, want %d: %+v", len(seen), len(want), seen)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Errorf("progress[%d] = %+v, want %+v", i, seen[i], want[i])
+		}
+	}
+}
+
+// When OnProgress is set, the yt-dlp argv must include a --progress-template
+// carrying the DRUMDROP sentinel. The template is what the stdout scanner keys
+// on, so its absence would silently disable progress.
+func TestProgressArgsTemplate(t *testing.T) {
+	joined := strings.Join(progressArgs(), " ")
+	if !strings.Contains(joined, "--progress-template") {
+		t.Fatalf("progressArgs missing --progress-template: %v", progressArgs())
+	}
+	if !strings.Contains(joined, "DRUMDROP|") {
+		t.Fatalf("progressArgs missing DRUMDROP sentinel: %v", progressArgs())
 	}
 }
 

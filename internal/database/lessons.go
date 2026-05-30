@@ -32,6 +32,7 @@ type Lesson struct {
 	VideoPath           sql.NullString `json:"video_path"`
 	Bytes               sql.NullInt64  `json:"bytes"`
 	Error               sql.NullString `json:"error"`
+	FollowID            sql.NullInt64  `json:"follow_id"`
 	FirstSeenAt         sql.NullTime   `json:"first_seen_at"`
 	DownloadedAt        sql.NullTime   `json:"downloaded_at"`
 	UpdatedAt           sql.NullTime   `json:"updated_at"`
@@ -40,7 +41,7 @@ type Lesson struct {
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, status,
-	quality, output_dir, video_path, bytes, error,
+	quality, output_dir, video_path, bytes, error, follow_id,
 	first_seen_at, downloaded_at, updated_at`
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
@@ -51,7 +52,7 @@ func scanLesson(row interface {
 	var l Lesson
 	err := row.Scan(
 		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Status,
-		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error,
+		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
 		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
 	)
 	return l, err
@@ -59,20 +60,22 @@ func scanLesson(row interface {
 
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
 // railcontent_id. On conflict it updates only title, parent, and updated_at — it
-// deliberately does NOT touch status or any download metadata. This is half of
-// the dedup mechanism: a re-sync that re-discovers an already-downloaded lesson
-// must never downgrade it back to pending and trigger a redundant re-download.
-// New rows take the table default status='pending'.
-func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error {
+// deliberately does NOT touch status, download metadata, or follow_id. This is
+// half of the dedup mechanism: a re-sync that re-discovers an already-downloaded
+// lesson must never downgrade it back to pending and trigger a redundant
+// re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
+// attributed to the follow that first discovered it even if a later follow also
+// covers it. New rows take the table default status='pending'.
+func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand)
-			 VALUES(?, ?, ?, ?)
+			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, follow_id)
+			 VALUES(?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
 			     parent_railcontent_id = excluded.parent_railcontent_id,
 			     updated_at            = CURRENT_TIMESTAMP`,
-			railcontentID, title, parent, brand,
+			railcontentID, title, parent, brand, followID,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert lesson %d: %w", railcontentID, err)
@@ -191,6 +194,84 @@ func (s *Store) ListByStatus(ctx context.Context, status string) ([]Lesson, erro
 	if err != nil {
 		return nil, fmt.Errorf("list lessons by status %q: %w", status, err)
 	}
+	return scanLessons(rows)
+}
+
+// ListLessonsByFollow returns every lesson attributed to the given follow id,
+// ordered by railcontent_id for a deterministic result. A follow with no
+// lessons yields an empty slice and no error.
+func (s *Store) ListLessonsByFollow(ctx context.Context, followID int64) ([]Lesson, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons WHERE follow_id = ? ORDER BY railcontent_id`,
+		followID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list lessons by follow %d: %w", followID, err)
+	}
+	return scanLessons(rows)
+}
+
+// defaultLessonListLimit caps a paged ListLessons call when the caller passes a
+// non-positive limit, so an unbounded query can never be issued by accident.
+const defaultLessonListLimit = 100
+
+// ListLessons returns a page of lessons ordered by updated_at DESC then
+// railcontent_id (most recently touched first, stable within the same
+// timestamp). A limit <= 0 falls back to defaultLessonListLimit; offset pages
+// through the result.
+func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, error) {
+	if limit <= 0 {
+		limit = defaultLessonListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons
+		  ORDER BY updated_at DESC, railcontent_id
+		  LIMIT ? OFFSET ?`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list lessons (limit %d offset %d): %w", limit, offset, err)
+	}
+	return scanLessons(rows)
+}
+
+// CountLessonsByStatus returns the number of lessons in each status, keyed by
+// status. Only statuses with at least one lesson appear in the map; a status
+// with no rows is absent rather than present with a zero count, so the caller
+// fills in the missing entries for the known enum set. An empty lessons table
+// yields an empty (non-nil) map.
+func (s *Store) CountLessonsByStatus(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT status, count(*) FROM lessons GROUP BY status`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count lessons by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var (
+			status string
+			n      int
+		)
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, fmt.Errorf("scan lesson status count: %w", err)
+		}
+		counts[status] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate lesson status counts: %w", err)
+	}
+	return counts, nil
+}
+
+// scanLessons drains a lessons *sql.Rows into a slice and closes it, so the
+// listing methods share one scan/iterate/close path.
+func scanLessons(rows *sql.Rows) ([]Lesson, error) {
 	defer rows.Close()
 
 	var lessons []Lesson

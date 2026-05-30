@@ -34,6 +34,10 @@ type Worker struct {
 	// Log receives human-readable per-job progress. It defaults to io.Discard;
 	// the download logic never depends on it.
 	Log io.Writer
+	// Progress receives structured ProgressEvents beside the human-readable log.
+	// It is nil by default; progress() substitutes a noopSink so callers emit
+	// unconditionally. engine.Build sets it via assignment after NewWorker.
+	Progress ProgressSink
 	// sleep waits between retry attempts. It defaults to time.Sleep; tests inject
 	// a no-op so retry paths run instantly.
 	sleep func(time.Duration)
@@ -69,6 +73,50 @@ func (w *Worker) log() io.Writer {
 		return io.Discard
 	}
 	return w.Log
+}
+
+// progress returns the configured sink or a noopSink so callers can emit without
+// a nil check and the download logic stays independent of any consumer.
+func (w *Worker) progress() ProgressSink {
+	if w.Progress == nil {
+		return noopSink{}
+	}
+	return w.Progress
+}
+
+// progressCallback returns the musora.DownloadOpts.OnProgress closure for one
+// download attempt: it translates each yt-dlp DownloadProgress into a
+// download_progress ProgressEvent on the worker's sink. yt-dlp renders progress
+// many times per second, so the closure coalesces to at most one event per
+// second — except the terminal 100% observation, which always passes through so
+// a consumer is guaranteed a final frame. The callback is invoked from the
+// Downloader on the worker's single goroutine, so the unsynchronised lastEmit is
+// safe.
+func (w *Worker) progressCallback(job database.Job, lesson *musora.Lesson, attempt int) func(musora.DownloadProgress) {
+	var lastEmit time.Time
+	var emitted bool
+	return func(p musora.DownloadProgress) {
+		now := time.Now()
+		if emitted && p.Pct < 100 && now.Sub(lastEmit) < time.Second {
+			return
+		}
+		lastEmit = now
+		emitted = true
+		w.progress().Emit(ProgressEvent{
+			Kind:          "download_progress",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: job.RailcontentID,
+			Title:         lesson.Title,
+			Attempt:       attempt,
+			MaxAttempts:   w.Cfg.MaxAttempts,
+			Pct:           p.Pct,
+			Bytes:         p.Downloaded,
+			TotalBytes:    p.Total,
+			Speed:         p.Speed,
+			Time:          now,
+		})
+	}
 }
 
 // waitBackoff waits the given retry delay but stays responsive to cancellation:
@@ -143,6 +191,14 @@ func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err err
 			break // queue empty
 		}
 
+		w.progress().Emit(ProgressEvent{
+			Kind:          "job_claimed",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: job.RailcontentID,
+			Time:          time.Now(),
+		})
+
 		w.execute(ctx, job)
 		processed++
 
@@ -187,6 +243,14 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			reason = err.Error()
 		}
 		fmt.Fprintf(w.log(), "  ↳ skipping %d: %s\n", id, reason)
+		w.progress().Emit(ProgressEvent{
+			Kind:          "lesson_skipped",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: id,
+			Err:           reason,
+			Time:          time.Now(),
+		})
 		_ = w.Store.MarkSkipped(ctx, id, reason)
 		_ = w.Store.MarkJobFailed(ctx, job.ID, reason)
 		return
@@ -224,11 +288,22 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		}
 
 		fmt.Fprintf(w.log(), "  ▼ [%02d/%d] %d %s\n", attempt, w.Cfg.MaxAttempts, id, lesson.Title)
+		w.progress().Emit(ProgressEvent{
+			Kind:          "download_started",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: id,
+			Title:         lesson.Title,
+			Attempt:       attempt,
+			MaxAttempts:   w.Cfg.MaxAttempts,
+			Time:          time.Now(),
+		})
 		derr := w.Downloader.Download(lesson, musora.DownloadOpts{
 			Dir:           outDir,
 			Index:         1,
 			Quality:       quality,
 			ResourcesOnly: w.Cfg.ResourcesOnly,
+			OnProgress:    w.progressCallback(job, lesson, attempt),
 		})
 		if derr == nil {
 			lessonDir := filepath.Join(outDir, fmt.Sprintf("%02d - %s", 1, musora.Sanitize(lesson.Title)))
@@ -240,11 +315,33 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 				fmt.Fprintf(w.log(), "  ⚠ mark job done %d: %v\n", job.ID, err)
 			}
 			fmt.Fprintf(w.log(), "  ✓ %d\n", id)
+			w.progress().Emit(ProgressEvent{
+				Kind:          "download_ok",
+				JobID:         job.ID,
+				FollowID:      job.FollowID.Int64,
+				RailcontentID: id,
+				Title:         lesson.Title,
+				Attempt:       attempt,
+				MaxAttempts:   w.Cfg.MaxAttempts,
+				Bytes:         bytes,
+				Time:          time.Now(),
+			})
 			return
 		}
 
 		lastErr = derr
 		fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, derr)
+		w.progress().Emit(ProgressEvent{
+			Kind:          "attempt_failed",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: id,
+			Title:         lesson.Title,
+			Attempt:       attempt,
+			MaxAttempts:   w.Cfg.MaxAttempts,
+			Err:           derr.Error(),
+			Time:          time.Now(),
+		})
 	}
 
 	// Every attempt failed: record the lesson + job as failed and move on. The

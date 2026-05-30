@@ -18,3 +18,10 @@ docs/superpowers/
 secret.key
 credentials.enc
 session.cookie
+
+# Server runtime artifacts
+*.pid
+*.sock
+
+# Built web UI assets
+/web/dist/

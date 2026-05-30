@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/elienop/drumdrop/internal/scheduler"
+	"github.com/elienop/drumdrop/internal/engine"
 )
 
 // cmdDaemon runs the unattended auto-sync loop: a periodic Planner that enqueues
@@ -24,27 +24,14 @@ func cmdDaemon(argv []string) error {
 		return err
 	}
 
-	store, err := openStore()
+	store, err := engine.OpenStore()
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	cfg := schedulerConfig(opts.out, opts.quality, opts.resourcesOnly)
-	permIDs := permissionIDs()
-	planner := &scheduler.Planner{
-		Store:    store,
-		Expander: realExpander{},
-		PermIDs:  permIDs,
-		Log:      os.Stdout,
-	}
-	worker := scheduler.NewWorker(store, realResolver{}, realDownloader{}, cfg, permIDs, os.Stdout)
-	daemon := &scheduler.Daemon{
-		Store:   store,
-		Planner: planner,
-		Worker:  worker,
-		Log:     os.Stdout,
-	}
+	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
 	if opts.once {
 		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)

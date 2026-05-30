@@ -61,39 +61,6 @@ func TestFollowFlagSplitting(t *testing.T) {
 	})
 }
 
-// TestSchedulerConfigDefaults verifies the flag → scheduler.Config mapping:
-// an empty --out falls back to DownloadsDir() (env-driven), an empty --quality
-// stays empty (use each follow's saved quality), and --resources-only flows
-// through. The retry tunables come from DefaultConfig.
-func TestSchedulerConfigDefaults(t *testing.T) {
-	t.Setenv("DRUMDROP_DOWNLOADS_DIR", "/tmp/dd")
-
-	cfg := schedulerConfig("", "", false)
-	if cfg.DownloadsDir != "/tmp/dd" {
-		t.Errorf("DownloadsDir = %q, want /tmp/dd (from env fallback)", cfg.DownloadsDir)
-	}
-	if cfg.Quality != "" {
-		t.Errorf("Quality = %q, want empty", cfg.Quality)
-	}
-	if cfg.ResourcesOnly {
-		t.Error("ResourcesOnly = true, want false")
-	}
-	if cfg.MaxAttempts != 3 {
-		t.Errorf("MaxAttempts = %d, want 3 (from DefaultConfig)", cfg.MaxAttempts)
-	}
-
-	cfg = schedulerConfig("/explicit/out", "best", true)
-	if cfg.DownloadsDir != "/explicit/out" {
-		t.Errorf("DownloadsDir = %q, want /explicit/out (--out wins over env)", cfg.DownloadsDir)
-	}
-	if cfg.Quality != "best" {
-		t.Errorf("Quality = %q, want best", cfg.Quality)
-	}
-	if !cfg.ResourcesOnly {
-		t.Error("ResourcesOnly = false, want true")
-	}
-}
-
 // ---- runSync via the scheduler -------------------------------------------
 //
 // The full behavioral guarantees (skip already-downloaded, dedupe active jobs,
@@ -128,7 +95,7 @@ func newCLIStore(follows []database.Follow) *cliStore {
 func (s *cliStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	return s.follows, nil
 }
-func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
+func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	s.upserts = append(s.upserts, id)
 	return nil
 }
@@ -143,13 +110,20 @@ func (s *cliStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
 	}
 	return false, nil
 }
-func (s *cliStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, error) {
+func (s *cliStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, bool, error) {
+	// Mirror the real store's atomic dedup: reuse any queued/running job for
+	// this lesson and report created=false instead of inserting a duplicate.
+	for _, j := range s.jobs {
+		if j.RailcontentID == id && (j.Status == database.JobQueued || j.Status == database.JobRunning) {
+			return j.ID, false, nil
+		}
+	}
 	s.nextJobID++
 	j := database.Job{ID: s.nextJobID, FollowID: followID, RailcontentID: id, Status: database.JobQueued}
 	s.queue = append(s.queue, j)
 	s.jobs[j.ID] = j
 	s.enqueued = append(s.enqueued, id)
-	return j.ID, nil
+	return j.ID, true, nil
 }
 func (s *cliStore) TouchLastSynced(ctx context.Context, id int64) error {
 	s.touched = append(s.touched, id)

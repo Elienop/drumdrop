@@ -123,7 +123,7 @@ func (s *fakeDaemonStore) ListFollows(ctx context.Context) ([]database.Follow, e
 	return []database.Follow{nodeFollow()}, nil
 }
 
-func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
+func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	return nil
 }
 func (s *fakeDaemonStore) IsDownloaded(ctx context.Context, id int) (bool, error) { return false, nil }
@@ -131,7 +131,7 @@ func (s *fakeDaemonStore) ActiveJobExists(ctx context.Context, id int) (bool, er
 	return false, nil
 }
 
-func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
+func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
@@ -142,7 +142,7 @@ func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64
 		Status:        database.JobQueued,
 	})
 	s.ops = append(s.ops, "enqueue")
-	return s.nextID, nil
+	return s.nextID, true, nil
 }
 
 func (s *fakeDaemonStore) TouchLastSynced(ctx context.Context, id int64) error { return nil }
@@ -341,6 +341,47 @@ func TestDaemonRunContinuesAfterCycleError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return promptly after cancel")
+	}
+}
+
+func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
+	// A send on the Kick channel must run one immediate extra cycle without
+	// waiting for the interval ticker. The interval is set long enough that the
+	// ticker cannot account for the second cycle, so the only way planRuns
+	// reaches 2 is the kick.
+	store := newFakeDaemonStore()
+	d := newTestDaemon(store)
+	kick := make(chan struct{}, 1)
+	d.Kick = kick
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, time.Hour) }()
+
+	// Wait for the immediate (startup) cycle to drain.
+	waitCycle(t, store.cycleDone)
+
+	// Kick and wait for the kick-driven cycle to drain.
+	kick <- struct{}{}
+	waitCycle(t, store.cycleDone)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil on cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after cancel")
+	}
+
+	store.mu.Lock()
+	plans := store.planRuns
+	store.mu.Unlock()
+	// Startup cycle + kick cycle = 2; the hour-long ticker cannot have fired.
+	if plans != 2 {
+		t.Errorf("planRuns = %d, want exactly 2 (startup + kick, no ticker tick)", plans)
 	}
 }
 

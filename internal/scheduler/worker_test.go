@@ -149,7 +149,7 @@ func (s *fakeWorkerStore) RequeueStaleRunning(ctx context.Context) (int, error) 
 func (s *fakeWorkerStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	panic("ListFollows: not expected from Worker")
 }
-func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error {
+func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	panic("UpsertLesson: not expected from Worker")
 }
 func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
@@ -158,7 +158,7 @@ func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error
 func (s *fakeWorkerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
 	panic("ActiveJobExists: not expected from Worker")
 }
-func (s *fakeWorkerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
+func (s *fakeWorkerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	panic("EnqueueJob: not expected from Worker")
 }
 func (s *fakeWorkerStore) TouchLastSynced(ctx context.Context, id int64) error {
@@ -189,6 +189,11 @@ type fakeDownloader struct {
 	// assert the worker stats it and records a real video_path + bytes.
 	writeMP4 []byte
 
+	// onProgress, when non-empty, is replayed through the opts' OnProgress
+	// callback (if the worker set one) before the download resolves, simulating
+	// yt-dlp's per-render progress lines.
+	onProgress []musora.DownloadProgress
+
 	attempts map[int]int // railcontent id → attempts seen so far
 	calls    []musora.DownloadOpts
 }
@@ -200,6 +205,11 @@ func newFakeDownloader() *fakeDownloader {
 func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, o)
 	d.attempts[l.ID]++
+	if o.OnProgress != nil {
+		for _, p := range d.onProgress {
+			o.OnProgress(p)
+		}
+	}
 	if d.alwaysFail {
 		return errors.New("download blew up")
 	}
