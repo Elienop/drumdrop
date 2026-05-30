@@ -18,6 +18,17 @@ var queryFS embed.FS
 // point Query at an httptest server; production never reassigns it.
 var sanityBase = "https://sanity.musora.com/4032r8py/apicdn/v2021-06-07/production_v2/v4"
 
+// SetSanityBase repoints the GROQ read endpoint at base and returns a func that
+// restores the previous value. It exists so tests in other packages (e.g. the
+// HTTP server's follow-create handler, which calls ResolveLesson/
+// ResolveInstructorID) can run hermetically against an httptest stub. Production
+// never calls it.
+func SetSanityBase(base string) (restore func()) {
+	prev := sanityBase
+	sanityBase = base
+	return func() { sanityBase = prev }
+}
+
 const browserUA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 const getMax = 1500
 

@@ -69,7 +69,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 
 	s.mux.HandleFunc("GET /api/follows", s.handleListFollows)
+	s.mux.HandleFunc("POST /api/follows", s.handleCreateFollow)
 	s.mux.HandleFunc("GET /api/follows/{id}", s.handleGetFollow)
+	s.mux.HandleFunc("DELETE /api/follows/{id}", s.handleDeleteFollow)
 	s.mux.HandleFunc("GET /api/follows/{id}/lessons", s.handleFollowLessons)
 
 	s.mux.HandleFunc("GET /api/lessons", s.handleListLessons)
