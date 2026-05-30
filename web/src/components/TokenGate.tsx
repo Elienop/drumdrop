@@ -25,11 +25,16 @@ export function TokenGate(
           <DialogTitle>API token required</DialogTitle>
           <DialogDescription>This drumdrop server is protected by a token. Paste it to continue; it's stored only in this browser.</DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           <Label htmlFor="token">Access token</Label>
           <Input id="token" type="password" value={value} onChange={(e) => setValue(e.target.value)} />
         </div>
-        <Button onClick={() => { if (value) { setToken(value); setOpen(false); onSaved() } }}>Save</Button>
+        <Button
+          disabled={value.trim() === ""}
+          onClick={() => { if (value.trim()) { setToken(value.trim()); setOpen(false); onSaved() } }}
+        >
+          Save
+        </Button>
       </DialogContent>
     </Dialog>
   )

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
-import { api } from "@/lib/api"
+import { api, ApiHttpError } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import type { FollowDTO } from "@/types"
@@ -25,6 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
+import { QueryStatus } from "@/components/QueryState"
 import { AddFollowDialog } from "@/pages/follows/AddFollowDialog"
 
 export function Follows() {
@@ -40,6 +41,9 @@ export function Follows() {
       toast.success("Follow removed")
       qc.invalidateQueries({ queryKey: qk.follows })
       qc.invalidateQueries({ queryKey: qk.summary })
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Remove failed")
     },
   })
 
@@ -59,7 +63,14 @@ export function Follows() {
           <CardDescription>Nodes and instructors you track</CardDescription>
         </CardHeader>
         <CardContent>
-          {follows.data && follows.data.length > 0 ? (
+          {follows.isPending || follows.isError ? (
+            <QueryStatus
+              loading={follows.isPending}
+              error={follows.error}
+              onRetry={() => follows.refetch()}
+              fallbackMessage="Failed to load follows"
+            />
+          ) : follows.data.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>

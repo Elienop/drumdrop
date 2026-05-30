@@ -31,6 +31,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { StatusBadge } from "@/components/StatusBadge"
+import { QueryStatus } from "@/components/QueryState"
 
 const STATE_TABS: JobStatus[] = ["queued", "running", "done", "failed", "canceled"]
 const RECENT_LIMIT = 50
@@ -128,7 +129,14 @@ export function Queue() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {rows.length > 0 ? (
+          {jobs.isPending || jobs.isError ? (
+            <QueryStatus
+              loading={jobs.isPending}
+              error={jobs.error}
+              onRetry={() => jobs.refetch()}
+              fallbackMessage="Failed to load jobs"
+            />
+          ) : rows.length > 0 ? (
             <TooltipProvider>
               <Table>
                 <TableHeader>
@@ -230,7 +238,7 @@ function JobError({ error }: { error: JobDTO["error"] }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="block truncate text-sm text-red-400">{error}</span>
+        <span className="block truncate text-sm text-destructive">{error}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-md break-words">{error}</TooltipContent>
     </Tooltip>

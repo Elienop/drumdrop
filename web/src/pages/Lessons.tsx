@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
 import { ChevronLeft, ChevronRight, MoreHorizontal, X } from "lucide-react"
 import { toast } from "sonner"
-import { api } from "@/lib/api"
+import { api, ApiHttpError } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { formatBytes, formatRelativeTime } from "@/lib/format"
@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/dialog"
 import { StatusBadge } from "@/components/StatusBadge"
 import { ProgressRow } from "@/components/ProgressRow"
+import { QueryStatus } from "@/components/QueryState"
 
 const STATUS_TABS: LessonStatus[] = [
   "pending",
@@ -98,6 +99,9 @@ export function Lessons() {
       qc.invalidateQueries({ queryKey: ["lessons"] })
       qc.invalidateQueries({ queryKey: qk.summary })
     },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Download failed")
+    },
   })
 
   const skip = useMutation({
@@ -109,10 +113,18 @@ export function Lessons() {
       qc.invalidateQueries({ queryKey: ["lessons"] })
       qc.invalidateQueries({ queryKey: qk.summary })
     },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Skip failed")
+    },
   })
 
   const copyPath = (lesson: LessonDTO) => {
-    void navigator.clipboard.writeText(lesson.video_path ?? lesson.output_dir ?? "")
+    const path = lesson.video_path ?? lesson.output_dir
+    if (!path) {
+      toast.message("No path yet")
+      return
+    }
+    void navigator.clipboard.writeText(path)
     toast.message("Path copied")
   }
 
@@ -178,7 +190,14 @@ export function Lessons() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {rows.length > 0 ? (
+          {lessons.isPending || lessons.isError ? (
+            <QueryStatus
+              loading={lessons.isPending}
+              error={lessons.error}
+              onRetry={() => lessons.refetch()}
+              fallbackMessage="Failed to load lessons"
+            />
+          ) : rows.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -198,7 +217,7 @@ export function Lessons() {
                     <TableRow key={lesson.railcontent_id}>
                       <TableCell className="font-medium">
                         {lesson.title}
-                        {lesson.status === "downloading" && live && (
+                        {live && (
                           <div className="mt-2 max-w-md">
                             <ProgressRow
                               title={live.title || lesson.title}
@@ -303,6 +322,7 @@ export function Lessons() {
             onConfirm={(reason) => {
               if (skipping) skip.mutate({ id: skipping.railcontent_id, reason })
             }}
+            onCancel={() => setSkipping(null)}
           />
         </DialogContent>
       </Dialog>
@@ -313,9 +333,11 @@ export function Lessons() {
 function SkipForm({
   pending,
   onConfirm,
+  onCancel,
 }: {
   pending: boolean
   onConfirm: (reason: string) => void
+  onCancel: () => void
 }) {
   const [reason, setReason] = React.useState("")
   return (
@@ -327,6 +349,9 @@ function SkipForm({
         aria-label="Skip reason"
       />
       <DialogFooter>
+        <Button variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
         <Button disabled={pending} onClick={() => onConfirm(reason)}>
           Skip
         </Button>

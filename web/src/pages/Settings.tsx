@@ -4,7 +4,6 @@ import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { clearToken, getToken, setToken } from "@/lib/auth"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -15,6 +14,7 @@ import {
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { ConnectionPill } from "@/components/StatusBadge"
 
 // Settings has three cards: the Musora account connection (session pill + a
 // local connect form), the API token (stored in localStorage, shared with the
@@ -63,10 +63,16 @@ function MusoraCard() {
               Posted to your local drumdrop server; credentials never leave this machine.
             </CardDescription>
           </div>
-          {connected ? (
-            <Badge className="bg-emerald-600 text-white">Connected</Badge>
+          {session.isPending ? (
+            <span className="text-sm text-muted-foreground">Loading…</span>
+          ) : session.isError ? (
+            <span className="text-sm text-destructive">
+              {session.error instanceof ApiHttpError
+                ? session.error.message
+                : "Failed to load"}
+            </span>
           ) : (
-            <Badge variant="secondary">Disconnected</Badge>
+            <ConnectionPill connected={connected} />
           )}
         </div>
       </CardHeader>
@@ -125,7 +131,7 @@ function TokenCard() {
   }
 
   const clear = () => {
-    clearToken()
+    clearToken({ silent: true })
     setStored(false)
     setValue("")
     toast.message("Token cleared")
@@ -178,10 +184,25 @@ function AboutCard() {
         <CardDescription>The drumdrop server you're connected to.</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="flex items-center justify-between gap-4 text-sm">
-          <span className="text-muted-foreground">Version</span>
-          <span className="font-medium">{health.data?.version ?? "—"}</span>
-        </div>
+        {health.isError ? (
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-sm text-destructive">
+              {health.error instanceof ApiHttpError
+                ? health.error.message
+                : "Failed to load"}
+            </span>
+            <Button variant="outline" size="sm" onClick={() => health.refetch()}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <span className="text-muted-foreground">Version</span>
+            <span className="font-medium">
+              {health.isPending ? "Loading…" : (health.data.version ?? "—")}
+            </span>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

@@ -17,10 +17,14 @@ export function setToken(token: string): void {
   listeners.forEach((l) => l(token))
 }
 
-export function clearToken(): void {
+// clearToken removes the stored token and notifies subscribers. By default it
+// also fires the auth-required handler (the 401 path needs the gate to open);
+// pass { silent: true } for a deliberate Settings "Clear" that should not
+// re-open the gate.
+export function clearToken(opts?: { silent?: boolean }): void {
   localStorage.removeItem(TOKEN_KEY)
   listeners.forEach((l) => l(null))
-  onAuthRequired?.()
+  if (!opts?.silent) onAuthRequired?.()
 }
 
 export function subscribe(l: Listener): () => void {

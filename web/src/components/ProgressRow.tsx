@@ -20,7 +20,14 @@ export function ProgressRow({ title, pct, speed, bytes, totalBytes }: ProgressRo
           {pct.toFixed(0)}%
         </span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
+      <div
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={title}
+        className="h-1.5 overflow-hidden rounded-full bg-secondary"
+      >
         <div
           className="h-full rounded-full bg-primary transition-all"
           style={{ width: `${pct}%` }}

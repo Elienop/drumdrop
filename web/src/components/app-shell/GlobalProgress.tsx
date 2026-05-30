@@ -13,7 +13,11 @@ export function GlobalProgress() {
     active.length > 0 ? active.reduce((sum, d) => sum + d.pct, 0) / active.length : 0
 
   return (
-    <div className="flex flex-1 items-center justify-center gap-3 text-xs">
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex flex-1 items-center justify-center gap-3 text-xs"
+    >
       {active.length > 0 && (
         <div className="flex w-64 items-center gap-2">
           <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">

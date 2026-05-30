@@ -13,7 +13,7 @@ export function Sidebar() {
   return (
     <aside className="flex w-56 flex-col border-r bg-card/40 p-3">
       <div className="mb-6 px-2 text-lg font-bold tracking-tight">🥁 drumdrop</div>
-      <nav className="flex flex-1 flex-col gap-1">
+      <nav aria-label="Primary" className="flex flex-1 flex-col gap-1">
         {items.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
@@ -28,7 +28,14 @@ export function Sidebar() {
               )
             }
           >
-            <Icon className="size-4" /> {label}
+            {({ isActive }) => (
+              <span
+                aria-current={isActive ? "page" : undefined}
+                className="flex items-center gap-2"
+              >
+                <Icon className="size-4" /> {label}
+              </span>
+            )}
           </NavLink>
         ))}
         <div className="mt-auto">
@@ -43,7 +50,14 @@ export function Sidebar() {
               )
             }
           >
-            <Settings className="size-4" /> Settings
+            {({ isActive }) => (
+              <span
+                aria-current={isActive ? "page" : undefined}
+                className="flex items-center gap-2"
+              >
+                <Settings className="size-4" /> Settings
+              </span>
+            )}
           </NavLink>
         </div>
       </nav>

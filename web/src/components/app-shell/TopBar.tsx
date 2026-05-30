@@ -5,6 +5,7 @@ import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { statusTone } from "@/components/StatusBadge"
 import { GlobalProgress } from "./GlobalProgress"
 
 // TopBar is a thin header: the live activity strip in the center, the Musora
@@ -20,10 +21,8 @@ export function TopBar() {
       <GlobalProgress />
       <span
         className={cn(
-          "rounded-full px-2.5 py-1 text-xs font-medium",
-          connected
-            ? "bg-emerald-600/20 text-emerald-400"
-            : "bg-muted text-muted-foreground",
+          "rounded-full border px-2.5 py-1 text-xs font-medium",
+          connected ? statusTone.success : statusTone.neutral,
         )}
       >
         {connected ? "Musora connected" : "Musora disconnected"}

@@ -77,9 +77,6 @@ export interface LoginRequest {
   email: string
   password: string
 }
-export interface SyncRequest {
-  dry_run?: boolean
-}
 
 // SSE
 export type EventKind =
@@ -108,8 +105,4 @@ export interface ProgressEvent {
   planned: number
   processed: number
   time: string
-}
-
-export interface ApiError {
-  error: string
 }

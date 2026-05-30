@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/tooltip"
 import { ProgressRow } from "@/components/ProgressRow"
 import { StatusBadge } from "@/components/StatusBadge"
+import { QueryStatus } from "@/components/QueryState"
 
 // Stable enum orders so the stat cards render the statuses in a fixed sequence
 // regardless of map iteration order in the JSON.
@@ -63,6 +64,7 @@ export function Dashboard() {
     },
     onError: (err) => {
       if (is503(err)) toast.error("No daemon attached")
+      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
     },
   })
 
@@ -74,6 +76,7 @@ export function Dashboard() {
     },
     onError: (err) => {
       if (is503(err)) toast.error("No planner attached")
+      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
     },
   })
 
@@ -106,17 +109,30 @@ export function Dashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <StatCard title="Follows" description="Followed nodes and instructors">
-            <div className="text-3xl font-bold tabular-nums">{summary.data?.follows ?? 0}</div>
-          </StatCard>
-          <StatCard title="Lessons" description="By status">
-            <StatBreakdown order={LESSON_ORDER} counts={summary.data?.lessons} />
-          </StatCard>
-          <StatCard title="Jobs" description="By state">
-            <StatBreakdown order={JOB_ORDER} counts={summary.data?.jobs} />
-          </StatCard>
-        </div>
+        {summary.isPending || summary.isError ? (
+          <Card>
+            <CardContent className="pt-6">
+              <QueryStatus
+                loading={summary.isPending}
+                error={summary.error}
+                onRetry={() => summary.refetch()}
+                fallbackMessage="Failed to load summary"
+              />
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <StatCard title="Follows" description="Followed nodes and instructors">
+              <div className="text-3xl font-bold tabular-nums">{summary.data.follows}</div>
+            </StatCard>
+            <StatCard title="Lessons" description="By status">
+              <StatBreakdown order={LESSON_ORDER} counts={summary.data.lessons} />
+            </StatCard>
+            <StatCard title="Jobs" description="By state">
+              <StatBreakdown order={JOB_ORDER} counts={summary.data.jobs} />
+            </StatCard>
+          </div>
+        )}
 
         <Card>
           <CardHeader>
@@ -147,7 +163,14 @@ export function Dashboard() {
             <CardDescription>The 10 most recent jobs</CardDescription>
           </CardHeader>
           <CardContent>
-            {jobs.data && jobs.data.length > 0 ? (
+            {jobs.isPending || jobs.isError ? (
+              <QueryStatus
+                loading={jobs.isPending}
+                error={jobs.error}
+                onRetry={() => jobs.refetch()}
+                fallbackMessage="Failed to load jobs"
+              />
+            ) : jobs.data.length > 0 ? (
               <Table>
                 <TableHeader>
                   <TableRow>
