@@ -433,6 +433,142 @@ func TestListByStatus(t *testing.T) {
 	}
 }
 
+// TestListLessonsByFollow asserts the method returns exactly the lessons
+// attributed to the given follow, ordered by railcontent_id, ignoring lessons
+// belonging to other follows or to no follow at all.
+func TestListLessonsByFollow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first := seedFollowForLesson(t, s)
+	second := seedFollowForLesson(t, s)
+
+	// Two lessons under the first follow (inserted out of id order to prove the
+	// ORDER BY), one under the second, and one with no follow at all.
+	if err := s.UpsertLesson(ctx, 30, "c", sql.NullInt64{}, "drumeo",
+		sql.NullInt64{Int64: first, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson 30: %v", err)
+	}
+	if err := s.UpsertLesson(ctx, 10, "a", sql.NullInt64{}, "drumeo",
+		sql.NullInt64{Int64: first, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson 10: %v", err)
+	}
+	if err := s.UpsertLesson(ctx, 20, "b", sql.NullInt64{}, "drumeo",
+		sql.NullInt64{Int64: second, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson 20: %v", err)
+	}
+	if err := s.UpsertLesson(ctx, 40, "d", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson 40: %v", err)
+	}
+
+	got, err := s.ListLessonsByFollow(ctx, first)
+	if err != nil {
+		t.Fatalf("ListLessonsByFollow: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListLessonsByFollow(first) returned %d rows, want 2", len(got))
+	}
+	if got[0].RailcontentID != 10 || got[1].RailcontentID != 30 {
+		t.Errorf("ListLessonsByFollow order = [%d, %d], want [10, 30] by railcontent_id",
+			got[0].RailcontentID, got[1].RailcontentID)
+	}
+	for _, l := range got {
+		if !l.FollowID.Valid || l.FollowID.Int64 != first {
+			t.Errorf("returned lesson %d has FollowID %+v, want %d", l.RailcontentID, l.FollowID, first)
+		}
+	}
+}
+
+// TestListLessonsByFollowEmpty asserts a follow with no lessons returns an empty
+// slice and no error.
+func TestListLessonsByFollowEmpty(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	follow := seedFollowForLesson(t, s)
+	got, err := s.ListLessonsByFollow(ctx, follow)
+	if err != nil {
+		t.Fatalf("ListLessonsByFollow: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListLessonsByFollow on a follow with no lessons returned %d rows, want 0", len(got))
+	}
+}
+
+// TestListLessons asserts the paged listing orders by updated_at DESC then
+// railcontent_id, and that limit/offset page through the result.
+func TestListLessons(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert three lessons, then set distinct updated_at values directly (the
+	// Mark* helpers use CURRENT_TIMESTAMP, which has second granularity and would
+	// tie across rapid calls). Lesson 2 is newest, then 3, then 1.
+	for _, id := range []int{1, 2, 3} {
+		if err := s.UpsertLesson(ctx, id, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+			t.Fatalf("UpsertLesson %d: %v", id, err)
+		}
+	}
+	for id, ts := range map[int]string{
+		1: "2026-01-01 00:00:00",
+		3: "2026-01-02 00:00:00",
+		2: "2026-01-03 00:00:00",
+	} {
+		if _, err := s.rawDB().Exec(
+			"UPDATE lessons SET updated_at = ? WHERE railcontent_id = ?", ts, id,
+		); err != nil {
+			t.Fatalf("set updated_at for %d: %v", id, err)
+		}
+	}
+
+	got, err := s.ListLessons(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("ListLessons: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("ListLessons returned %d rows, want 3", len(got))
+	}
+	// updated_at DESC: 2 (newest), 3, 1 (oldest).
+	if got[0].RailcontentID != 2 || got[1].RailcontentID != 3 || got[2].RailcontentID != 1 {
+		t.Errorf("ListLessons order = [%d, %d, %d], want [2, 3, 1] by updated_at DESC",
+			got[0].RailcontentID, got[1].RailcontentID, got[2].RailcontentID)
+	}
+
+	// Paging: limit 2 returns the first page; offset 2 returns the remainder.
+	page1, err := s.ListLessons(ctx, 2, 0)
+	if err != nil {
+		t.Fatalf("ListLessons page1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Errorf("ListLessons(limit=2) returned %d rows, want 2", len(page1))
+	}
+	page2, err := s.ListLessons(ctx, 2, 2)
+	if err != nil {
+		t.Fatalf("ListLessons page2: %v", err)
+	}
+	if len(page2) != 1 {
+		t.Errorf("ListLessons(limit=2, offset=2) returned %d rows, want 1", len(page2))
+	}
+}
+
+// TestListLessonsDefaultLimit asserts a non-positive limit falls back to a sane
+// default rather than returning zero rows.
+func TestListLessonsDefaultLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	got, err := s.ListLessons(ctx, -5, 0)
+	if err != nil {
+		t.Fatalf("ListLessons: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("ListLessons(limit=-5) returned %d rows, want 1 (default limit applied)", len(got))
+	}
+}
+
 // statusOf reads the status column of a lesson directly for assertions.
 func statusOf(t *testing.T, s *Store, id int) string {
 	t.Helper()

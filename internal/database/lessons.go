@@ -194,6 +194,53 @@ func (s *Store) ListByStatus(ctx context.Context, status string) ([]Lesson, erro
 	if err != nil {
 		return nil, fmt.Errorf("list lessons by status %q: %w", status, err)
 	}
+	return scanLessons(rows)
+}
+
+// ListLessonsByFollow returns every lesson attributed to the given follow id,
+// ordered by railcontent_id for a deterministic result. A follow with no
+// lessons yields an empty slice and no error.
+func (s *Store) ListLessonsByFollow(ctx context.Context, followID int64) ([]Lesson, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons WHERE follow_id = ? ORDER BY railcontent_id`,
+		followID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list lessons by follow %d: %w", followID, err)
+	}
+	return scanLessons(rows)
+}
+
+// defaultLessonListLimit caps a paged ListLessons call when the caller passes a
+// non-positive limit, so an unbounded query can never be issued by accident.
+const defaultLessonListLimit = 100
+
+// ListLessons returns a page of lessons ordered by updated_at DESC then
+// railcontent_id (most recently touched first, stable within the same
+// timestamp). A limit <= 0 falls back to defaultLessonListLimit; offset pages
+// through the result.
+func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, error) {
+	if limit <= 0 {
+		limit = defaultLessonListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons
+		  ORDER BY updated_at DESC, railcontent_id
+		  LIMIT ? OFFSET ?`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list lessons (limit %d offset %d): %w", limit, offset, err)
+	}
+	return scanLessons(rows)
+}
+
+// scanLessons drains a lessons *sql.Rows into a slice and closes it, so the
+// listing methods share one scan/iterate/close path.
+func scanLessons(rows *sql.Rows) ([]Lesson, error) {
 	defer rows.Close()
 
 	var lessons []Lesson
