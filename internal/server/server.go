@@ -67,6 +67,10 @@ func NewServer(store *database.Store, deps Deps, hub *Hub, cfg Config, version s
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
+
+	s.mux.HandleFunc("GET /api/follows", s.handleListFollows)
+	s.mux.HandleFunc("GET /api/follows/{id}", s.handleGetFollow)
+	s.mux.HandleFunc("GET /api/follows/{id}/lessons", s.handleFollowLessons)
 }
 
 // handleHealthz is the liveness probe: it always reports ok plus the build
