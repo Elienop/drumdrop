@@ -102,8 +102,9 @@ func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcont
 // selected it, the UPDATE touches zero rows. That lost race is treated as a
 // no-claim (ok=false, nil) rather than a half-claimed job, so adding a worker
 // pool later cannot let two workers both believe they claimed the same job.
-// With SetMaxOpenConns(1) only one worker runs at a time today, so the guard is
-// dormant; it exists so the same query stays correct under future concurrency.
+// The scheduler runs one worker today, so the guard is dormant; it (and the
+// withTx write serialization via Store.mu) exists so the query stays correct
+// under future concurrency.
 func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 	var claimed Job
 	var ok bool

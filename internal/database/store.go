@@ -4,12 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 )
 
 // Store wraps the application database handle. Every mutation in the database
 // package flows through Store.withTx, the single transaction chokepoint, so
 // rollback-on-error and commit-on-success are guaranteed in exactly one place.
+//
+// mu serializes writers. Under WAL the connection pool may hold more than one
+// connection (see Open) so reads run concurrently, but SQLite still permits
+// only one writer at a time. Taking mu in withTx makes that single-writer
+// constraint explicit in Go rather than relying on SQLITE_BUSY/busy_timeout
+// retries, which keeps writes deterministic and avoids "database is locked"
+// surfacing to callers. Reads (plain QueryContext, not withTx) never take mu.
 type Store struct {
+	mu sync.Mutex
 	db *sql.DB
 }
 
@@ -35,9 +44,15 @@ func (s *Store) Ping(ctx context.Context) error {
 // when fn returns nil. This is the one place mutations are allowed to commit, so
 // no store method opens its own transaction.
 //
+// It holds s.mu for the duration so writers are serialized explicitly (see the
+// Store doc comment); readers do not take s.mu and run concurrently under WAL.
+//
 // The deferred Rollback after a successful Commit is a harmless no-op:
 // database/sql returns sql.ErrTxDone, which we deliberately ignore.
 func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
