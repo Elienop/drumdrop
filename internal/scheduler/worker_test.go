@@ -149,7 +149,7 @@ func (s *fakeWorkerStore) RequeueStaleRunning(ctx context.Context) (int, error) 
 func (s *fakeWorkerStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	panic("ListFollows: not expected from Worker")
 }
-func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error {
+func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	panic("UpsertLesson: not expected from Worker")
 }
 func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {

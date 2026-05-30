@@ -95,7 +95,7 @@ func newCLIStore(follows []database.Follow) *cliStore {
 func (s *cliStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	return s.follows, nil
 }
-func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
+func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	s.upserts = append(s.upserts, id)
 	return nil
 }

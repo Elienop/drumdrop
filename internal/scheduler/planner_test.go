@@ -19,11 +19,13 @@ type enqueueCall struct {
 }
 
 // upsertCall records one UpsertLesson invocation so tests can assert the parent
-// linkage (node → follow railcontent id, instructor → NULL).
+// linkage (node → follow railcontent id, instructor → NULL) and the follow_id the
+// lesson was discovered under.
 type upsertCall struct {
-	id     int
-	parent sql.NullInt64
-	brand  string
+	id       int
+	parent   sql.NullInt64
+	brand    string
+	followID sql.NullInt64
 }
 
 // fakePlannerStore is an in-memory Store implementing only the methods the
@@ -45,8 +47,8 @@ func (s *fakePlannerStore) ListFollows(ctx context.Context) ([]database.Follow, 
 	return s.follows, nil
 }
 
-func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error {
-	s.upserts = append(s.upserts, upsertCall{id: railcontentID, parent: parent, brand: brand})
+func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+	s.upserts = append(s.upserts, upsertCall{id: railcontentID, parent: parent, brand: brand, followID: followID})
 	return nil
 }
 
@@ -183,9 +185,11 @@ func TestPlanParentLinkageNodeVsInstructor(t *testing.T) {
 
 	parents := map[int]sql.NullInt64{}
 	brands := map[int]string{}
+	followIDs := map[int]sql.NullInt64{}
 	for _, u := range store.upserts {
 		parents[u.id] = u.parent
 		brands[u.id] = u.brand
+		followIDs[u.id] = u.followID
 	}
 
 	// Node follow → parent is its railcontent id.
@@ -195,6 +199,15 @@ func TestPlanParentLinkageNodeVsInstructor(t *testing.T) {
 	// Instructor follow → parent is NULL (invalid).
 	if got := parents[200]; got.Valid {
 		t.Errorf("instructor lesson parent = %+v, want invalid/NULL", got)
+	}
+
+	// Every lesson is upserted with the id of the follow it was discovered under,
+	// regardless of kind (the parent linkage differs, the follow_id does not).
+	if got := followIDs[100]; !got.Valid || got.Int64 != node.ID {
+		t.Errorf("node lesson follow_id = %+v, want valid %d", got, node.ID)
+	}
+	if got := followIDs[200]; !got.Valid || got.Int64 != inst.ID {
+		t.Errorf("instructor lesson follow_id = %+v, want valid %d", got, inst.ID)
 	}
 	if brands[100] != node.Brand {
 		t.Errorf("node lesson brand = %q, want %q", brands[100], node.Brand)

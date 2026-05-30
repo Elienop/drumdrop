@@ -32,6 +32,7 @@ type Lesson struct {
 	VideoPath           sql.NullString `json:"video_path"`
 	Bytes               sql.NullInt64  `json:"bytes"`
 	Error               sql.NullString `json:"error"`
+	FollowID            sql.NullInt64  `json:"follow_id"`
 	FirstSeenAt         sql.NullTime   `json:"first_seen_at"`
 	DownloadedAt        sql.NullTime   `json:"downloaded_at"`
 	UpdatedAt           sql.NullTime   `json:"updated_at"`
@@ -40,7 +41,7 @@ type Lesson struct {
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, status,
-	quality, output_dir, video_path, bytes, error,
+	quality, output_dir, video_path, bytes, error, follow_id,
 	first_seen_at, downloaded_at, updated_at`
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
@@ -51,7 +52,7 @@ func scanLesson(row interface {
 	var l Lesson
 	err := row.Scan(
 		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Status,
-		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error,
+		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
 		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
 	)
 	return l, err
@@ -59,20 +60,22 @@ func scanLesson(row interface {
 
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
 // railcontent_id. On conflict it updates only title, parent, and updated_at — it
-// deliberately does NOT touch status or any download metadata. This is half of
-// the dedup mechanism: a re-sync that re-discovers an already-downloaded lesson
-// must never downgrade it back to pending and trigger a redundant re-download.
-// New rows take the table default status='pending'.
-func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error {
+// deliberately does NOT touch status, download metadata, or follow_id. This is
+// half of the dedup mechanism: a re-sync that re-discovers an already-downloaded
+// lesson must never downgrade it back to pending and trigger a redundant
+// re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
+// attributed to the follow that first discovered it even if a later follow also
+// covers it. New rows take the table default status='pending'.
+func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand)
-			 VALUES(?, ?, ?, ?)
+			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, follow_id)
+			 VALUES(?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
 			     parent_railcontent_id = excluded.parent_railcontent_id,
 			     updated_at            = CURRENT_TIMESTAMP`,
-			railcontentID, title, parent, brand,
+			railcontentID, title, parent, brand, followID,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert lesson %d: %w", railcontentID, err)

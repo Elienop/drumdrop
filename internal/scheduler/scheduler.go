@@ -47,7 +47,7 @@ type Expander interface {
 type Store interface {
 	// planner
 	ListFollows(ctx context.Context) ([]database.Follow, error)
-	UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string) error
+	UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error
 	IsDownloaded(ctx context.Context, id int) (bool, error)
 	ActiveJobExists(ctx context.Context, railcontentID int) (bool, error)
 	EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error)

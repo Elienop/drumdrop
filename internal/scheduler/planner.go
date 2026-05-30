@@ -104,8 +104,9 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 
 		fNew := 0
 		for _, id := range ids {
-			// Record the lesson regardless of whether we enqueue it.
-			if err := p.Store.UpsertLesson(ctx, id, "", parent, f.Brand); err != nil {
+			// Record the lesson regardless of whether we enqueue it, attributing it
+			// to the follow currently being expanded (first-follow-wins on conflict).
+			if err := p.Store.UpsertLesson(ctx, id, "", parent, f.Brand, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
 				return enqueued, fmt.Errorf("upsert lesson %d: %w", id, err)
 			}
 

@@ -22,7 +22,7 @@ func TestUpsertLessonInsertsNewRow(t *testing.T) {
 	ctx := context.Background()
 
 	parent := sql.NullInt64{Int64: 100, Valid: true}
-	if err := s.UpsertLesson(ctx, 409875, "Lesson One", parent, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 409875, "Lesson One", parent, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
@@ -54,16 +54,106 @@ func TestUpsertLessonInsertsNewRow(t *testing.T) {
 	}
 }
 
+// TestUpsertLessonStoresFollowID asserts a new lesson row records the follow_id
+// it was discovered under, round-tripping through GetLesson as a valid NullInt64.
+func TestUpsertLessonStoresFollowID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	followID := seedFollowForLesson(t, s)
+	follow := sql.NullInt64{Int64: followID, Valid: true}
+	if err := s.UpsertLesson(ctx, 409875, "Lesson One", sql.NullInt64{}, "drumeo", follow); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+
+	got, err := s.GetLesson(ctx, 409875)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if !got.FollowID.Valid || got.FollowID.Int64 != followID {
+		t.Errorf("FollowID = %+v, want valid %d", got.FollowID, followID)
+	}
+}
+
+// TestUpsertLessonNullFollowID asserts an upsert with an invalid NullInt64 leaves
+// follow_id NULL (e.g. an instructor follow whose parent linkage is unknown, or a
+// manually inserted lesson).
+func TestUpsertLessonNullFollowID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertLesson(ctx, 409875, "Lesson One", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+
+	got, err := s.GetLesson(ctx, 409875)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if got.FollowID.Valid {
+		t.Errorf("FollowID = %+v, want NULL", got.FollowID)
+	}
+}
+
+// TestUpsertLessonPreservesFollowID is the first-follow-wins invariant: a lesson
+// discovered under one follow keeps that follow_id even when a later sync
+// re-upserts it under a different follow. (Title and parent are still refreshed.)
+func TestUpsertLessonPreservesFollowID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first := seedFollowForLesson(t, s)
+	second := seedFollowForLesson(t, s)
+
+	if err := s.UpsertLesson(ctx, 409875, "Lesson", sql.NullInt64{}, "drumeo",
+		sql.NullInt64{Int64: first, Valid: true}); err != nil {
+		t.Fatalf("first UpsertLesson: %v", err)
+	}
+	// A later sync re-discovers the same lesson under a different follow.
+	if err := s.UpsertLesson(ctx, 409875, "Lesson (renamed)", sql.NullInt64{}, "drumeo",
+		sql.NullInt64{Int64: second, Valid: true}); err != nil {
+		t.Fatalf("second UpsertLesson: %v", err)
+	}
+
+	got, err := s.GetLesson(ctx, 409875)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if !got.FollowID.Valid || got.FollowID.Int64 != first {
+		t.Errorf("FollowID = %+v, want preserved original %d (first-follow-wins)", got.FollowID, first)
+	}
+	if got.Title != "Lesson (renamed)" {
+		t.Errorf("Title = %q, want refreshed %q", got.Title, "Lesson (renamed)")
+	}
+}
+
+// seedFollowForLesson inserts a node follow and returns its id, so lesson rows can
+// satisfy the follow_id foreign key.
+func seedFollowForLesson(t *testing.T, s *Store) int64 {
+	t.Helper()
+	res, err := s.rawDB().Exec(
+		`INSERT INTO follows(kind, railcontent_id, brand, quality) VALUES('node', NULL, 'drumeo', 'best')`,
+	)
+	if err != nil {
+		t.Fatalf("seed follow: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("seed follow last id: %v", err)
+	}
+	return id
+}
+
 func TestUpsertLessonDedup(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertLesson(ctx, 409875, "Original Title", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 409875, "Original Title", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("first UpsertLesson: %v", err)
 	}
 	// Re-upserting the same railcontent_id must update in place, not duplicate.
 	if err := s.UpsertLesson(ctx, 409875, "Updated Title",
-		sql.NullInt64{Int64: 200, Valid: true}, "drumeo"); err != nil {
+		sql.NullInt64{Int64: 200, Valid: true}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("second UpsertLesson: %v", err)
 	}
 
@@ -91,7 +181,7 @@ func TestUpsertLessonDoesNotResetStatus(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertLesson(ctx, 409875, "Lesson", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 409875, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	if err := s.MarkDownloaded(ctx, 409875, "best", "/out/dir", "/out/dir/video.mp4", 12345); err != nil {
@@ -99,7 +189,7 @@ func TestUpsertLessonDoesNotResetStatus(t *testing.T) {
 	}
 
 	// A re-sync upserts the same lesson again.
-	if err := s.UpsertLesson(ctx, 409875, "Lesson (renamed)", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 409875, "Lesson (renamed)", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("re-UpsertLesson: %v", err)
 	}
 
@@ -136,7 +226,7 @@ func TestIsDownloaded(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
@@ -168,7 +258,7 @@ func TestStatusTransitions(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
@@ -230,7 +320,7 @@ func TestMarkSkipped(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo"); err != nil {
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
@@ -298,7 +388,7 @@ func TestListByStatus(t *testing.T) {
 
 	// Three lessons in three different terminal states plus one pending.
 	for id, title := range map[int]string{1: "a", 2: "b", 3: "c", 4: "d"} {
-		if err := s.UpsertLesson(ctx, id, title, sql.NullInt64{}, "drumeo"); err != nil {
+		if err := s.UpsertLesson(ctx, id, title, sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}

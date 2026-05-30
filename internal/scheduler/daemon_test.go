@@ -123,7 +123,7 @@ func (s *fakeDaemonStore) ListFollows(ctx context.Context) ([]database.Follow, e
 	return []database.Follow{nodeFollow()}, nil
 }
 
-func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string) error {
+func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
 	return nil
 }
 func (s *fakeDaemonStore) IsDownloaded(ctx context.Context, id int) (bool, error) { return false, nil }
