@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"time"
 )
 
 //go:embed queries/*.groq
@@ -39,7 +40,10 @@ var (
 	// substituted into the GROQ array literal: one or more comma-separated
 	// integers (mirrors validateSlug/validateBrand).
 	rePermIDValid = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
-	httpClient    = &http.Client{}
+	// httpClient carries a request timeout so a hung GROQ/auth endpoint cannot
+	// block a handler-driven call (preview/session) — or the planner/downloader —
+	// indefinitely. It is shared by Query and the auth helpers.
+	httpClient = &http.Client{Timeout: 30 * time.Second}
 )
 
 const defaultPermissionIDs = "92"

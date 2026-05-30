@@ -91,6 +91,10 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/sync", s.handleSync)
 
+	s.mux.HandleFunc("GET /api/preview", s.handlePreview)
+	s.mux.HandleFunc("GET /api/session", s.handleGetSession)
+	s.mux.HandleFunc("POST /api/session", s.handleLogin)
+
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 }
 
