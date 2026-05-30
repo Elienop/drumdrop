@@ -84,6 +84,41 @@ func (w *Worker) progress() ProgressSink {
 	return w.Progress
 }
 
+// progressCallback returns the musora.DownloadOpts.OnProgress closure for one
+// download attempt: it translates each yt-dlp DownloadProgress into a
+// download_progress ProgressEvent on the worker's sink. yt-dlp renders progress
+// many times per second, so the closure coalesces to at most one event per
+// second — except the terminal 100% observation, which always passes through so
+// a consumer is guaranteed a final frame. The callback is invoked from the
+// Downloader on the worker's single goroutine, so the unsynchronised lastEmit is
+// safe.
+func (w *Worker) progressCallback(job database.Job, lesson *musora.Lesson, attempt int) func(musora.DownloadProgress) {
+	var lastEmit time.Time
+	var emitted bool
+	return func(p musora.DownloadProgress) {
+		now := time.Now()
+		if emitted && p.Pct < 100 && now.Sub(lastEmit) < time.Second {
+			return
+		}
+		lastEmit = now
+		emitted = true
+		w.progress().Emit(ProgressEvent{
+			Kind:          "download_progress",
+			JobID:         job.ID,
+			FollowID:      job.FollowID.Int64,
+			RailcontentID: job.RailcontentID,
+			Title:         lesson.Title,
+			Attempt:       attempt,
+			MaxAttempts:   w.Cfg.MaxAttempts,
+			Pct:           p.Pct,
+			Bytes:         p.Downloaded,
+			TotalBytes:    p.Total,
+			Speed:         p.Speed,
+			Time:          now,
+		})
+	}
+}
+
 // waitBackoff waits the given retry delay but stays responsive to cancellation:
 // it returns false (do not retry) the moment ctx is cancelled, leaving the job
 // to be re-queued and retried next cycle. A real Worker waits on time.After(d)
@@ -268,6 +303,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Index:         1,
 			Quality:       quality,
 			ResourcesOnly: w.Cfg.ResourcesOnly,
+			OnProgress:    w.progressCallback(job, lesson, attempt),
 		})
 		if derr == nil {
 			lessonDir := filepath.Join(outDir, fmt.Sprintf("%02d - %s", 1, musora.Sanitize(lesson.Title)))

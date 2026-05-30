@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -181,6 +182,93 @@ func TestWorkerEmitsSkipped(t *testing.T) {
 			if e.RailcontentID != 100 || e.Err == "" {
 				t.Errorf("lesson_skipped = %+v, want RailcontentID 100 and a reason", e)
 			}
+		}
+	}
+}
+
+// TestWorkerEmitsDownloadProgress asserts the worker wires DownloadOpts.OnProgress
+// to a closure that emits download_progress events carrying the current job/lesson
+// identity and the transfer fields, so SSE consumers see real % progress.
+func TestWorkerEmitsDownloadProgress(t *testing.T) {
+	job := queuedJob(9, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	// Drive the OnProgress callback the worker sets. Two observations far apart in
+	// pct so the coalescer admits both (it rate-limits identical-second bursts).
+	dl.onProgress = []musora.DownloadProgress{
+		{Pct: 10, Downloaded: 100, Total: 1000, Speed: "1.0MiB/s"},
+		{Pct: 100, Downloaded: 1000, Total: 1000, Speed: "2.0MiB/s"},
+	}
+	sink := &recordingSink{}
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Progress = sink
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	var progress []ProgressEvent
+	for _, e := range sink.snapshot() {
+		if e.Kind == "download_progress" {
+			progress = append(progress, e)
+		}
+	}
+	if len(progress) == 0 {
+		t.Fatalf("no download_progress events emitted (all: %v)", sink.kinds())
+	}
+	// Every progress event carries the current job/lesson identity and a sane pct.
+	for _, e := range progress {
+		if e.JobID != 9 || e.RailcontentID != 100 {
+			t.Errorf("download_progress identity = job %d lesson %d, want job 9 lesson 100", e.JobID, e.RailcontentID)
+		}
+		if e.Pct < 0 || e.Pct > 100 {
+			t.Errorf("download_progress Pct = %v, out of range", e.Pct)
+		}
+	}
+	// The final (100%) observation must reach the sink with its transfer fields.
+	last := progress[len(progress)-1]
+	if last.Pct != 100 || last.Bytes != 1000 || last.TotalBytes != 1000 || last.Speed != "2.0MiB/s" {
+		t.Errorf("final download_progress = %+v, want Pct 100 Bytes 1000 TotalBytes 1000 Speed 2.0MiB/s", last)
+	}
+}
+
+// TestProgressEventJSONIsSnakeCase asserts ProgressEvent marshals to the
+// snake_case keys SSE data frames carry, matching the REST DTOs the UI consumes.
+func TestProgressEventJSONIsSnakeCase(t *testing.T) {
+	e := ProgressEvent{
+		Kind:          "download_progress",
+		RailcontentID: 100,
+		JobID:         9,
+		FollowID:      3,
+		Title:         "Lesson A",
+		Attempt:       1,
+		MaxAttempts:   3,
+		Pct:           42.5,
+		Bytes:         100,
+		TotalBytes:    1000,
+		Speed:         "1.0MiB/s",
+		Err:           "boom",
+		Planned:       5,
+		Processed:     2,
+		Time:          time.Unix(0, 0).UTC(),
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	for _, key := range []string{
+		"kind", "railcontent_id", "job_id", "follow_id", "title", "attempt",
+		"max_attempts", "pct", "bytes", "total_bytes", "speed", "err",
+		"planned", "processed", "time",
+	} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("ProgressEvent JSON missing snake_case key %q; got %s", key, b)
 		}
 	}
 }

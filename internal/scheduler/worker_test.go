@@ -189,6 +189,11 @@ type fakeDownloader struct {
 	// assert the worker stats it and records a real video_path + bytes.
 	writeMP4 []byte
 
+	// onProgress, when non-empty, is replayed through the opts' OnProgress
+	// callback (if the worker set one) before the download resolves, simulating
+	// yt-dlp's per-render progress lines.
+	onProgress []musora.DownloadProgress
+
 	attempts map[int]int // railcontent id → attempts seen so far
 	calls    []musora.DownloadOpts
 }
@@ -200,6 +205,11 @@ func newFakeDownloader() *fakeDownloader {
 func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, o)
 	d.attempts[l.ID]++
+	if o.OnProgress != nil {
+		for _, p := range d.onProgress {
+			o.OnProgress(p)
+		}
+	}
 	if d.alwaysFail {
 		return errors.New("download blew up")
 	}
