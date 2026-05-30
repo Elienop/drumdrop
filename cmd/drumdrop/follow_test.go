@@ -61,39 +61,6 @@ func TestFollowFlagSplitting(t *testing.T) {
 	})
 }
 
-// TestSchedulerConfigDefaults verifies the flag → scheduler.Config mapping:
-// an empty --out falls back to DownloadsDir() (env-driven), an empty --quality
-// stays empty (use each follow's saved quality), and --resources-only flows
-// through. The retry tunables come from DefaultConfig.
-func TestSchedulerConfigDefaults(t *testing.T) {
-	t.Setenv("DRUMDROP_DOWNLOADS_DIR", "/tmp/dd")
-
-	cfg := schedulerConfig("", "", false)
-	if cfg.DownloadsDir != "/tmp/dd" {
-		t.Errorf("DownloadsDir = %q, want /tmp/dd (from env fallback)", cfg.DownloadsDir)
-	}
-	if cfg.Quality != "" {
-		t.Errorf("Quality = %q, want empty", cfg.Quality)
-	}
-	if cfg.ResourcesOnly {
-		t.Error("ResourcesOnly = true, want false")
-	}
-	if cfg.MaxAttempts != 3 {
-		t.Errorf("MaxAttempts = %d, want 3 (from DefaultConfig)", cfg.MaxAttempts)
-	}
-
-	cfg = schedulerConfig("/explicit/out", "best", true)
-	if cfg.DownloadsDir != "/explicit/out" {
-		t.Errorf("DownloadsDir = %q, want /explicit/out (--out wins over env)", cfg.DownloadsDir)
-	}
-	if cfg.Quality != "best" {
-		t.Errorf("Quality = %q, want best", cfg.Quality)
-	}
-	if !cfg.ResourcesOnly {
-		t.Error("ResourcesOnly = false, want true")
-	}
-}
-
 // ---- runSync via the scheduler -------------------------------------------
 //
 // The full behavioral guarantees (skip already-downloaded, dedupe active jobs,

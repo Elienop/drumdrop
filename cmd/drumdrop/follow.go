@@ -9,29 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/engine"
 	"github.com/elienop/drumdrop/internal/musora"
 	"github.com/elienop/drumdrop/internal/scheduler"
 )
-
-// openStore prepares the config directory, opens the SQLite database with the
-// drumdrop pragmas, runs any pending migrations, and returns a ready Store.
-// Every persistence verb calls this and defers store.Close().
-func openStore() (*database.Store, error) {
-	if err := os.MkdirAll(config.ConfigDir(), 0o700); err != nil {
-		return nil, fmt.Errorf("create config dir: %w", err)
-	}
-	db, err := database.Open(config.DBPath())
-	if err != nil {
-		return nil, err
-	}
-	if err := database.RunMigrations(db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return database.NewStore(db), nil
-}
 
 // followArgs holds the parsed positionals and flag values for the follow
 // command. Extracted so cmdFollow and its tests drive the same parser.
@@ -82,7 +64,7 @@ func cmdFollow(argv []string) error {
 		slug = strings.TrimPrefix(positionals[0], "@")
 	}
 
-	store, err := openStore()
+	store, err := engine.OpenStore()
 	if err != nil {
 		return err
 	}
@@ -102,7 +84,7 @@ func cmdFollow(argv []string) error {
 // followNode resolves a best-effort title for the node id (an empty title is
 // acceptable) and records a node follow.
 func followNode(ctx context.Context, store *database.Store, target, brand, quality string) error {
-	id := extractID(target)
+	id := engine.ExtractID(target)
 	if id == 0 {
 		return fmt.Errorf("could not parse a content id from: %s", target)
 	}
@@ -110,7 +92,7 @@ func followNode(ctx context.Context, store *database.Store, target, brand, quali
 	// Best-effort title: the lesson/container's own title, falling back to its
 	// parent course name. Failure here is non-fatal — an empty title is fine.
 	title := ""
-	if lesson, err := musora.ResolveLesson(id, permissionIDs()); err == nil && lesson != nil {
+	if lesson, err := musora.ResolveLesson(id, engine.PermissionIDs()); err == nil && lesson != nil {
 		title = lesson.Title
 		if title == "" && len(lesson.ParentContentData) > 0 {
 			title = lesson.ParentContentData[0].Title
@@ -171,7 +153,7 @@ func cmdUnfollow(argv []string) error {
 		return fmt.Errorf("unfollow: %q is not a valid follow id", positionals[0])
 	}
 
-	store, err := openStore()
+	store, err := engine.OpenStore()
 	if err != nil {
 		return err
 	}
@@ -187,7 +169,7 @@ func cmdUnfollow(argv []string) error {
 // cmdFollows lists every follow with its id, kind, target, title, brand,
 // quality, and last-synced timestamp.
 func cmdFollows() error {
-	store, err := openStore()
+	store, err := engine.OpenStore()
 	if err != nil {
 		return err
 	}
@@ -239,76 +221,12 @@ func lastSynced(f database.Follow) string {
 // ---- sync ----------------------------------------------------------------
 //
 // sync is the one-shot equivalent of the daemon's per-cycle work: build a
-// scheduler Planner + Worker over the real store and adapters, plan once (record
-// + enqueue new lessons), then drain the queue once (download them, with retry).
-// The behavioral guarantees — skip already-downloaded, dedupe active jobs, cap
-// NEW downloads via --limit, never abort on one bad lesson, and dry-run records
-// but downloads nothing — live in and are tested by the scheduler package.
-
-// realExpander adapts the musora package to scheduler.Expander.
-type realExpander struct{}
-
-func (realExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
-	switch f.Kind {
-	case "node":
-		if !f.RailcontentID.Valid {
-			return nil, fmt.Errorf("node follow #%d has no railcontent_id", f.ID)
-		}
-		_, ids, err := musora.ResolveLessonIDs(int(f.RailcontentID.Int64), false, permIDs)
-		return ids, err
-	case "instructor":
-		if !f.Slug.Valid {
-			return nil, fmt.Errorf("instructor follow #%d has no slug", f.ID)
-		}
-		refs, err := musora.InstructorLessons(f.Slug.String, f.Brand, permIDs)
-		if err != nil {
-			return nil, err
-		}
-		ids := make([]int, 0, len(refs))
-		for _, r := range refs {
-			ids = append(ids, r.ID)
-		}
-		return ids, nil
-	default:
-		return nil, fmt.Errorf("unknown follow kind %q", f.Kind)
-	}
-}
-
-// realResolver adapts musora.ResolveLesson to scheduler.Resolver.
-type realResolver struct{}
-
-func (realResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
-	return musora.ResolveLesson(id, permIDs)
-}
-
-// realDownloader adapts musora.DownloadLesson to scheduler.Downloader.
-type realDownloader struct{}
-
-func (realDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
-	return musora.DownloadLesson(l, o)
-}
-
-// Compile-time assertions that the real adapters satisfy the scheduler
-// interfaces. They wrap the same musora calls the engine has always used.
-var (
-	_ scheduler.Expander   = realExpander{}
-	_ scheduler.Resolver   = realResolver{}
-	_ scheduler.Downloader = realDownloader{}
-)
-
-// schedulerConfig builds a scheduler.Config from the shared download flags. An
-// empty out falls back to config.DownloadsDir() (the DRUMDROP_DOWNLOADS_DIR env
-// or ./downloads); an empty quality means "use each follow's saved quality".
-func schedulerConfig(out, quality string, resourcesOnly bool) scheduler.Config {
-	cfg := scheduler.DefaultConfig()
-	cfg.DownloadsDir = out
-	if cfg.DownloadsDir == "" {
-		cfg.DownloadsDir = config.DownloadsDir()
-	}
-	cfg.Quality = quality
-	cfg.ResourcesOnly = resourcesOnly
-	return cfg
-}
+// scheduler Planner + Worker over the real store and adapters (via engine.Build),
+// plan once (record + enqueue new lessons), then drain the queue once (download
+// them, with retry). The behavioral guarantees — skip already-downloaded, dedupe
+// active jobs, cap NEW downloads via --limit, never abort on one bad lesson, and
+// dry-run records but downloads nothing — live in and are tested by the scheduler
+// package.
 
 // cmdSync parses the sync flags, builds a scheduler Planner + Worker over the
 // real store and adapters, and runs one plan+drain cycle (the daemon's per-cycle
@@ -328,21 +246,14 @@ func cmdSync(argv []string) error {
 		return err
 	}
 
-	store, err := openStore()
+	store, err := engine.OpenStore()
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	cfg := schedulerConfig(*out, *quality, *resourcesOnly)
-	permIDs := permissionIDs()
-	planner := &scheduler.Planner{
-		Store:    store,
-		Expander: realExpander{},
-		PermIDs:  permIDs,
-		Log:      os.Stdout,
-	}
-	worker := scheduler.NewWorker(store, realResolver{}, realDownloader{}, cfg, permIDs, os.Stdout)
+	cfg := engine.Config(*out, *quality, *resourcesOnly)
+	planner, worker, _ := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout)
 
 	return runSync(context.Background(), planner, worker, *dryRun, *limit, os.Stdout)
 }
