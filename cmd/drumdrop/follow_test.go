@@ -110,13 +110,20 @@ func (s *cliStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
 	}
 	return false, nil
 }
-func (s *cliStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, error) {
+func (s *cliStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, id int) (int64, bool, error) {
+	// Mirror the real store's atomic dedup: reuse any queued/running job for
+	// this lesson and report created=false instead of inserting a duplicate.
+	for _, j := range s.jobs {
+		if j.RailcontentID == id && (j.Status == database.JobQueued || j.Status == database.JobRunning) {
+			return j.ID, false, nil
+		}
+	}
 	s.nextJobID++
 	j := database.Job{ID: s.nextJobID, FollowID: followID, RailcontentID: id, Status: database.JobQueued}
 	s.queue = append(s.queue, j)
 	s.jobs[j.ID] = j
 	s.enqueued = append(s.enqueued, id)
-	return j.ID, nil
+	return j.ID, true, nil
 }
 func (s *cliStore) TouchLastSynced(ctx context.Context, id int64) error {
 	s.touched = append(s.touched, id)

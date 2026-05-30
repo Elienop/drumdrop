@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -35,7 +37,7 @@ func TestEnqueueJobThenListQueued(t *testing.T) {
 
 	followID := seedFollow(t, s, 100)
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: followID, Valid: true}, 409875)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: followID, Valid: true}, 409875)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -80,7 +82,7 @@ func TestEnqueueJobNullFollow(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 555)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 555)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -97,7 +99,7 @@ func TestMarkJobRunningIncrementsAttempts(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestMarkJobDone(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -175,7 +177,7 @@ func TestMarkJobFailed(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -250,7 +252,7 @@ func TestJobFollowOnDeleteSetNull(t *testing.T) {
 
 	followID := seedFollow(t, s, 100)
 
-	jobID, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: followID, Valid: true}, 409875)
+	jobID, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: followID, Valid: true}, 409875)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -296,11 +298,11 @@ func TestClaimNextJobClaimsOldestRunningAttempts(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	first, err := s.EnqueueJob(ctx, sql.NullInt64{}, 11)
+	first, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 11)
 	if err != nil {
 		t.Fatalf("EnqueueJob first: %v", err)
 	}
-	second, err := s.EnqueueJob(ctx, sql.NullInt64{}, 22)
+	second, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 22)
 	if err != nil {
 		t.Fatalf("EnqueueJob second: %v", err)
 	}
@@ -369,7 +371,7 @@ func TestRequeueStaleRunning(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 77); err != nil {
+	if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 77); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 
@@ -426,7 +428,7 @@ func TestActiveJobExists(t *testing.T) {
 		t.Error("ActiveJobExists = true for a lesson with no job, want false")
 	}
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -459,7 +461,7 @@ func TestActiveJobExists(t *testing.T) {
 	}
 
 	// Failed: inactive (so the planner can re-enqueue next cycle).
-	failID, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	failID, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
 	if err != nil {
 		t.Fatalf("EnqueueJob (for failed): %v", err)
 	}
@@ -479,15 +481,15 @@ func TestListJobsByStatus(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	queued1, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	queued1, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob queued1: %v", err)
 	}
-	running, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
+	running, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
 	if err != nil {
 		t.Fatalf("EnqueueJob running: %v", err)
 	}
-	queued2, err := s.EnqueueJob(ctx, sql.NullInt64{}, 3)
+	queued2, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 3)
 	if err != nil {
 		t.Fatalf("EnqueueJob queued2: %v", err)
 	}
@@ -536,7 +538,7 @@ func TestListJobsOrderAndLimit(t *testing.T) {
 
 	var ids []int64
 	for i := 0; i < 3; i++ {
-		id, err := s.EnqueueJob(ctx, sql.NullInt64{}, i+1)
+		id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, i+1)
 		if err != nil {
 			t.Fatalf("EnqueueJob %d: %v", i, err)
 		}
@@ -576,7 +578,7 @@ func TestCancelJobQueued(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -602,7 +604,7 @@ func TestCancelJobRunning(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -632,7 +634,7 @@ func TestCancelJobTerminal(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -679,7 +681,7 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -746,7 +748,7 @@ func TestRetryJobCanceled(t *testing.T) {
 	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -777,7 +779,7 @@ func TestRetryJobActive(t *testing.T) {
 	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -811,15 +813,15 @@ func TestListQueuedOrderAndFilter(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	first, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	first, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob first: %v", err)
 	}
-	second, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
+	second, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
 	if err != nil {
 		t.Fatalf("EnqueueJob second: %v", err)
 	}
-	third, err := s.EnqueueJob(ctx, sql.NullInt64{}, 3)
+	third, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 3)
 	if err != nil {
 		t.Fatalf("EnqueueJob third: %v", err)
 	}
@@ -852,7 +854,7 @@ func TestCountJobsByState(t *testing.T) {
 	// Enqueue three jobs (all queued), then move two to terminal states.
 	var ids []int64
 	for _, rc := range []int{101, 102, 103} {
-		id, err := s.EnqueueJob(ctx, sql.NullInt64{}, rc)
+		id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, rc)
 		if err != nil {
 			t.Fatalf("EnqueueJob %d: %v", rc, err)
 		}
@@ -902,5 +904,165 @@ func TestCountJobsByStateEmpty(t *testing.T) {
 	}
 	if len(counts) != 0 {
 		t.Errorf("CountJobsByState on empty table returned %v, want empty", counts)
+	}
+}
+
+// TestEnqueueJobDedupReturnsExisting proves the new dedup contract: a second
+// EnqueueJob for a lesson that already has a queued (or running) job inserts no
+// new row and returns (existingID, created=false). The first call must report
+// created=true.
+func TestEnqueueJobDedupReturnsExisting(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 909)
+	if err != nil {
+		t.Fatalf("EnqueueJob first: %v", err)
+	}
+	if !created {
+		t.Fatal("first EnqueueJob created = false, want true")
+	}
+
+	// Still queued: a second enqueue must dedup to the same job.
+	second, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 909)
+	if err != nil {
+		t.Fatalf("EnqueueJob second: %v", err)
+	}
+	if created {
+		t.Error("second EnqueueJob created = true, want false (dedup)")
+	}
+	if second != first {
+		t.Errorf("second EnqueueJob id = %d, want existing %d", second, first)
+	}
+
+	// Move the job to running; an enqueue must still dedup against it.
+	if err := s.MarkJobRunning(ctx, first); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+	third, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 909)
+	if err != nil {
+		t.Fatalf("EnqueueJob third: %v", err)
+	}
+	if created {
+		t.Error("third EnqueueJob (running) created = true, want false (dedup)")
+	}
+	if third != first {
+		t.Errorf("third EnqueueJob id = %d, want existing %d", third, first)
+	}
+
+	// Exactly one row for this lesson.
+	var n int
+	if err := s.rawDB().QueryRow(
+		"SELECT count(*) FROM jobs WHERE railcontent_id = 909",
+	).Scan(&n); err != nil {
+		t.Fatalf("count jobs for 909: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("jobs for lesson 909 = %d, want 1 (no duplicate)", n)
+	}
+}
+
+// TestEnqueueJobAfterTerminalEnqueuesFresh proves dedup is scoped to active
+// (queued/running) jobs only: once the prior job reaches a terminal status it no
+// longer blocks a new enqueue, so a fresh job (created=true) is inserted.
+func TestEnqueueJobAfterTerminalEnqueuesFresh(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	first, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 808)
+	if err != nil {
+		t.Fatalf("EnqueueJob first: %v", err)
+	}
+	if err := s.MarkJobDone(ctx, first); err != nil {
+		t.Fatalf("MarkJobDone: %v", err)
+	}
+
+	second, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 808)
+	if err != nil {
+		t.Fatalf("EnqueueJob second: %v", err)
+	}
+	if !created {
+		t.Error("second EnqueueJob after terminal created = false, want true")
+	}
+	if second == first {
+		t.Errorf("second EnqueueJob reused terminal job %d, want a fresh id", first)
+	}
+}
+
+// TestEnqueueJobConcurrentDedup is the TOCTOU regression test: N goroutines call
+// EnqueueJob for the SAME lesson concurrently. The atomic check+insert inside
+// withTx must leave EXACTLY ONE queued row, and every non-winning caller must
+// return created=false with the winner's id. Run with -race, this also proves
+// the path is free of data races. Before the fix (lock-free ActiveJobExists
+// outside withTx) two enqueuers could both insert, producing duplicates.
+func TestEnqueueJobConcurrentDedup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const goroutines = 16
+	const railcontentID = 707
+
+	var (
+		wg          sync.WaitGroup
+		start       = make(chan struct{})
+		createdN    atomic.Int64
+		ids         = make([]int64, goroutines)
+		createdFlag = make([]bool, goroutines)
+		errs        = make([]error, goroutines)
+	)
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start // line everyone up so the inserts genuinely race
+			id, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, railcontentID)
+			ids[i] = id
+			createdFlag[i] = created
+			errs[i] = err
+			if created {
+				createdN.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d EnqueueJob: %v", i, err)
+		}
+	}
+
+	// Exactly one fresh insert.
+	if got := createdN.Load(); got != 1 {
+		t.Errorf("created=true count = %d, want exactly 1", got)
+	}
+
+	// Exactly one queued row in the table.
+	var n int
+	if err := s.rawDB().QueryRow(
+		"SELECT count(*) FROM jobs WHERE railcontent_id = ?", railcontentID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("jobs for lesson %d = %d, want exactly 1 (no duplicate enqueued)", railcontentID, n)
+	}
+
+	// Find the winner's id, then assert every non-winner returned created=false
+	// with that same id.
+	var winnerID int64
+	if err := s.rawDB().QueryRow(
+		"SELECT id FROM jobs WHERE railcontent_id = ?", railcontentID,
+	).Scan(&winnerID); err != nil {
+		t.Fatalf("select winner id: %v", err)
+	}
+	for i := 0; i < goroutines; i++ {
+		if ids[i] != winnerID {
+			t.Errorf("goroutine %d returned id %d, want winner %d", i, ids[i], winnerID)
+		}
+		if !createdFlag[i] && ids[i] != winnerID {
+			t.Errorf("goroutine %d non-winner id = %d, want winner %d", i, ids[i], winnerID)
+		}
 	}
 }

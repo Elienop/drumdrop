@@ -15,7 +15,7 @@ func TestCancelJobQueued(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 6001, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6001)
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6001)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestCancelJobTerminalConflict(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 6002, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6002)
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6002)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestRetryJobFailed(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 6003, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6003)
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6003)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestRetryJobNotTerminalConflict(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 6004, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	id, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6004)
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 6004)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}

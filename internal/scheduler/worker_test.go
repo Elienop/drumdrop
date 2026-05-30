@@ -158,7 +158,7 @@ func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error
 func (s *fakeWorkerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
 	panic("ActiveJobExists: not expected from Worker")
 }
-func (s *fakeWorkerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
+func (s *fakeWorkerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	panic("EnqueueJob: not expected from Worker")
 }
 func (s *fakeWorkerStore) TouchLastSynced(ctx context.Context, id int64) error {

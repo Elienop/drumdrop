@@ -131,7 +131,7 @@ func (s *fakeDaemonStore) ActiveJobExists(ctx context.Context, id int) (bool, er
 	return false, nil
 }
 
-func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
+func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
@@ -142,7 +142,7 @@ func (s *fakeDaemonStore) EnqueueJob(ctx context.Context, followID sql.NullInt64
 		Status:        database.JobQueued,
 	})
 	s.ops = append(s.ops, "enqueue")
-	return s.nextID, nil
+	return s.nextID, true, nil
 }
 
 func (s *fakeDaemonStore) TouchLastSynced(ctx context.Context, id int64) error { return nil }

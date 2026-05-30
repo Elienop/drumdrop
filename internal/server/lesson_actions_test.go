@@ -51,7 +51,7 @@ func TestDownloadLessonReturnsExistingActiveJob(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 5002, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	existing, err := store.EnqueueJob(ctx, sql.NullInt64{}, 5002)
+	existing, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 5002)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}

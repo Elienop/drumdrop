@@ -60,15 +60,20 @@ func (s *fakePlannerStore) ActiveJobExists(ctx context.Context, railcontentID in
 	return s.active[railcontentID], nil
 }
 
-func (s *fakePlannerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
-	s.enqueued = append(s.enqueued, enqueueCall{followID: followID, railcontentID: railcontentID})
-	// Mark active so a second pass within the same run would dedupe too.
+func (s *fakePlannerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	if s.active == nil {
 		s.active = map[int]bool{}
 	}
+	// Mirror the real store's atomic dedup: an already-active lesson returns its
+	// existing job with created=false and is not recorded as a fresh enqueue.
+	if s.active[railcontentID] {
+		return s.nextJobID, false, nil
+	}
+	s.enqueued = append(s.enqueued, enqueueCall{followID: followID, railcontentID: railcontentID})
+	// Mark active so a second pass within the same run would dedupe too.
 	s.active[railcontentID] = true
 	s.nextJobID++
-	return s.nextJobID, nil
+	return s.nextJobID, true, nil
 }
 
 func (s *fakePlannerStore) TouchLastSynced(ctx context.Context, id int64) error {

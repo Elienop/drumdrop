@@ -19,7 +19,7 @@ func seedJob(t *testing.T, store *database.Store, railcontentID int) int64 {
 	if err := store.UpsertLesson(ctx, railcontentID, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson %d: %v", railcontentID, err)
 	}
-	id, err := store.EnqueueJob(ctx, sql.NullInt64{}, railcontentID)
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, railcontentID)
 	if err != nil {
 		t.Fatalf("EnqueueJob %d: %v", railcontentID, err)
 	}

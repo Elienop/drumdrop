@@ -64,12 +64,39 @@ func scanJob(row interface {
 	return j, err
 }
 
-// EnqueueJob inserts a new download job for the given lesson, in the default
-// status='queued', and returns its autoincrement id. followID is the follow
-// that spawned the job; pass an invalid sql.NullInt64 to leave it NULL.
-func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, error) {
-	var id int64
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+// EnqueueJob enqueues a download job for the given lesson, deduping atomically
+// against any job that is already queued or running for the same railcontent_id.
+// The check and the insert run inside a single withTx (which holds Store.mu for
+// the whole transaction and is the only path writes take), so concurrent
+// enqueue callers — the daemon's Planner.plan cycle and one or more HTTP
+// /download POSTs — cannot both observe "no active job" and both insert. There
+// is no unique constraint backing this; the serialized check+insert IS the
+// guarantee.
+//
+// followID is the follow that spawned the job; pass an invalid sql.NullInt64 to
+// leave it NULL. It returns (existingID, false, nil) when a queued-or-running
+// job already covers the lesson (no insert happens) and (newID, true, nil) when
+// a fresh job was inserted.
+func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (id int64, created bool, err error) {
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		// Atomic dedup: an active (queued or running) job for this lesson means
+		// the work is already outstanding, so reuse it instead of inserting a
+		// duplicate. Lowest id wins for a stable, deterministic result.
+		var existing int64
+		switch scanErr := tx.QueryRowContext(ctx,
+			`SELECT id FROM jobs WHERE railcontent_id = ? AND status IN (?, ?) ORDER BY id LIMIT 1`,
+			railcontentID, JobQueued, JobRunning,
+		).Scan(&existing); {
+		case scanErr == nil:
+			id = existing
+			created = false
+			return nil
+		case scanErr == sql.ErrNoRows:
+			// No active job: fall through to insert.
+		default:
+			return fmt.Errorf("check active job for lesson %d: %w", railcontentID, scanErr)
+		}
+
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO jobs(follow_id, railcontent_id) VALUES(?, ?)`,
 			followID, railcontentID,
@@ -81,12 +108,13 @@ func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcont
 		if err != nil {
 			return fmt.Errorf("last insert id for job: %w", err)
 		}
+		created = true
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return id, nil
+	return id, created, nil
 }
 
 // ClaimNextJob atomically takes the oldest queued job and marks it running. In

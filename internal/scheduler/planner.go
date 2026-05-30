@@ -126,12 +126,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 				continue
 			}
 
+			// Cheap fast-path: skip a lesson that already has an active job
+			// without entering a write transaction. This is an optimization, not
+			// the dedup guarantee — EnqueueJob itself dedupes atomically, so a
+			// lesson that races past this read is still caught on insert.
 			active, err := p.Store.ActiveJobExists(ctx, id)
 			if err != nil {
 				return enqueued, fmt.Errorf("check lesson %d active job: %w", id, err)
 			}
 			if active {
-				// Dedupe: a job for this lesson is already queued or running.
 				continue
 			}
 
@@ -143,8 +146,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 			}
 
 			if !dryRun {
-				if _, err := p.Store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id); err != nil {
+				_, created, err := p.Store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id)
+				if err != nil {
 					return enqueued, fmt.Errorf("enqueue lesson %d: %w", id, err)
+				}
+				if !created {
+					// EnqueueJob's atomic dedup caught a job another enqueuer
+					// inserted after our ActiveJobExists read: don't count it.
+					seen[id] = true
+					continue
 				}
 			}
 			seen[id] = true

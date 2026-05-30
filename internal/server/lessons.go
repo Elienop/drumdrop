@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-
-	"github.com/elienop/drumdrop/internal/database"
 )
 
 // handleListLessons serves GET /api/lessons. With ?status it returns every
@@ -67,11 +65,11 @@ type skipLessonRequest struct {
 
 // handleDownloadLesson serves POST /api/lessons/{id}/download: it manually
 // enqueues a download job for the lesson keyed by railcontent_id. An unknown id
-// is a 404. If the lesson already has a queued-or-running job (ActiveJobExists),
-// that existing job is returned with 200 rather than enqueuing a duplicate —
-// EnqueueJob does not dedup, so the handler does. Otherwise it enqueues a new
-// job (inheriting the lesson's follow_id) and returns it with 202. A non-integer
-// id is a 400.
+// is a 404. EnqueueJob dedups atomically: if the lesson already has a
+// queued-or-running job that existing job is returned with 200; otherwise a new
+// job is enqueued (inheriting the lesson's follow_id) and returned with 202. The
+// created bool carries the dedup signal, so no separate active-job lookup is
+// needed. A non-integer id is a 400.
 func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
@@ -83,21 +81,7 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	active, err := s.store.ActiveJobExists(r.Context(), id)
-	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
-		return
-	}
-	if active {
-		job, ok := s.activeJobForLesson(w, r, id)
-		if !ok {
-			return
-		}
-		writeJSON(w, http.StatusOK, jobDTO(job))
-		return
-	}
-
-	jobID, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
+	jobID, created, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
 	if err != nil {
 		writeStoreErr(w, err, "lesson not found")
 		return
@@ -107,28 +91,11 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "job not found")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, jobDTO(job))
-}
-
-// activeJobForLesson finds the lesson's outstanding job — queued first, then
-// running — so the download handler can return the existing work instead of
-// enqueuing a duplicate. It is only called after ActiveJobExists reported true,
-// so a miss is an internal inconsistency and is surfaced as a 500.
-func (s *Server) activeJobForLesson(w http.ResponseWriter, r *http.Request, railcontentID int) (database.Job, bool) {
-	for _, status := range []string{database.JobQueued, database.JobRunning} {
-		jobs, err := s.store.ListJobsByStatus(r.Context(), status)
-		if err != nil {
-			writeStoreErr(w, err, "jobs not found")
-			return database.Job{}, false
-		}
-		for _, j := range jobs {
-			if j.RailcontentID == railcontentID {
-				return j, true
-			}
-		}
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
 	}
-	writeErr(w, http.StatusInternalServerError, "active job for lesson not found")
-	return database.Job{}, false
+	writeJSON(w, status, jobDTO(job))
 }
 
 // handleSkipLesson serves POST /api/lessons/{id}/skip: it marks the lesson
