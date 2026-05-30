@@ -1,10 +1,12 @@
 package server
 
 import (
+	"io/fs"
 	"net/http"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/scheduler"
+	webui "github.com/elienop/drumdrop/web"
 )
 
 // Config carries the server's networking settings, resolved once at startup
@@ -45,6 +47,7 @@ type Server struct {
 	cfg     Config
 	version string
 	mux     *http.ServeMux
+	web     fs.FS // embedded SPA dist tree (empty in the default !webui build)
 }
 
 // NewServer assembles the routing mux over the shared store, engine deps,
@@ -59,6 +62,7 @@ func NewServer(store *database.Store, deps Deps, hub *Hub, cfg Config, version s
 		cfg:     cfg,
 		version: version,
 		mux:     http.NewServeMux(),
+		web:     webui.DistFS(),
 	}
 	s.routes()
 	return s.withMiddleware(s.mux)
@@ -96,6 +100,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/session", s.handleLogin)
 
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	// Catch-all: serve the embedded SPA. Registered last; guards /api//healthz/
+	// /readyz itself (see spaHandler) so it never shadows the API.
+	s.mux.Handle("/", spaHandler(s.web))
 }
 
 // handleHealthz is the liveness probe: it always reports ok plus the build
