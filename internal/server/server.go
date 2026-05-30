@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
 // Config carries the server's networking settings, resolved once at startup
@@ -17,11 +18,19 @@ type Config struct {
 }
 
 // Deps bundles the engine handles the write/sync handlers need beyond the
-// store: the Planner for dry-run sync, the daemon kick channel for on-demand
-// sync, and the owner permission ids for follow resolution. It is empty for now
-// and populated as the write/sync endpoints land; the read and health endpoints
-// do not use it, so the zero value is valid.
-type Deps struct{}
+// store: the Planner for dry-run sync and the daemon kick channel for on-demand
+// sync. It is populated by the serve entrypoint; the read and health endpoints
+// do not use it, so the zero value is valid (a nil Planner/Kick degrades the
+// sync endpoint to a clear error rather than a panic).
+type Deps struct {
+	// Planner backs POST /api/sync?dry_run=true, reporting how many lessons a real
+	// sync would enqueue without touching the queue.
+	Planner *scheduler.Planner
+	// Kick is the buffered channel the daemon's Run select drains for an immediate
+	// out-of-band cycle. POST /api/sync does a non-blocking send on it. Nil when
+	// no daemon is attached (e.g. tests of read-only endpoints).
+	Kick chan<- struct{}
+}
 
 // Server holds the shared state behind drumdrop's inbound HTTP API: the database
 // store the handlers read and write, the engine deps the write/sync handlers
@@ -79,6 +88,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/jobs/{id}/retry", s.handleRetryJob)
 
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
+
+	s.mux.HandleFunc("POST /api/sync", s.handleSync)
 
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 }

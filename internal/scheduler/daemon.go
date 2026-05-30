@@ -29,6 +29,11 @@ type Daemon struct {
 	// nil by default; progress() substitutes a noopSink. engine.Build sets it via
 	// assignment after construction.
 	Progress ProgressSink
+	// Kick requests one immediate cycle out of the regular interval. A receive on
+	// it runs RunOnce just like a ticker tick. It is nil by default: a nil channel
+	// blocks forever in the select, so the plain CLI daemon never kicks. The serve
+	// entrypoint creates a buffered channel and sends on it for POST /api/sync.
+	Kick <-chan struct{}
 }
 
 // log returns the configured writer or io.Discard so callers can write without a
@@ -115,6 +120,13 @@ func (d *Daemon) Run(ctx context.Context, interval time.Duration) error {
 			// claim; we simply stop scheduling further cycles.
 			return nil
 		case <-ticker.C:
+			if err := d.RunOnce(ctx); err != nil {
+				fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
+			}
+		case <-d.Kick:
+			// On-demand sync: run one immediate cycle out of band. A nil Kick
+			// channel blocks forever here, so this case never fires for the plain
+			// CLI daemon.
 			if err := d.RunOnce(ctx); err != nil {
 				fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
 			}

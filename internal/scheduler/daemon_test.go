@@ -344,6 +344,47 @@ func TestDaemonRunContinuesAfterCycleError(t *testing.T) {
 	}
 }
 
+func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
+	// A send on the Kick channel must run one immediate extra cycle without
+	// waiting for the interval ticker. The interval is set long enough that the
+	// ticker cannot account for the second cycle, so the only way planRuns
+	// reaches 2 is the kick.
+	store := newFakeDaemonStore()
+	d := newTestDaemon(store)
+	kick := make(chan struct{}, 1)
+	d.Kick = kick
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, time.Hour) }()
+
+	// Wait for the immediate (startup) cycle to drain.
+	waitCycle(t, store.cycleDone)
+
+	// Kick and wait for the kick-driven cycle to drain.
+	kick <- struct{}{}
+	waitCycle(t, store.cycleDone)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil on cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after cancel")
+	}
+
+	store.mu.Lock()
+	plans := store.planRuns
+	store.mu.Unlock()
+	// Startup cycle + kick cycle = 2; the hour-long ticker cannot have fired.
+	if plans != 2 {
+		t.Errorf("planRuns = %d, want exactly 2 (startup + kick, no ticker tick)", plans)
+	}
+}
+
 // waitCycle blocks until one cycle signals on ch, failing the test on timeout.
 func waitCycle(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
