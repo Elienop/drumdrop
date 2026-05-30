@@ -108,10 +108,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleReadyz is the readiness probe: it pings the database and reports ok on
-// success or 503 with the error on failure. Unauthenticated.
+// success or 503 on failure. The raw ping error is not echoed (it can carry
+// driver/SQL internals); callers see a clean "database unavailable" message.
+// Unauthenticated.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Ping(r.Context()); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		writeErr(w, http.StatusServiceUnavailable, "database unavailable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

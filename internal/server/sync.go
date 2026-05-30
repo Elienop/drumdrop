@@ -35,7 +35,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		}
 		would, err := s.deps.Planner.PlanDryRun(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			writeErr(w, http.StatusInternalServerError, "dry-run sync failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]int{"would_enqueue": would})

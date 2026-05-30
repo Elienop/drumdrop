@@ -15,7 +15,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if state := q.Get("state"); state != "" {
 		jobs, err := s.store.ListJobsByStatus(r.Context(), state)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			writeStoreErr(w, err, "jobs not found")
 			return
 		}
 		writeJSON(w, http.StatusOK, jobDTOs(jobs))
@@ -28,7 +28,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.store.ListJobs(r.Context(), limit)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "jobs not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTOs(jobs))
@@ -43,7 +43,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeErr(w, mapStoreErr(err), "job not found")
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTO(j))
@@ -54,23 +54,23 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // job first so an unknown id maps cleanly to 404; CancelJob's own miss is a
 // wrapped sql.ErrNoRows too, but the explicit GetJob keeps the 404/409 split
 // readable. A job already in a terminal status yields ErrJobNotActive, which
-// mapStoreErr turns into 409. A non-integer id is a 400.
+// writeStoreErr turns into 409. A non-integer id is a 400.
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
 		return
 	}
 	if _, err := s.store.GetJob(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "job not found")
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	if err := s.store.CancelJob(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "job not cancelable")
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTO(j))
@@ -80,23 +80,23 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 // canceled job (and resets its lesson to pending) and returns the requeued job
 // with 202. It reads the job first so an unknown id maps cleanly to 404. A job
 // that is not in a retryable terminal status yields ErrJobNotTerminal, which
-// mapStoreErr turns into 409. A non-integer id is a 400.
+// writeStoreErr turns into 409. A non-integer id is a 400.
 func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
 		return
 	}
 	if _, err := s.store.GetJob(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "job not found")
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	if err := s.store.RetryJob(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "job not retryable")
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, jobDTO(j))
@@ -131,17 +131,17 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	lessonCounts, err := s.store.CountLessonsByStatus(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "summary not found")
 		return
 	}
 	jobCounts, err := s.store.CountJobsByState(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "summary not found")
 		return
 	}
 	follows, err := s.store.ListFollows(ctx)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "summary not found")
 		return
 	}
 

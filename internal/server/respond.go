@@ -29,21 +29,26 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, errorBody{Error: msg})
 }
 
-// mapStoreErr translates a database error into an HTTP status code:
-//   - a wrapped sql.ErrNoRows → 404 Not Found
-//   - ErrJobNotActive / ErrJobNotTerminal → 409 Conflict
-//   - anything else → 500 Internal Server Error
+// writeStoreErr writes the appropriate HTTP error response for a database
+// error:
+//   - a wrapped sql.ErrNoRows → 404 with notFoundMsg
+//   - ErrJobNotActive → 409 "job is not active"
+//   - ErrJobNotTerminal → 409 "job is not in a terminal state"
+//   - anything else → 500 "internal error" (the raw err is never leaked, so
+//     internal SQL phrasing such as "sql: no rows in result set" stays out of
+//     responses; callers should log the raw err server-side if useful)
 //
 // ErrAlreadyFollowing is intentionally not handled here: the follow handler maps
-// it to a 200 with the existing row, so it never reaches mapStoreErr.
-func mapStoreErr(err error) int {
+// it to a 200 with the existing row, so it never reaches writeStoreErr.
+func writeStoreErr(w http.ResponseWriter, err error, notFoundMsg string) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return http.StatusNotFound
-	case errors.Is(err, database.ErrJobNotActive),
-		errors.Is(err, database.ErrJobNotTerminal):
-		return http.StatusConflict
+		writeErr(w, http.StatusNotFound, notFoundMsg)
+	case errors.Is(err, database.ErrJobNotActive):
+		writeErr(w, http.StatusConflict, "job is not active")
+	case errors.Is(err, database.ErrJobNotTerminal):
+		writeErr(w, http.StatusConflict, "job is not in a terminal state")
 	default:
-		return http.StatusInternalServerError
+		writeErr(w, http.StatusInternalServerError, "internal error")
 	}
 }

@@ -31,7 +31,7 @@ type createFollowRequest struct {
 func (s *Server) handleListFollows(w http.ResponseWriter, r *http.Request) {
 	follows, err := s.store.ListFollows(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "follows not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTOs(follows))
@@ -46,7 +46,7 @@ func (s *Server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.store.GetFollow(r.Context(), id)
 	if err != nil {
-		writeErr(w, mapStoreErr(err), "follow not found")
+		writeStoreErr(w, err, "follow not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTO(f))
@@ -64,7 +64,7 @@ func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 	}
 	lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lessons not found")
 		return
 	}
 	if status := r.URL.Query().Get("status"); status != "" {
@@ -178,7 +178,7 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "follow not found")
+		writeStoreErr(w, err, "follow not found")
 		return
 	}
 	if err := s.store.RemoveFollow(r.Context(), id); err != nil {

@@ -20,7 +20,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	if status := q.Get("status"); status != "" {
 		lessons, err := s.store.ListByStatus(r.Context(), status)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			writeStoreErr(w, err, "lessons not found")
 			return
 		}
 		writeJSON(w, http.StatusOK, lessonDTOs(lessons))
@@ -37,7 +37,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	}
 	lessons, err := s.store.ListLessons(r.Context(), limit, offset)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lessons not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, lessonDTOs(lessons))
@@ -52,7 +52,7 @@ func (s *Server) handleGetLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeErr(w, mapStoreErr(err), "lesson not found")
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, lessonDTO(l))
@@ -79,13 +79,13 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	lesson, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeErr(w, mapStoreErr(err), "lesson not found")
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 
 	active, err := s.store.ActiveJobExists(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	if active {
@@ -99,12 +99,12 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 
 	jobID, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	job, err := s.store.GetJob(r.Context(), jobID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "job not found")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, jobDTO(job))
@@ -118,7 +118,7 @@ func (s *Server) activeJobForLesson(w http.ResponseWriter, r *http.Request, rail
 	for _, status := range []string{database.JobQueued, database.JobRunning} {
 		jobs, err := s.store.ListJobsByStatus(r.Context(), status)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			writeStoreErr(w, err, "jobs not found")
 			return database.Job{}, false
 		}
 		for _, j := range jobs {
@@ -150,16 +150,16 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
-		writeErr(w, mapStoreErr(err), "lesson not found")
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	if err := s.store.MarkSkipped(r.Context(), id, req.Reason); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		writeStoreErr(w, err, "lesson not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, lessonDTO(l))
