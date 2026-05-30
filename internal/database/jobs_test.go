@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 )
 
@@ -566,6 +567,241 @@ func TestListJobsOrderAndLimit(t *testing.T) {
 	if page[0].ID != ids[2] || page[1].ID != ids[1] {
 		t.Errorf("ListJobs(2) ids = [%d, %d], want [%d, %d]",
 			page[0].ID, page[1].ID, ids[2], ids[1])
+	}
+}
+
+// TestCancelJobQueued asserts a queued job is moved to status='canceled' with
+// finished_at stamped.
+func TestCancelJobQueued(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	if err := s.CancelJob(ctx, id); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != JobCanceled {
+		t.Errorf("status = %q, want %q", got.Status, JobCanceled)
+	}
+	if !got.FinishedAt.Valid {
+		t.Error("finished_at is NULL after CancelJob, want set")
+	}
+}
+
+// TestCancelJobRunning asserts a running job can also be canceled.
+func TestCancelJobRunning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.MarkJobRunning(ctx, id); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+
+	if err := s.CancelJob(ctx, id); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != JobCanceled {
+		t.Errorf("status = %q, want %q", got.Status, JobCanceled)
+	}
+	if !got.FinishedAt.Valid {
+		t.Error("finished_at is NULL after CancelJob, want set")
+	}
+}
+
+// TestCancelJobTerminal asserts canceling a job already in a terminal state
+// returns ErrJobNotActive and leaves the row untouched.
+func TestCancelJobTerminal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.MarkJobRunning(ctx, id); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+	if err := s.MarkJobDone(ctx, id); err != nil {
+		t.Fatalf("MarkJobDone: %v", err)
+	}
+
+	if err := s.CancelJob(ctx, id); !errors.Is(err, ErrJobNotActive) {
+		t.Fatalf("CancelJob on a done job err = %v, want ErrJobNotActive", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != JobDone {
+		t.Errorf("status = %q after failed cancel, want unchanged %q", got.Status, JobDone)
+	}
+}
+
+// TestCancelJobMissing asserts canceling an unknown id reports sql.ErrNoRows so
+// the handler can distinguish 404 from the 409 terminal case.
+func TestCancelJobMissing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CancelJob(ctx, 404); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("CancelJob on a missing id err = %v, want sql.ErrNoRows", err)
+	}
+}
+
+// TestRetryJobFailed asserts retrying a failed job resets the job back to
+// queued (clearing attempts/timestamps/error) AND resets its lesson back to
+// pending (clearing the lesson error) so the worker re-downloads it.
+func TestRetryJobFailed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const lesson = 500
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.MarkJobRunning(ctx, id); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+	if err := s.MarkJobFailed(ctx, id, "yt-dlp exited 1"); err != nil {
+		t.Fatalf("MarkJobFailed: %v", err)
+	}
+	if err := s.MarkFailed(ctx, lesson, "yt-dlp exited 1"); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+
+	if err := s.RetryJob(ctx, id); err != nil {
+		t.Fatalf("RetryJob: %v", err)
+	}
+
+	job, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if job.Status != JobQueued {
+		t.Errorf("job status = %q, want %q", job.Status, JobQueued)
+	}
+	if job.Attempts != 0 {
+		t.Errorf("job attempts = %d after retry, want 0", job.Attempts)
+	}
+	if job.StartedAt.Valid || job.FinishedAt.Valid {
+		t.Errorf("job started/finished = %+v / %+v after retry, want both NULL", job.StartedAt, job.FinishedAt)
+	}
+	if job.Error.Valid {
+		t.Errorf("job error = %+v after retry, want NULL", job.Error)
+	}
+
+	les, err := s.GetLesson(ctx, lesson)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if les.Status != StatusPending {
+		t.Errorf("lesson status = %q after retry, want %q", les.Status, StatusPending)
+	}
+	if les.Error.Valid {
+		t.Errorf("lesson error = %+v after retry, want NULL", les.Error)
+	}
+
+	// The requeue must reuse the existing job, not add a second one — so the
+	// lesson has exactly one active job (otherwise the worker would double up).
+	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
+		t.Fatalf("ActiveJobExists: %v", err)
+	} else if !active {
+		t.Error("ActiveJobExists = false after retry, want true (job requeued)")
+	}
+	if got := countJobs(t, s); got != 1 {
+		t.Errorf("jobs row count = %d after retry, want 1 (requeue must not insert a new job)", got)
+	}
+}
+
+// TestRetryJobCanceled asserts a canceled job is also retryable.
+func TestRetryJobCanceled(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const lesson = 600
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.CancelJob(ctx, id); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+
+	if err := s.RetryJob(ctx, id); err != nil {
+		t.Fatalf("RetryJob: %v", err)
+	}
+
+	job, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if job.Status != JobQueued {
+		t.Errorf("job status = %q after retry, want %q", job.Status, JobQueued)
+	}
+}
+
+// TestRetryJobActive asserts retrying a job that is still queued or running
+// returns ErrJobNotTerminal and leaves it untouched.
+func TestRetryJobActive(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const lesson = 700
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	id, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	if err := s.RetryJob(ctx, id); !errors.Is(err, ErrJobNotTerminal) {
+		t.Fatalf("RetryJob on a queued job err = %v, want ErrJobNotTerminal", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != JobQueued {
+		t.Errorf("status = %q after failed retry, want unchanged %q", got.Status, JobQueued)
+	}
+}
+
+// TestRetryJobMissing asserts retrying an unknown id reports sql.ErrNoRows.
+func TestRetryJobMissing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.RetryJob(ctx, 404); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("RetryJob on a missing id err = %v, want sql.ErrNoRows", err)
 	}
 }
 
