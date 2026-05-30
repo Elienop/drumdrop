@@ -88,9 +88,17 @@ func TestBuildWires(t *testing.T) {
 	cfg := Config("/tmp/x", "best", false)
 	var log io.Writer = io.Discard
 
-	planner, worker, daemon := Build(nil, cfg, "perm", log)
+	sink := buildTestSink{}
+	planner, worker, daemon := Build(nil, cfg, "perm", log, sink)
 	if planner == nil || worker == nil || daemon == nil {
 		t.Fatal("Build returned a nil component")
+	}
+	// The progress sink is shared by assignment with both the worker and daemon.
+	if worker.Progress != sink {
+		t.Error("worker.Progress is not the sink passed to Build")
+	}
+	if daemon.Progress != sink {
+		t.Error("daemon.Progress is not the sink passed to Build")
 	}
 	if planner.PermIDs != "perm" {
 		t.Errorf("planner.PermIDs = %q, want perm", planner.PermIDs)
@@ -111,3 +119,10 @@ func TestBuildWires(t *testing.T) {
 		t.Error("daemon.Worker is not the returned worker")
 	}
 }
+
+// buildTestSink is a no-op ProgressSink used to assert Build wires it through to
+// the worker and daemon by assignment. It is comparable so the test can check
+// pointer/value identity against what it passed in.
+type buildTestSink struct{}
+
+func (buildTestSink) Emit(scheduler.ProgressEvent) {}

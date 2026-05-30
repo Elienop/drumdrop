@@ -31,7 +31,7 @@ func cmdDaemon(argv []string) error {
 	defer store.Close()
 
 	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
-	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout)
+	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
 	if opts.once {
 		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)

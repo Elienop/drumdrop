@@ -25,6 +25,10 @@ type Daemon struct {
 	// Log receives a one-line summary per cycle plus startup/shutdown notices. It
 	// defaults to io.Discard; the loop logic never depends on it.
 	Log io.Writer
+	// Progress receives structured per-cycle ProgressEvents beside the log. It is
+	// nil by default; progress() substitutes a noopSink. engine.Build sets it via
+	// assignment after construction.
+	Progress ProgressSink
 }
 
 // log returns the configured writer or io.Discard so callers can write without a
@@ -36,6 +40,15 @@ func (d *Daemon) log() io.Writer {
 	return d.Log
 }
 
+// progress returns the configured sink or a noopSink so callers can emit without
+// a nil check and the loop logic stays independent of any consumer.
+func (d *Daemon) progress() ProgressSink {
+	if d.Progress == nil {
+		return noopSink{}
+	}
+	return d.Progress
+}
+
 // RunOnce runs one full cycle: plan, then drain. It plans first so any newly
 // discovered lessons are queued before the worker drains, letting a single cycle
 // download brand-new content. It logs a one-line summary (planned, processed) and
@@ -45,10 +58,18 @@ func (d *Daemon) log() io.Writer {
 // RunOnce is used by both `sync` and `daemon --once`, and is the body of each
 // Run tick.
 func (d *Daemon) RunOnce(ctx context.Context) error {
+	d.progress().Emit(ProgressEvent{Kind: "cycle_started", Time: time.Now()})
+
 	planned, perr := d.Planner.Plan(ctx, 0)
 	processed, werr := d.Worker.RunOnce(ctx, 0)
 
 	fmt.Fprintf(d.log(), "cycle: planned %d, processed %d\n", planned, processed)
+	d.progress().Emit(ProgressEvent{
+		Kind:      "cycle_done",
+		Planned:   planned,
+		Processed: processed,
+		Time:      time.Now(),
+	})
 
 	// Return the first fatal error; a planning failure is reported even if the
 	// worker (which may still have drained pre-existing jobs) also failed.

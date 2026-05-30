@@ -127,8 +127,10 @@ var (
 // over one store, sharing the config, permission ids, and log writer. The
 // returned Daemon embeds the returned Planner and Worker, so callers run either
 // the one-shot plan+drain (sync) or the long-running loop (daemon) from the same
-// wiring.
-func Build(store *database.Store, cfg scheduler.Config, permIDs string, log io.Writer) (*scheduler.Planner, *scheduler.Worker, *scheduler.Daemon) {
+// wiring. progress is the structured-event sink shared by the worker and daemon;
+// a nil progress leaves both on their default noopSink (the CLI passes nil; the
+// HTTP server passes its broadcast hub).
+func Build(store *database.Store, cfg scheduler.Config, permIDs string, log io.Writer, progress scheduler.ProgressSink) (*scheduler.Planner, *scheduler.Worker, *scheduler.Daemon) {
 	planner := &scheduler.Planner{
 		Store:    store,
 		Expander: Expander{},
@@ -136,11 +138,14 @@ func Build(store *database.Store, cfg scheduler.Config, permIDs string, log io.W
 		Log:      log,
 	}
 	worker := scheduler.NewWorker(store, Resolver{}, Downloader{}, cfg, permIDs, log)
+	// Set the sink by assignment so NewWorker's positional signature is untouched.
+	worker.Progress = progress
 	daemon := &scheduler.Daemon{
-		Store:   store,
-		Planner: planner,
-		Worker:  worker,
-		Log:     log,
+		Store:    store,
+		Planner:  planner,
+		Worker:   worker,
+		Log:      log,
+		Progress: progress,
 	}
 	return planner, worker, daemon
 }
