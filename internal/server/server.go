@@ -16,12 +16,6 @@ type Config struct {
 	CORSOrigin string
 }
 
-// Hub is the in-memory progress broadcast hub the SSE endpoint subscribes to.
-// It is a placeholder here so the Server can hold a *Hub field; the SSE task
-// gives it its subscriber set, channels, and scheduler.ProgressSink behavior. A
-// nil *Hub is tolerated until the SSE endpoint lands.
-type Hub struct{}
-
 // Deps bundles the engine handles the write/sync handlers need beyond the
 // store: the Planner for dry-run sync, the daemon kick channel for on-demand
 // sync, and the owner permission ids for follow resolution. It is empty for now
