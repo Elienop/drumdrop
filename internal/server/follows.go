@@ -29,7 +29,7 @@ func (s *Server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.store.GetFollow(r.Context(), id)
 	if err != nil {
-		writeErr(w, mapStoreErr(err), err.Error())
+		writeErr(w, mapStoreErr(err), "follow not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTO(f))
