@@ -11,3 +11,5 @@ docs
 secret.key
 credentials.enc
 session.cookie
+.env*
+.secrets*
