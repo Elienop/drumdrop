@@ -118,11 +118,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 				continue
 			}
 
-			done, err := p.Store.IsDownloaded(ctx, id)
+			// Skip a lesson that is already downloaded or was intentionally
+			// skipped (locked/missing content): both are recorded above but must
+			// never be re-enqueued. A 'failed' lesson is NOT skipped here, so it is
+			// retried on the next cycle.
+			skip, err := p.Store.ShouldSkipEnqueue(ctx, id)
 			if err != nil {
-				return enqueued, fmt.Errorf("check lesson %d downloaded: %w", id, err)
+				return enqueued, fmt.Errorf("check lesson %d should-skip-enqueue: %w", id, err)
 			}
-			if done {
+			if skip {
 				continue
 			}
 

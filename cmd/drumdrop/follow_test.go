@@ -102,6 +102,9 @@ func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, paren
 func (s *cliStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	return s.downloaded[id], nil
 }
+func (s *cliStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	return s.downloaded[id], nil
+}
 func (s *cliStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
 	for _, j := range s.jobs {
 		if j.RailcontentID == id && (j.Status == database.JobQueued || j.Status == database.JobRunning) {

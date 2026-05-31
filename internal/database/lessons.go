@@ -119,6 +119,24 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	return n > 0, nil
 }
 
+// ShouldSkipEnqueue reports whether the planner must NOT enqueue a download job
+// for the lesson with the given railcontent_id: true when its status is
+// 'downloaded' (already have it) OR 'skipped' (intentionally passed over, e.g.
+// locked/missing content — re-enqueuing would loop forever). A 'failed' lesson
+// is deliberately NOT skipped so it is retried. An unknown id is not an error:
+// it reports false, so a never-seen lesson enqueues normally.
+func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND status IN (?, ?)`,
+		id, StatusDownloaded, StatusSkipped,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check should-skip-enqueue for lesson %d: %w", id, err)
+	}
+	return n > 0, nil
+}
+
 // MarkDownloading transitions a lesson to status='downloading'. It returns an
 // error if no lesson row matched so the caller learns the id was unknown.
 func (s *Store) MarkDownloading(ctx context.Context, id int) error {

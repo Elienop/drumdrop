@@ -155,6 +155,9 @@ func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, t
 func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	panic("IsDownloaded: not expected from Worker")
 }
+func (s *fakeWorkerStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	panic("ShouldSkipEnqueue: not expected from Worker")
+}
 func (s *fakeWorkerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
 	panic("ActiveJobExists: not expected from Worker")
 }

@@ -127,6 +127,9 @@ func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string
 	return nil
 }
 func (s *fakeDaemonStore) IsDownloaded(ctx context.Context, id int) (bool, error) { return false, nil }
+func (s *fakeDaemonStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	return false, nil
+}
 func (s *fakeDaemonStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
 	return false, nil
 }

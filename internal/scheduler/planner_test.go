@@ -35,6 +35,7 @@ type fakePlannerStore struct {
 	follows []database.Follow
 
 	downloaded map[int]bool // railcontent_id → already downloaded
+	skipped    map[int]bool // railcontent_id → recorded as skipped
 	active     map[int]bool // railcontent_id → has a queued/running job
 
 	enqueued []enqueueCall
@@ -55,6 +56,10 @@ func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, 
 
 func (s *fakePlannerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	return s.downloaded[id], nil
+}
+
+func (s *fakePlannerStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	return s.downloaded[id] || s.skipped[id], nil
 }
 
 func (s *fakePlannerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
@@ -170,6 +175,36 @@ func TestPlanEnqueuesOnlyNewLessons(t *testing.T) {
 	// The processed follow was touched exactly once.
 	if got, want := store.touched, []int64{1}; !reflect.DeepEqual(got, want) {
 		t.Errorf("touched = %v, want %v", got, want)
+	}
+}
+
+func TestPlanDoesNotReEnqueueSkipped(t *testing.T) {
+	// A lesson recorded as skipped must NOT be re-enqueued, while a failed lesson
+	// is still retried. Both are still upserted (record-keeping).
+	store := &fakePlannerStore{
+		follows: []database.Follow{nodeFollow()},
+		skipped: map[int]bool{
+			21: true, // skipped → recorded but never re-enqueued
+		},
+	}
+	exp := fakeExpander{ids: map[int64][]int{1: {20, 21, 22}}}
+
+	p := &Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	enqueued, err := p.Plan(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+
+	// 20 (new) and 22 (failed, still retried) enqueue; 21 (skipped) does not.
+	if enqueued != 2 {
+		t.Errorf("enqueued = %d, want 2 (skipped 21 excluded)", enqueued)
+	}
+	if got, want := enqueuedIDs(store.enqueued), []int{20, 22}; !reflect.DeepEqual(got, want) {
+		t.Errorf("enqueued ids = %v, want %v (skipped must not re-enqueue)", got, want)
+	}
+	// Every lesson is still upserted, including the skipped one.
+	if len(store.upserts) != 3 {
+		t.Errorf("upserts = %d, want 3 (all seen lessons recorded)", len(store.upserts))
 	}
 }
 
