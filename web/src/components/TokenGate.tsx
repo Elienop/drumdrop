@@ -18,6 +18,15 @@ export function TokenGate(
     setAuthRequiredHandler(() => setOpen(true))
     return () => setAuthRequiredHandler(null)
   }, [])
+  // save runs on either path — Enter (form submit) or clicking Save — so the
+  // two stay in lockstep. trim() also guards an Enter on whitespace-only input.
+  const save = () => {
+    const token = value.trim()
+    if (!token) return
+    setToken(token)
+    setOpen(false)
+    onSaved()
+  }
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent>
@@ -25,16 +34,13 @@ export function TokenGate(
           <DialogTitle>API token required</DialogTitle>
           <DialogDescription>This drumdrop server is protected by a token. Paste it to continue; it's stored only in this browser.</DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="token">Access token</Label>
-          <Input id="token" type="password" value={value} onChange={(e) => setValue(e.target.value)} />
-        </div>
-        <Button
-          disabled={value.trim() === ""}
-          onClick={() => { if (value.trim()) { setToken(value.trim()); setOpen(false); onSaved() } }}
-        >
-          Save
-        </Button>
+        <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); save() }}>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="token">Access token</Label>
+            <Input id="token" type="password" autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
+          </div>
+          <Button type="submit" disabled={value.trim() === ""}>Save</Button>
+        </form>
       </DialogContent>
     </Dialog>
   )
