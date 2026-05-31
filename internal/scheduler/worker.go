@@ -299,10 +299,17 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 
 	outDir := w.outDir(follow, job, lesson)
 	quality := qualityFor(w.Cfg, follow)
-	// Index 1 today (Task 8 threads the lesson's real position). The download and
-	// the worker's lessonDir MUST share this value so producedVideo and
-	// cleanupPartials target the exact folder DownloadLesson writes to.
+	// Number the folder by the lesson's recorded position (1-based) so siblings
+	// sort the way they appear in the course; fall back to 1 when the position is
+	// unknown. The download and the worker's lessonDir MUST share this value so
+	// producedVideo and cleanupPartials target the exact folder DownloadLesson
+	// writes to. GetLesson failure is non-fatal: keep the default index 1.
 	index := 1
+	if l, err := w.Store.GetLesson(ctx, id); err != nil {
+		fmt.Fprintf(w.log(), "  ⚠ get lesson %d position: %v\n", id, err)
+	} else if l.Position.Valid {
+		index = int(l.Position.Int64)
+	}
 	dir := lessonDir(outDir, index, lesson.Title)
 
 	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
@@ -430,12 +437,21 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	_ = w.Store.MarkJobFailed(ctx, job.ID, msg)
 }
 
-// outDir is the single source of truth for a job's output directory. With a
-// real follow it uses outDirFor (cfg.DownloadsDir + the follow's folder title).
-// For a NULL/zero follow it falls back to the resolved lesson's parent content
-// title, or content-<id> when even that is missing, so an orphaned job still
-// lands somewhere sensible.
+// outDir is the single source of truth for a job's output directory. An
+// instructor follow groups its lessons by their parent course
+// (<instructor>/<parent course>), falling back to just <instructor> when a
+// lesson has no parent course. Any other real follow (a node) uses outDirFor
+// (cfg.DownloadsDir + the follow's folder title). For a NULL/zero follow it
+// falls back to the resolved lesson's parent content title, or content-<id>
+// when even that is missing, so an orphaned job still lands somewhere sensible.
 func (w *Worker) outDir(f database.Follow, job database.Job, lesson *musora.Lesson) string {
+	if hasFollow(f) && f.Kind == "instructor" {
+		base := filepath.Join(w.Cfg.DownloadsDir, musora.Sanitize(folderTitle(f)))
+		if parent := lessonParentTitle(lesson); parent != "" {
+			return filepath.Join(base, musora.Sanitize(parent))
+		}
+		return base
+	}
 	if hasFollow(f) {
 		return outDirFor(w.Cfg, f)
 	}

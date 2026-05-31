@@ -97,6 +97,9 @@ func (s *fakeDaemonStore) ClaimNextJob(ctx context.Context) (database.Job, bool,
 func (s *fakeDaemonStore) GetFollow(ctx context.Context, id int64) (database.Follow, error) {
 	return nodeFollow(), nil
 }
+func (s *fakeDaemonStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	return database.Lesson{}, nil
+}
 func (s *fakeDaemonStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
 func (s *fakeDaemonStore) MarkJobDone(ctx context.Context, id int64) error {
 	s.record("job-done")

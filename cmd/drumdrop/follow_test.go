@@ -151,6 +151,13 @@ func (s *cliStore) GetFollow(ctx context.Context, id int64) (database.Follow, er
 	}
 	return database.Follow{}, sql.ErrNoRows
 }
+
+// GetLesson returns a zero lesson (no recorded position) so the worker's
+// numbering falls back to 1; the CLI tests assert behaviour that predates real
+// positions, so a zero row keeps their expectations intact.
+func (s *cliStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	return database.Lesson{}, nil
+}
 func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
 func (s *cliStore) MarkJobDone(ctx context.Context, id int64) error {
 	j := s.jobs[id]

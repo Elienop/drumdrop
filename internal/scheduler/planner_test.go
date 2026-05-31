@@ -96,6 +96,9 @@ func (s *fakePlannerStore) ClaimNextJob(ctx context.Context) (database.Job, bool
 func (s *fakePlannerStore) GetFollow(ctx context.Context, id int64) (database.Follow, error) {
 	panic("GetFollow: not expected from Planner")
 }
+func (s *fakePlannerStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	panic("GetLesson: not expected from Planner")
+}
 func (s *fakePlannerStore) MarkJobRunning(ctx context.Context, id int64) error {
 	panic("MarkJobRunning: not expected from Planner")
 }

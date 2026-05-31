@@ -58,6 +58,7 @@ type Store interface {
 	// worker
 	ClaimNextJob(ctx context.Context) (database.Job, bool, error)
 	GetFollow(ctx context.Context, id int64) (database.Follow, error)
+	GetLesson(ctx context.Context, id int) (database.Lesson, error)
 	MarkJobRunning(ctx context.Context, id int64) error
 	MarkJobDone(ctx context.Context, id int64) error
 	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
