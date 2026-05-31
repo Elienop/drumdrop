@@ -34,9 +34,9 @@ export function ProgressRow({ title, pct, speed, bytes, totalBytes }: ProgressRo
         />
       </div>
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground tabular-nums">
-        <span>
-          {formatBytes(bytes)} / {formatBytes(totalBytes)}
-        </span>
+        {/* HLS downloads often don't report a total (0/unknown) — show just the
+            downloaded size rather than a misleading "/ 0 B". */}
+        <span>{formatBytes(bytes)}{totalBytes ? ` / ${formatBytes(totalBytes)}` : ""}</span>
         {speed && <span>{speed}</span>}
       </div>
     </div>

@@ -120,7 +120,10 @@ const progressSentinel = "DRUMDROP|"
 func progressArgs() []string {
 	return []string{
 		"--progress-template",
-		"download:" + progressSentinel + "%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s",
+		// _speed_str (not raw .speed) gives a pre-formatted rate like "3.15MiB/s"
+		// — matching _percent_str and what parseProgressLine's tests expect — so
+		// the SSE/UI shows a human speed, not a raw bytes/sec float.
+		"download:" + progressSentinel + "%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._speed_str)s",
 	}
 }
 
