@@ -59,6 +59,7 @@ type Store interface {
 	MarkJobRunning(ctx context.Context, id int64) error
 	MarkJobDone(ctx context.Context, id int64) error
 	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
+	MarkJobCanceled(ctx context.Context, id int64) error
 	MarkDownloading(ctx context.Context, id int) error
 	MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error
 	MarkFailed(ctx context.Context, id int, errMsg string) error

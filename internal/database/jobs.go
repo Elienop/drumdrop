@@ -459,6 +459,30 @@ func (s *Store) CancelJob(ctx context.Context, id int64) error {
 	})
 }
 
+// MarkJobCanceled is the worker-side cancel: a guarded UPDATE that moves a job
+// to status='canceled' and stamps finished_at ONLY while it is still running.
+// Unlike CancelJob (the API path, which distinguishes 404/409), this tolerates
+// zero rows as a benign no-op and returns nil — the server may already have
+// canceled the job (queued/running -> canceled) before the worker reaches its
+// cancel branch, and the worker must not error on that lost race. It executes
+// directly rather than through updateJob (which treats 0 rows as an error).
+func (s *Store) MarkJobCanceled(ctx context.Context, id int64) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE jobs
+			    SET status = ?, finished_at = CURRENT_TIMESTAMP
+			  WHERE id = ? AND status = ?`,
+			JobCanceled, id, JobRunning,
+		)
+		if err != nil {
+			return fmt.Errorf("mark job %d canceled: %w", id, err)
+		}
+		// Zero rows affected (queued, terminal, or unknown id) is intentional:
+		// only a running job is canceled here, and any other state is a no-op.
+		return nil
+	})
+}
+
 // RetryJob requeues a failed or canceled job so the worker downloads it again.
 // In one transaction it resets the job (status='queued', attempts=0,
 // started_at/finished_at/error cleared) AND resets its lesson back to

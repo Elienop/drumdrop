@@ -164,6 +164,14 @@ func (s *cliStore) MarkJobFailed(ctx context.Context, id int64, msg string) erro
 	s.jobs[id] = j
 	return nil
 }
+func (s *cliStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	j := s.jobs[id]
+	if j.Status == database.JobRunning {
+		j.Status = database.JobCanceled
+		s.jobs[id] = j
+	}
+	return nil
+}
 func (s *cliStore) MarkDownloading(ctx context.Context, id int) error { return nil }
 func (s *cliStore) MarkDownloaded(ctx context.Context, id int, q, dir, vp string, b int64) error {
 	s.markedDLed = append(s.markedDLed, id)

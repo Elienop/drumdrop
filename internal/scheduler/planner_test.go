@@ -103,6 +103,9 @@ func (s *fakePlannerStore) MarkJobDone(ctx context.Context, id int64) error {
 func (s *fakePlannerStore) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
 	panic("MarkJobFailed: not expected from Planner")
 }
+func (s *fakePlannerStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	panic("MarkJobCanceled: not expected from Planner")
+}
 func (s *fakePlannerStore) MarkDownloading(ctx context.Context, id int) error {
 	panic("MarkDownloading: not expected from Planner")
 }

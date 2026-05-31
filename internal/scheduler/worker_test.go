@@ -26,14 +26,15 @@ type fakeWorkerStore struct {
 	follows map[int64]database.Follow
 
 	// Recorded calls, in invocation order.
-	claims         int
-	markRunning    []int64
-	markDownloaded []markDownloadedCall
-	markDone       []int64
-	markJobFailed  []int64
-	markFailed     []int // railcontent ids marked failed
-	markSkipped    []int // railcontent ids marked skipped
-	markDownloadng []int // railcontent ids marked downloading
+	claims          int
+	markRunning     []int64
+	markDownloaded  []markDownloadedCall
+	markDone        []int64
+	markJobFailed   []int64
+	markJobCanceled []int64
+	markFailed      []int // railcontent ids marked failed
+	markSkipped     []int // railcontent ids marked skipped
+	markDownloadng  []int // railcontent ids marked downloading
 
 	// Optional fault injection.
 	claimErr     error
@@ -112,6 +113,19 @@ func (s *fakeWorkerStore) MarkJobFailed(ctx context.Context, id int64, errMsg st
 	j.Status = database.JobFailed
 	j.Error = sql.NullString{String: errMsg, Valid: true}
 	s.jobs[id] = j
+	return nil
+}
+
+// MarkJobCanceled mirrors the store's guarded cancel: it only transitions a
+// running job and is a benign no-op otherwise, so worker cancel-branch tests
+// see the same status semantics as production.
+func (s *fakeWorkerStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	s.markJobCanceled = append(s.markJobCanceled, id)
+	j := s.jobs[id]
+	if j.Status == database.JobRunning {
+		j.Status = database.JobCanceled
+		s.jobs[id] = j
+	}
 	return nil
 }
 

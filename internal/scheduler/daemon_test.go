@@ -103,6 +103,7 @@ func (s *fakeDaemonStore) MarkJobDone(ctx context.Context, id int64) error {
 	return nil
 }
 func (s *fakeDaemonStore) MarkJobFailed(ctx context.Context, id int64, m string) error { return nil }
+func (s *fakeDaemonStore) MarkJobCanceled(ctx context.Context, id int64) error         { return nil }
 func (s *fakeDaemonStore) MarkDownloading(ctx context.Context, id int) error           { return nil }
 func (s *fakeDaemonStore) MarkDownloaded(ctx context.Context, id int, q, o, v string, b int64) error {
 	return nil
