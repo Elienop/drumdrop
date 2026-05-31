@@ -103,12 +103,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		}
 
 		fNew := 0
-		for _, item := range items {
+		for i, item := range items {
 			id := item.ID
 			// Record the lesson regardless of whether we enqueue it, attributing it
 			// to the follow currently being expanded (first-follow-wins on conflict).
-			// Position stays NULL here; Task 5 sets the per-follow 1-based index.
-			if err := p.Store.UpsertLesson(ctx, id, item.Title, parent, f.Brand, sql.NullInt64{}, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
+			// Position is the 1-based index in expansion order, matching the worker's
+			// "NN -" folder prefix; UpsertLesson keeps the first follow's position for
+			// a lesson shared across follows (COALESCE).
+			position := sql.NullInt64{Int64: int64(i + 1), Valid: true}
+			if err := p.Store.UpsertLesson(ctx, id, item.Title, parent, f.Brand, position, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
 				return enqueued, fmt.Errorf("upsert lesson %d: %w", id, err)
 			}
 
