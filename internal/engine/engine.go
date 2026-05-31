@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -111,8 +112,8 @@ func (Resolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // Downloader adapts musora.DownloadLesson to scheduler.Downloader.
 type Downloader struct{}
 
-func (Downloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
-	return musora.DownloadLesson(l, o)
+func (Downloader) Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	return musora.DownloadLesson(ctx, l, o)
 }
 
 // Compile-time assertions that the real adapters satisfy the scheduler

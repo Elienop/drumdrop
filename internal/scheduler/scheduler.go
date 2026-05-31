@@ -28,9 +28,11 @@ type Resolver interface {
 	Resolve(id int, permIDs string) (*musora.Lesson, error)
 }
 
-// Downloader performs the actual download of a resolved lesson.
+// Downloader performs the actual download of a resolved lesson. ctx cancels the
+// in-flight download (killing yt-dlp and its child); a nil ctx preserves the
+// uncancelable CLI behaviour.
 type Downloader interface {
-	Download(l *musora.Lesson, o musora.DownloadOpts) error
+	Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error
 }
 
 // Expander turns one follow into the railcontent ids of the lessons under it.

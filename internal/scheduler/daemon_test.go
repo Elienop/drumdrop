@@ -170,7 +170,9 @@ func (daemonResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // daemonDownloader always succeeds.
 type daemonDownloader struct{}
 
-func (daemonDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error { return nil }
+func (daemonDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	return nil
+}
 
 func newTestDaemon(store *fakeDaemonStore) *Daemon {
 	planner := &Planner{Store: store, Expander: &daemonExpander{}, PermIDs: "perm"}

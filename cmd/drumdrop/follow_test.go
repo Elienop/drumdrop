@@ -204,7 +204,7 @@ func (cliResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // cliDownloader records every download and never touches yt-dlp.
 type cliDownloader struct{ calls []int }
 
-func (d *cliDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
+func (d *cliDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, l.ID)
 	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -205,7 +206,7 @@ func cmdDownload(argv []string) error {
 			continue
 		}
 		fmt.Printf("\n▼ [%02d] %s\n", r.index, r.lesson.Title)
-		err := musora.DownloadLesson(r.lesson, musora.DownloadOpts{
+		err := musora.DownloadLesson(context.Background(), r.lesson, musora.DownloadOpts{
 			Dir:           outDir,
 			Index:         r.index,
 			Quality:       *quality,

@@ -298,7 +298,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			MaxAttempts:   w.Cfg.MaxAttempts,
 			Time:          time.Now(),
 		})
-		derr := w.Downloader.Download(lesson, musora.DownloadOpts{
+		derr := w.Downloader.Download(ctx, lesson, musora.DownloadOpts{
 			Dir:           outDir,
 			Index:         1,
 			Quality:       quality,

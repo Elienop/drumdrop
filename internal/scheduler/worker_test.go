@@ -219,7 +219,7 @@ func newFakeDownloader() *fakeDownloader {
 	return &fakeDownloader{failsBefore: map[int]int{}, attempts: map[int]int{}}
 }
 
-func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
+func (d *fakeDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, o)
 	d.attempts[l.ID]++
 	if o.OnProgress != nil {
