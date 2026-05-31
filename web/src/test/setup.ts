@@ -6,6 +6,24 @@ beforeAll(() => server.listen({ onUnhandledRequest: "error" }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
+// Radix Select (and other Radix popper components) call PointerEvent capture
+// and scrollIntoView APIs that jsdom does not implement; stub them so the
+// components can mount and open in tests.
+if (typeof Element !== "undefined") {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {}
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {}
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {}
+  }
+}
+
 // Node 26 exposes an experimental global `localStorage` that is `undefined`
 // (no `--localstorage-file`), shadowing jsdom's implementation. Install a
 // minimal in-memory Storage so `localStorage`/`window.localStorage` work.
