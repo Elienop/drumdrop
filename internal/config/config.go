@@ -49,3 +49,18 @@ func APIToken() string { return os.Getenv("DRUMDROP_API_TOKEN") }
 // CORSOrigin is the allowed CORS origin for the HTTP API, read at call time from
 // DRUMDROP_CORS_ORIGIN. An empty result (the default) disables CORS headers.
 func CORSOrigin() string { return os.Getenv("DRUMDROP_CORS_ORIGIN") }
+
+// Interval is the auto-sync interval used by serve/daemon, read at call time
+// from DRUMDROP_INTERVAL; when unset it defaults to "12h". It returns the raw
+// string (a Go duration) so the existing --interval parsing/validation applies.
+func Interval() string {
+	if v := os.Getenv("DRUMDROP_INTERVAL"); v != "" {
+		return v
+	}
+	return "12h"
+}
+
+// Quality overrides each follow's quality for serve/daemon/sync, read at call
+// time from DRUMDROP_QUALITY; an empty result (the default, when unset) means
+// "use each follow's own quality" — unchanged behavior.
+func Quality() string { return os.Getenv("DRUMDROP_QUALITY") }
