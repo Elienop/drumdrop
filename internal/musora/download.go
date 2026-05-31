@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func FormatSelector(quality string) string {
@@ -264,13 +263,10 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 			args = append(progressArgs(), args...)
 		}
 		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-		// Run yt-dlp in its own process group and, on context cancel, SIGKILL the
-		// whole group so the ffmpeg child it spawns dies too (a bare kill of yt-dlp
-		// would orphan ffmpeg, leaving it to finish the merge).
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		// On context cancel, kill yt-dlp AND its ffmpeg child. The mechanism is
+		// platform-specific (process-group SIGKILL on Unix; the os/exec default on
+		// Windows) — see configureCancelKill in proc_kill_{unix,windows}.go.
+		configureCancelKill(cmd)
 		cmd.Stderr = os.Stderr
 		if o.OnProgress != nil {
 			// Capture stdout so progress lines can be parsed; scanProgress still
