@@ -1,0 +1,18 @@
+services:
+  drumdrop:
+    build: .
+    container_name: drumdrop-dev
+    ports:
+      - "3737:8080"
+    volumes:
+      - drumdrop-config:/config
+      - ./downloads:/downloads
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # - DRUMDROP_API_TOKEN=<token>
+    restart: unless-stopped
+
+volumes:
+  drumdrop-config:
