@@ -5,6 +5,7 @@ downloads/
 .secrets*
 *.har
 docs/superpowers/
+.superpowers/
 
 # Go
 /drumdrop

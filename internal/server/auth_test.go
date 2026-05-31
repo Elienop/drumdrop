@@ -158,6 +158,25 @@ func TestCORSHeaderOnAPIResponse(t *testing.T) {
 	}
 }
 
+func TestAuthExemptShellButGuardsAPI(t *testing.T) {
+	s := &Server{cfg: Config{APIToken: "secret", ListenAddr: "0.0.0.0:8080"}}
+	exempt := map[string]bool{
+		"/":              true, // SPA shell
+		"/follows":       true, // client route -> index.html
+		"/assets/app.js": true, // hashed asset
+		"/healthz":       true,
+		"/readyz":        true,
+		"/api/summary":   false, // data plane: guarded
+		"/api/events":    false, // SSE: guarded (uses ?access_token)
+		"/api/follows/1": false,
+	}
+	for path, want := range exempt {
+		if got := s.authExempt(path); got != want {
+			t.Errorf("authExempt(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
 func TestGuardListen(t *testing.T) {
 	tests := []struct {
 		name    string

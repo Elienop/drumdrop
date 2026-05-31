@@ -123,6 +123,40 @@ DRUMDROP_DOWNLOADS_DIR=/media/archive drumdrop daemon
 Set `DRUMDROP_DOWNLOADS_DIR` to choose the download root without passing `--out`
 on every run (handy for a long-running daemon); `--out` still overrides it per run.
 
+## Web UI
+
+A self-hosted web UI (dashboard, follows, lessons, queue, settings) backed by the
+HTTP API and live job progress over SSE. The single-page app shell is served
+unauthenticated; the data plane (`/api/*`) honors the bearer token (see
+`DRUMDROP_API_TOKEN`), so loading the page never requires a token but every data
+call does.
+
+### Develop
+
+Two processes — the Go API and the Vite dev server (which proxies `/api` to the API):
+
+```bash
+make dev-api    # go run ./cmd/drumdrop serve   (API on :8080)
+make dev-web    # cd web && npm run dev          (UI on :5173)
+```
+
+Then open <http://localhost:5173>.
+
+### Release
+
+Build the frontend, embed it into the binary (`-tags webui`), and serve everything
+from one process:
+
+```bash
+make build-ui            # cd web && npm ci && npm run build, then embed via -tags webui
+./dist/drumdrop serve
+```
+
+Then open <http://127.0.0.1:8080>.
+
+> `make build` stays UI-free — the default build/test gate is green without a built
+> `web/dist`. Only `make build-ui` pulls in the embedded frontend.
+
 ## Development
 
 Git hooks live in `scripts/hooks/` (tracked) and enforce [Conventional Commits](https://www.conventionalcommits.org/). Enable them once per clone:

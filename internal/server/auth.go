@@ -9,9 +9,10 @@ import (
 )
 
 // withMiddleware wraps the routing handler with CORS and bearer-token auth. The
-// health probes (/healthz, /readyz) are exempt; everything else under /api is
-// guarded. CORS headers are applied (and OPTIONS preflight short-circuited) when
-// cfg.CORSOrigin is set, before the auth check so browsers can read the 401.
+// static SPA shell, hashed assets, and the health probes are exempt; only the
+// data plane under /api/ is guarded (see authExempt). CORS headers are applied
+// (and OPTIONS preflight short-circuited) when cfg.CORSOrigin is set, before the
+// auth check so browsers can read the 401.
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.CORSOrigin != "" {
@@ -32,10 +33,14 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// authExempt reports whether the path bypasses the auth check. The liveness and
-// readiness probes are always reachable so orchestrators can poll them.
+// authExempt reports whether the path bypasses the auth check. Only the data
+// plane under /api/ is guarded. The static SPA shell (index.html + hashed
+// assets) and the health probes carry no data and must be reachable without a
+// token so a browser can bootstrap the app under a configured token — a
+// top-level navigation cannot send a Bearer header. /api/events stays guarded
+// (EventSource sends ?access_token).
 func (s *Server) authExempt(path string) bool {
-	return path == "/healthz" || path == "/readyz"
+	return !strings.HasPrefix(path, "/api/")
 }
 
 // authorized reports whether the request carries a valid credential. When no API
