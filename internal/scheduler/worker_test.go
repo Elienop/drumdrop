@@ -850,3 +850,97 @@ func TestWorkerMarkDownloadedNoVideoWhenResourcesOnly(t *testing.T) {
 		t.Errorf("videoPath/bytes = %q/%d, want empty/0 on ResourcesOnly", got.videoPath, got.bytes)
 	}
 }
+
+// blockingDownloader blocks inside Download until its ctx is cancelled, then
+// returns ctx.Err() (context.Canceled). started is closed on the first call so a
+// test can wait until the download is genuinely in flight before cancelling.
+type blockingDownloader struct {
+	started chan struct{}
+	calls   int
+}
+
+func newBlockingDownloader() *blockingDownloader {
+	return &blockingDownloader{started: make(chan struct{})}
+}
+
+func (d *blockingDownloader) Download(ctx context.Context, _ *musora.Lesson, _ musora.DownloadOpts) error {
+	d.calls++
+	if d.calls == 1 {
+		close(d.started)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestWorkerCancelRunningSkipsAndCancelsJob verifies the cancel-error-first
+// branch: a running download whose job is cancelled via CancelRunning is recorded
+// as a skipped lesson + a canceled job, has its partial files cleaned up, is NOT
+// retried, and never falls through to the success branch.
+func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newBlockingDownloader()
+
+	tmp := t.TempDir()
+	// Pre-create the lesson dir with a partial file so cleanupPartials has work.
+	lessonDirPath := filepath.Join(tmp, "Beginner Course", "01 - Lesson A")
+	if err := os.MkdirAll(lessonDirPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	partial := filepath.Join(lessonDirPath, "01 - Lesson A.mp4.part")
+	if err := os.WriteFile(partial, []byte("half a file"), 0o644); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.MaxAttempts = 5 // ensure cancel beats retries
+	w.Cfg.DownloadsDir = tmp
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = w.RunOnce(context.Background(), 0)
+		close(done)
+	}()
+
+	// Wait until the download is in flight, then cancel the running job.
+	<-dl.started
+	if !w.CancelRunning(1) {
+		t.Fatal("CancelRunning(1) = false, want true (job is running)")
+	}
+	<-done
+
+	if dl.calls != 1 {
+		t.Errorf("download calls = %d, want 1 (no retry after cancel)", dl.calls)
+	}
+	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Errorf("markSkipped = %v, want %v", got, want)
+	}
+	if got, want := store.markJobCanceled, []int64{1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("markJobCanceled = %v, want %v", got, want)
+	}
+	if got := store.jobs[1].Status; got != database.JobCanceled {
+		t.Errorf("job status = %q, want canceled", got)
+	}
+	// Success/failure branches must NOT have run.
+	if len(store.markDownloaded) != 0 || len(store.markDone) != 0 {
+		t.Errorf("success branch ran: markDownloaded=%+v markDone=%v", store.markDownloaded, store.markDone)
+	}
+	if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 {
+		t.Errorf("failure branch ran: markFailed=%v markJobFailed=%v", store.markFailed, store.markJobFailed)
+	}
+	// Partial file removed; the directory itself is left in place.
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Errorf("partial file still present (stat err = %v), want removed", err)
+	}
+}
+
+// TestWorkerCancelRunningUnknownJob verifies CancelRunning returns false when no
+// job by that id is currently registered as running.
+func TestWorkerCancelRunningUnknownJob(t *testing.T) {
+	w := newTestWorker(newFakeWorkerStore(), fakeResolver{}, newFakeDownloader(), func(time.Duration) {})
+	if w.CancelRunning(999) {
+		t.Error("CancelRunning(999) = true, want false (no such running job)")
+	}
+}

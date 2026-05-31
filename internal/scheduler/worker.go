@@ -2,11 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -41,6 +43,12 @@ type Worker struct {
 	// sleep waits between retry attempts. It defaults to time.Sleep; tests inject
 	// a no-op so retry paths run instantly.
 	sleep func(time.Duration)
+
+	// mu guards running. running maps an in-flight job id to the CancelFunc of
+	// the per-job context passed into the Downloader, so CancelRunning can kill an
+	// active download (yt-dlp dies via the context, see musora.DownloadLesson).
+	mu      sync.Mutex
+	running map[int64]context.CancelFunc
 }
 
 // NewWorker builds a Worker with the given dependencies and config, defaulting
@@ -82,6 +90,39 @@ func (w *Worker) progress() ProgressSink {
 		return noopSink{}
 	}
 	return w.Progress
+}
+
+// register records the CancelFunc for an in-flight job so CancelRunning can kill
+// its download. unregister removes it once the job finishes.
+func (w *Worker) register(jobID int64, cancel context.CancelFunc) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.running == nil {
+		w.running = map[int64]context.CancelFunc{}
+	}
+	w.running[jobID] = cancel
+}
+
+// unregister drops the in-flight entry for a finished job. It is safe to call
+// for a job that was never registered (a benign no-op).
+func (w *Worker) unregister(jobID int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.running, jobID)
+}
+
+// CancelRunning cancels the in-flight download for jobID, killing yt-dlp via the
+// per-job context, and reports whether a running job by that id was found. The
+// worker's own cancel-error-first branch then records the job as canceled and the
+// lesson as skipped; CancelRunning itself only fires the cancel.
+func (w *Worker) CancelRunning(jobID int64) bool {
+	w.mu.Lock()
+	cancel, ok := w.running[jobID]
+	w.mu.Unlock()
+	if ok {
+		cancel()
+	}
+	return ok
 }
 
 // progressCallback returns the musora.DownloadOpts.OnProgress closure for one
@@ -258,6 +299,19 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 
 	outDir := w.outDir(follow, job, lesson)
 	quality := qualityFor(w.Cfg, follow)
+	// Index 1 today (Task 8 threads the lesson's real position). The download and
+	// the worker's lessonDir MUST share this value so producedVideo and
+	// cleanupPartials target the exact folder DownloadLesson writes to.
+	index := 1
+	dir := lessonDir(outDir, index, lesson.Title)
+
+	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
+	// the in-flight download (yt-dlp dies via the context). Cancelling jobCtx does
+	// not affect the outer ctx used for the store writes in the cancel branch.
+	jobCtx, cancel := context.WithCancel(ctx)
+	w.register(job.ID, cancel)
+	defer w.unregister(job.ID)
+	defer cancel()
 
 	var lastErr error
 	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
@@ -298,17 +352,38 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			MaxAttempts:   w.Cfg.MaxAttempts,
 			Time:          time.Now(),
 		})
-		derr := w.Downloader.Download(ctx, lesson, musora.DownloadOpts{
+		derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
 			Dir:           outDir,
-			Index:         1,
+			Index:         index,
 			Quality:       quality,
 			ResourcesOnly: w.Cfg.ResourcesOnly,
 			OnProgress:    w.progressCallback(job, lesson, attempt),
 		})
+
+		// Cancel-error-first: a CancelRunning kill (jobCtx cancelled) must never
+		// fall through to the success or failure branches. Clean the partials, mark
+		// the lesson skipped + the job canceled, and stop — no retry. The store
+		// writes use the outer ctx because jobCtx is already cancelled.
+		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
+			cleanupPartials(dir)
+			fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
+			w.progress().Emit(ProgressEvent{
+				Kind:          "lesson_skipped",
+				JobID:         job.ID,
+				FollowID:      job.FollowID.Int64,
+				RailcontentID: id,
+				Title:         lesson.Title,
+				Err:           "canceled",
+				Time:          time.Now(),
+			})
+			_ = w.Store.MarkSkipped(ctx, id, "canceled")
+			_ = w.Store.MarkJobCanceled(ctx, job.ID)
+			return
+		}
+
 		if derr == nil {
-			lessonDir := filepath.Join(outDir, fmt.Sprintf("%02d - %s", 1, musora.Sanitize(lesson.Title)))
-			videoPath, bytes := w.producedVideo(lessonDir)
-			if err := w.Store.MarkDownloaded(ctx, id, quality, lessonDir, videoPath, bytes); err != nil {
+			videoPath, bytes := w.producedVideo(dir)
+			if err := w.Store.MarkDownloaded(ctx, id, quality, dir, videoPath, bytes); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
 			}
 			if err := w.Store.MarkJobDone(ctx, job.ID); err != nil {
@@ -376,6 +451,39 @@ func (w *Worker) outDir(f database.Follow, job database.Job, lesson *musora.Less
 // follow) has none of these and triggers the lesson-parent-title fallback.
 func hasFollow(f database.Follow) bool {
 	return f.Title != "" || f.Slug.Valid || f.RailcontentID.Valid
+}
+
+// lessonDir is the single source of truth for a lesson's on-disk folder: the
+// output dir joined with "NN - Sanitized title", where NN is the lesson's
+// position. DownloadLesson builds the same name from DownloadOpts.Index, so the
+// index passed here MUST match DownloadOpts.Index for producedVideo to find the
+// file and for cleanupPartials to target the right dir.
+func lessonDir(outDir string, index int, title string) string {
+	return filepath.Join(outDir, fmt.Sprintf("%02d - %s", index, musora.Sanitize(title)))
+}
+
+// cleanupPartials removes yt-dlp's leftover partial-download artifacts under a
+// cancelled lesson's dir — *.part, *.ytdl, and *.f* (per-format fragments) — so a
+// killed download leaves no half-written files behind. A missing dir is tolerated
+// (nothing to clean); any other read/remove error is ignored: cleanup is
+// best-effort and must not block the cancel path.
+func cleanupPartials(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // missing dir or unreadable: nothing to clean
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		part, _ := filepath.Match("*.part", name)
+		ytdl, _ := filepath.Match("*.ytdl", name)
+		frag, _ := filepath.Match("*.f*", name)
+		if part || ytdl || frag {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // producedVideo returns the path and size of the mp4 DownloadLesson writes for a
