@@ -25,6 +25,8 @@ func TestServeArgs(t *testing.T) {
 
 	t.Run("defaults from config", func(t *testing.T) {
 		t.Setenv("DRUMDROP_LISTEN", "")
+		t.Setenv("DRUMDROP_INTERVAL", "")
+		t.Setenv("DRUMDROP_QUALITY", "")
 		opts, err := parseServeArgs(nil)
 		if err != nil {
 			t.Fatalf("parseServeArgs(nil) error: %v", err)
@@ -87,6 +89,19 @@ func TestServeArgs(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestParseServeArgsIntervalFromEnv verifies that with no --interval flag the
+// default is derived from DRUMDROP_INTERVAL (config.Interval()), not a literal.
+func TestParseServeArgsIntervalFromEnv(t *testing.T) {
+	t.Setenv("DRUMDROP_INTERVAL", "6h")
+	opts, err := parseServeArgs(nil) // no --interval flag => env-derived default
+	if err != nil {
+		t.Fatalf("parseServeArgs: %v", err)
+	}
+	if opts.interval != 6*time.Hour {
+		t.Errorf("interval = %v, want 6h", opts.interval)
+	}
 }
 
 // fakeDaemon records when its Run goroutine starts and returns, so the

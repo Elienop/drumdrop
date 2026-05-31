@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/engine"
 	"github.com/elienop/drumdrop/internal/musora"
@@ -236,7 +237,7 @@ func cmdSync(argv []string) error {
 	fs := flag.NewFlagSet("drumdrop sync", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
-	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
+	quality := fs.String("quality", config.Quality(), "override each follow's quality (best|2160|1440|1080|720|480)")
 	limit := fs.Int("limit", 0, "cap NEW downloads this run (0 = unlimited)")
 	dryRun := fs.Bool("dry-run", false, "expand + record, download nothing")
 	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")

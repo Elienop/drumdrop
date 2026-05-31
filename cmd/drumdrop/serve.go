@@ -183,9 +183,9 @@ func parseServeArgs(argv []string) (serveOpts, error) {
 	fs := flag.NewFlagSet("drumdrop serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	listen := fs.String("listen", config.ListenAddr(), "host:port to bind the HTTP API")
-	interval := fs.String("interval", "12h", "auto-sync interval (Go duration, e.g. 6h, 30m)")
+	interval := fs.String("interval", config.Interval(), "auto-sync interval (Go duration, e.g. 6h, 30m)")
 	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
-	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
+	quality := fs.String("quality", config.Quality(), "override each follow's quality (best|2160|1440|1080|720|480)")
 	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")
 
 	_, flags := splitArgs(argv)

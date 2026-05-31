@@ -1,0 +1,15 @@
+.git
+node_modules
+web/node_modules
+web/dist
+dist
+downloads
+docs
+*.db
+*.db-wal
+*.db-shm
+secret.key
+credentials.enc
+session.cookie
+.env*
+.secrets*

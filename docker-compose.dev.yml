@@ -1,0 +1,20 @@
+services:
+  drumdrop:
+    build: .
+    container_name: drumdrop-dev
+    ports:
+      - "3737:8080"
+    volumes:
+      - drumdrop-config:/config
+      - ./downloads:/downloads
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # REQUIRED (same 0.0.0.0 bind as prod): serve refuses to start without a
+      # token. Generate one: `openssl rand -hex 32`.
+      # - DRUMDROP_API_TOKEN=<paste a 64-char hex token here>
+    restart: unless-stopped
+
+volumes:
+  drumdrop-config:

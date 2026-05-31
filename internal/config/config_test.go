@@ -104,3 +104,41 @@ func TestCORSOrigin(t *testing.T) {
 		})
 	}
 }
+
+func TestInterval(t *testing.T) {
+	tests := []struct{ name, env, want string }{
+		{"unset default", "", "12h"},
+		{"override", "6h", "6h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("DRUMDROP_INTERVAL", tt.env)
+			} else if err := os.Unsetenv("DRUMDROP_INTERVAL"); err != nil {
+				t.Fatalf("unset: %v", err)
+			}
+			if got := Interval(); got != tt.want {
+				t.Errorf("Interval() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuality(t *testing.T) {
+	tests := []struct{ name, env, want string }{
+		{"unset default empty", "", ""},
+		{"override", "1080", "1080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv("DRUMDROP_QUALITY", tt.env)
+			} else if err := os.Unsetenv("DRUMDROP_QUALITY"); err != nil {
+				t.Fatalf("unset: %v", err)
+			}
+			if got := Quality(); got != tt.want {
+				t.Errorf("Quality() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -1,0 +1,24 @@
+services:
+  drumdrop:
+    image: ghcr.io/elienop/drumdrop:latest
+    container_name: drumdrop
+    ports:
+      - "3737:8080"
+    volumes:
+      - drumdrop-config:/config       # DB + AES-GCM secret + cookie
+      - ./downloads:/downloads        # your archive lands on the host disk
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      # REQUIRED: the container binds 0.0.0.0, so serve refuses to start without
+      # a token (GuardListen). Generate one: `openssl rand -hex 32`.
+      # - DRUMDROP_API_TOKEN=<paste a 64-char hex token here>
+      # Optional knobs (env-configured):
+      # - DRUMDROP_INTERVAL=12h
+      # - DRUMDROP_QUALITY=1080
+      # - DRUMDROP_CORS_ORIGIN=https://drumdrop.example.com
+    restart: unless-stopped
+
+volumes:
+  drumdrop-config:
