@@ -1,0 +1,9 @@
+name: PR
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  gates:
+    uses: ./.github/workflows/ci.yml
