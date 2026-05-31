@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
 
 	"github.com/elienop/drumdrop/internal/engine"
 	"github.com/elienop/drumdrop/internal/musora"
@@ -45,9 +44,12 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	case q.Get("slug") != "":
 		s.previewInstructor(w, q.Get("slug"), q.Get("brand"))
 	case q.Get("id") != "":
-		id, err := strconv.Atoi(q.Get("id"))
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid id: "+q.Get("id"))
+		// Parse with engine.ExtractID (accepts a numeric id OR a Drumeo URL) so
+		// preview takes the same input as create (POST /api/follows, which also
+		// uses ExtractID) — a URL must not 400 on preview when it works on add.
+		id := engine.ExtractID(q.Get("id"))
+		if id == 0 {
+			writeErr(w, http.StatusBadRequest, "could not parse a content id from: "+q.Get("id"))
 			return
 		}
 		s.previewNode(w, id, q.Get("whole") == "true")
