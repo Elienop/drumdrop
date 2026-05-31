@@ -26,6 +26,7 @@ type Lesson struct {
 	Title               string         `json:"title"`
 	ParentRailcontentID sql.NullInt64  `json:"parent_railcontent_id"`
 	Brand               string         `json:"brand"`
+	Position            sql.NullInt64  `json:"position"`
 	Status              string         `json:"status"`
 	Quality             sql.NullString `json:"quality"`
 	OutputDir           sql.NullString `json:"output_dir"`
@@ -40,7 +41,7 @@ type Lesson struct {
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
-const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, status,
+const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
 	first_seen_at, downloaded_at, updated_at`
 
@@ -51,7 +52,7 @@ func scanLesson(row interface {
 }) (Lesson, error) {
 	var l Lesson
 	err := row.Scan(
-		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Status,
+		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Position, &l.Status,
 		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
 		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
 	)
@@ -66,16 +67,23 @@ func scanLesson(row interface {
 // re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
 // attributed to the follow that first discovered it even if a later follow also
 // covers it. New rows take the table default status='pending'.
-func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+//
+// position is the lesson's sequence within its follow (the "NN - " folder
+// prefix). On conflict it is first-write-wins via COALESCE(lessons.position,
+// excluded.position): a lesson shared by two follows keeps the first number, and
+// a prior NULL is filled in by a later numbered upsert. (title stays
+// last-write-wins.)
+func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, follow_id)
-			 VALUES(?, ?, ?, ?, ?)
+			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, position, follow_id)
+			 VALUES(?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
 			     parent_railcontent_id = excluded.parent_railcontent_id,
+			     position              = COALESCE(lessons.position, excluded.position),
 			     updated_at            = CURRENT_TIMESTAMP`,
-			railcontentID, title, parent, brand, followID,
+			railcontentID, title, parent, brand, position, followID,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert lesson %d: %w", railcontentID, err)

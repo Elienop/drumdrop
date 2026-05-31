@@ -677,7 +677,7 @@ func TestRetryJobFailed(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 500
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
@@ -745,7 +745,7 @@ func TestRetryJobCanceled(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 600
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
@@ -776,7 +776,7 @@ func TestRetryJobActive(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 700
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)

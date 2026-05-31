@@ -12,10 +12,10 @@ import (
 func TestListLessons(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 11, "Lesson One", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 11, "Lesson One", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 11: %v", err)
 	}
-	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 12: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
@@ -54,10 +54,10 @@ func TestListLessonsEmptyArray(t *testing.T) {
 func TestListLessonsStatusFilter(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 21, "Pending", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 21, "Pending", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 21: %v", err)
 	}
-	if err := store.UpsertLesson(ctx, 22, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 22, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 22: %v", err)
 	}
 	if err := store.MarkSkipped(ctx, 22, "no thanks"); err != nil {
@@ -88,7 +88,7 @@ func TestListLessonsLimitOffset(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
 	for _, id := range []int{31, 32, 33} {
-		if err := store.UpsertLesson(ctx, id, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+		if err := store.UpsertLesson(ctx, id, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}
@@ -125,7 +125,7 @@ func TestListLessonsBadLimit(t *testing.T) {
 func TestGetLesson(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 404101, "Lesson Title", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 404101, "Lesson Title", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")

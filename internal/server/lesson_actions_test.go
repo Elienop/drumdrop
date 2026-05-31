@@ -13,7 +13,7 @@ import (
 func TestDownloadLessonEnqueues(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 5001, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 5001, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
@@ -48,7 +48,7 @@ func TestDownloadLessonEnqueues(t *testing.T) {
 func TestDownloadLessonReturnsExistingActiveJob(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 5002, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 5002, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	existing, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 5002)
@@ -108,7 +108,7 @@ func TestDownloadLessonBadID(t *testing.T) {
 func TestSkipLesson(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 5003, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 5003, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
@@ -136,7 +136,7 @@ func TestSkipLesson(t *testing.T) {
 func TestSkipLessonNoBody(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 5004, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 5004, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")

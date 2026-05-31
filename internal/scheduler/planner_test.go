@@ -25,6 +25,7 @@ type upsertCall struct {
 	id       int
 	parent   sql.NullInt64
 	brand    string
+	position sql.NullInt64
 	followID sql.NullInt64
 }
 
@@ -47,8 +48,8 @@ func (s *fakePlannerStore) ListFollows(ctx context.Context) ([]database.Follow, 
 	return s.follows, nil
 }
 
-func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
-	s.upserts = append(s.upserts, upsertCall{id: railcontentID, parent: parent, brand: brand, followID: followID})
+func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
+	s.upserts = append(s.upserts, upsertCall{id: railcontentID, parent: parent, brand: brand, position: position, followID: followID})
 	return nil
 }
 
