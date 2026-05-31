@@ -78,6 +78,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ dry_run: dryRun }),
     }),
+
+  pause: () => request<{ paused: boolean }>("/pause", { method: "POST" }),
+  resume: () => request<{ paused: boolean }>("/resume", { method: "POST" }),
 }
 
 // requestWithStatus returns both the body and the HTTP status so callers can

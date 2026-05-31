@@ -14,6 +14,7 @@ const defaultSummary: SummaryDTO = {
   follows: 0,
   lessons: { downloaded: 0, pending: 0, downloading: 0, failed: 0, skipped: 0 },
   jobs: { queued: 0, running: 0, done: 0, failed: 0, canceled: 0 },
+  paused: false,
 }
 
 const defaultJobs: JobDTO[] = []
