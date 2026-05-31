@@ -59,6 +59,8 @@ export const api = {
     requestWithStatus<JobDTO>(`/lessons/${id}/download`, { method: "POST" }),
   skipLesson: (id: number, body: SkipLessonRequest = {}) =>
     request<LessonDTO>(`/lessons/${id}/skip`, { method: "POST", body: JSON.stringify(body) }),
+  unskipLesson: (id: number) =>
+    request<LessonDTO>(`/lessons/${id}/unskip`, { method: "POST" }),
 
   listJobs: (params: { state?: string; limit?: number } = {}) =>
     request<JobDTO[]>(`/jobs${qs(params)}`),
