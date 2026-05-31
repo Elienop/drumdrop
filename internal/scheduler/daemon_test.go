@@ -394,6 +394,60 @@ func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
 	}
 }
 
+func TestDaemonPauseSkipsCyclesThenResumes(t *testing.T) {
+	// A paused daemon must not run any cycle: its ticker ticks and any kick are
+	// dropped while paused, so no Plan/drain happens. Resuming lets the next tick
+	// (or kick) run a cycle again.
+	store := newFakeDaemonStore()
+	d := newTestDaemon(store)
+	d.Pause()
+	if !d.IsPaused() {
+		t.Fatal("IsPaused() = false after Pause(), want true")
+	}
+	kick := make(chan struct{}, 1)
+	d.Kick = kick
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, 2*time.Millisecond) }()
+
+	// Let the immediate (startup) cycle and several ticker ticks fire while paused.
+	// A kick while paused must also be dropped.
+	kick <- struct{}{}
+	time.Sleep(40 * time.Millisecond)
+
+	store.mu.Lock()
+	pausedPlans := store.planRuns
+	store.mu.Unlock()
+	if pausedPlans != 0 {
+		t.Errorf("planRuns = %d while paused, want 0 (no cycles run)", pausedPlans)
+	}
+
+	// Resume: the next tick must run a cycle.
+	d.Resume()
+	if d.IsPaused() {
+		t.Fatal("IsPaused() = true after Resume(), want false")
+	}
+	waitCycle(t, store.cycleDone)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil on cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after cancel")
+	}
+
+	store.mu.Lock()
+	plans := store.planRuns
+	store.mu.Unlock()
+	if plans < 1 {
+		t.Errorf("planRuns = %d after Resume, want >= 1", plans)
+	}
+}
+
 // waitCycle blocks until one cycle signals on ch, failing the test on timeout.
 func waitCycle(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
