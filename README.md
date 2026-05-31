@@ -29,6 +29,11 @@ the defaults give a working setup with no env at all.
 | --- | --- | --- |
 | `DRUMDROP_CONFIG_DIR` | `~/.config/drumdrop` | Directory for all at-rest state: `drumdrop.db` (follow/download state), `secret.key` (credential-encryption key), `credentials.enc` (encrypted login), `session.cookie` (saved session). Override to relocate the whole config directory. |
 | `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. |
+| `DRUMDROP_LISTEN` | `127.0.0.1:8080` | Address `serve` binds. A non-loopback bind (e.g. `0.0.0.0:8080`, as in the Docker image) refuses to start without `DRUMDROP_API_TOKEN`. |
+| `DRUMDROP_API_TOKEN` | _(none)_ | Bearer token for the `/api/*` data plane. Required for any non-loopback bind; the SPA shell stays unauthenticated. |
+| `DRUMDROP_CORS_ORIGIN` | _(none)_ | Allowed CORS origin for the HTTP API. Empty disables cross-origin requests. |
+| `DRUMDROP_INTERVAL` | `12h` | Default `--interval` for `serve`/`daemon` auto-sync (a Go duration, e.g. `6h`, `30m`). |
+| `DRUMDROP_QUALITY` | _(none)_ | Default `--quality` for `serve`/`daemon`/`sync`. Empty means each follow keeps its own saved quality. |
 | `DRUMDROP_PERMISSION_IDS` | `92` | Comma-separated permission ids substituted into the catalog/resolve GROQ queries; gates which content is resolvable. Malformed values fall back to the default. |
 | `MUSORA_EMAIL` | _(none)_ | Login email for non-interactive `login` (skips the prompt). |
 | `MUSORA_PASSWORD` | _(none)_ | Login password for non-interactive `login` (skips the prompt). |
@@ -156,6 +161,42 @@ Then open <http://127.0.0.1:8080>.
 
 > `make build` stays UI-free — the default build/test gate is green without a built
 > `web/dist`. Only `make build-ui` pulls in the embedded frontend.
+
+## Run with Docker
+
+drumdrop ships as a multi-arch image (`amd64`/`arm64`) bundling yt-dlp + ffmpeg with the web UI
+embedded. The container binds `0.0.0.0`, so it **requires an API token** — generate one with
+`openssl rand -hex 32`.
+
+```bash
+# docker-compose.yml: set DRUMDROP_API_TOKEN, then:
+docker compose up -d
+# → web UI + API at http://localhost:3737 (use the token in the UI's gate)
+```
+
+`docker run` equivalent:
+
+```bash
+docker run -d --name drumdrop -p 3737:8080 \
+  -e DRUMDROP_API_TOKEN="$(openssl rand -hex 32)" \
+  -e PUID=1000 -e PGID=1000 -e TZ=UTC \
+  -v drumdrop-config:/config -v "$PWD/downloads:/downloads" \
+  ghcr.io/elienop/drumdrop:latest
+```
+
+- `/config` (named volume) holds the SQLite DB + encrypted secret/cookie.
+- `/downloads` (host bind) is where your archived lessons land.
+
+The image is fully env-configured via the `DRUMDROP_*` vars in the [Environment](#environment)
+table; `PUID`/`PGID`/`TZ` set the runtime user/timezone. The published port maps `3737:8080`.
+
+### Standalone binary
+
+Prefer no container? Download the archive for your OS/arch from the
+[GitHub Releases](https://github.com/elienop/drumdrop/releases) page and extract the `drumdrop`
+binary. **`yt-dlp` and `ffmpeg` must be on your `PATH`** — the binary shells out to them. Configure
+it through the `DRUMDROP_*` env vars (see the [Environment](#environment) table) or the `serve`
+flags.
 
 ## Development
 
