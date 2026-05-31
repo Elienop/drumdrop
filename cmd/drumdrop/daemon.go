@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/engine"
 )
 
@@ -67,10 +68,10 @@ type daemonOpts struct {
 func parseDaemonArgs(argv []string) (daemonOpts, error) {
 	fs := flag.NewFlagSet("drumdrop daemon", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	interval := fs.String("interval", "12h", "re-check interval (Go duration, e.g. 6h, 30m)")
+	interval := fs.String("interval", config.Interval(), "re-check interval (Go duration, e.g. 6h, 30m)")
 	once := fs.Bool("once", false, "run one plan+drain cycle then exit")
 	out := fs.String("out", "", "output directory (default DRUMDROP_DOWNLOADS_DIR or ./downloads)")
-	quality := fs.String("quality", "", "override each follow's quality (best|2160|1440|1080|720|480)")
+	quality := fs.String("quality", config.Quality(), "override each follow's quality (best|2160|1440|1080|720|480)")
 	resourcesOnly := fs.Bool("resources-only", false, "skip video; fetch resources only")
 
 	_, flags := splitArgs(argv)

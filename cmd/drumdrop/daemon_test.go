@@ -95,6 +95,8 @@ func TestDaemonArgs(t *testing.T) {
 	})
 
 	t.Run("default 12h when omitted", func(t *testing.T) {
+		t.Setenv("DRUMDROP_INTERVAL", "")
+		t.Setenv("DRUMDROP_QUALITY", "")
 		opts, err := parseDaemonArgs(nil)
 		if err != nil {
 			t.Fatalf("parseDaemonArgs(nil) error: %v", err)
@@ -131,4 +133,17 @@ func TestDaemonArgs(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestParseDaemonArgsIntervalFromEnv verifies that with no --interval flag the
+// default is derived from DRUMDROP_INTERVAL (config.Interval()), not a literal.
+func TestParseDaemonArgsIntervalFromEnv(t *testing.T) {
+	t.Setenv("DRUMDROP_INTERVAL", "6h")
+	opts, err := parseDaemonArgs(nil) // no --interval flag => env-derived default
+	if err != nil {
+		t.Fatalf("parseDaemonArgs: %v", err)
+	}
+	if opts.interval != 6*time.Hour {
+		t.Errorf("interval = %v, want 6h", opts.interval)
+	}
 }
