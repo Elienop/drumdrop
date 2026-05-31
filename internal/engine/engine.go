@@ -148,5 +148,8 @@ func Build(store *database.Store, cfg scheduler.Config, permIDs string, log io.W
 		Log:      log,
 		Progress: progress,
 	}
+	// Let the worker's drain loop honor the daemon's pause flag: pausing mid-cycle
+	// stops it claiming the next queued job, not just future cycles.
+	worker.IsPaused = daemon.IsPaused
 	return planner, worker, daemon
 }

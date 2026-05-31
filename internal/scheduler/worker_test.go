@@ -542,6 +542,48 @@ func TestWorkerNeverAbortsOnFailingJob(t *testing.T) {
 	}
 }
 
+// TestWorkerStopsClaimingWhenPaused proves pause halts the queue mid-cycle: the
+// in-flight job finishes but the worker does not claim the next one while
+// IsPaused reports true. This is the "pause = stop starting new ones" guarantee
+// at the per-job level — the daemon's pause flag alone only gates whole cycles,
+// so a drain already in progress would otherwise run the whole queue.
+func TestWorkerStopsClaimingWhenPaused(t *testing.T) {
+	store := newFakeWorkerStore(
+		queuedJob(1, nodeFollow().ID, 100),
+		queuedJob(2, nodeFollow().ID, 200),
+		queuedJob(3, nodeFollow().ID, 300),
+	)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{
+		100: lesson(100, "A"),
+		200: lesson(200, "B"),
+		300: lesson(300, "C"),
+	}}
+	dl := newFakeDownloader()
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	// Become paused once the first download has completed: the loop's pre-claim
+	// check then fires before job 2 is claimed.
+	w.IsPaused = func() bool { return len(dl.calls) >= 1 }
+
+	processed, err := w.RunOnce(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("processed = %d, want 1 (paused after the first job)", processed)
+	}
+	if len(dl.calls) != 1 {
+		t.Errorf("download calls = %d, want 1 (no new job claimed while paused)", len(dl.calls))
+	}
+	if got := store.jobs[2].Status; got != database.JobQueued {
+		t.Errorf("job 2 status = %q, want still queued (not claimed while paused)", got)
+	}
+	if got := store.jobs[3].Status; got != database.JobQueued {
+		t.Errorf("job 3 status = %q, want still queued", got)
+	}
+}
+
 func TestWorkerLimitCapsProcessed(t *testing.T) {
 	store := newFakeWorkerStore(
 		queuedJob(1, nodeFollow().ID, 100),

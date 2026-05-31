@@ -40,6 +40,12 @@ type Worker struct {
 	// It is nil by default; progress() substitutes a noopSink so callers emit
 	// unconditionally. engine.Build sets it via assignment after NewWorker.
 	Progress ProgressSink
+	// IsPaused, when non-nil and returning true, makes the drain loop stop
+	// claiming the NEXT job: the in-flight download finishes but no new one
+	// starts, honoring "pause = stop starting new ones" within an active cycle
+	// (the daemon's own pause flag only gates whole cycles). nil => never paused
+	// (the CLI sync path has no daemon). engine.Build wires it to Daemon.IsPaused.
+	IsPaused func() bool
 	// sleep waits between retry attempts. It defaults to time.Sleep; tests inject
 	// a no-op so retry paths run instantly.
 	sleep func(time.Duration)
@@ -221,6 +227,12 @@ func (w *Worker) backoff(i int) time.Duration {
 func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err error) {
 	for {
 		if err := ctx.Err(); err != nil {
+			return processed, nil
+		}
+		// Pause stops the queue from advancing: the in-flight download (if any)
+		// already finished this iteration; do not claim the next job. The leftover
+		// jobs stay queued and drain on the next cycle after Resume.
+		if w.IsPaused != nil && w.IsPaused() {
 			return processed, nil
 		}
 
