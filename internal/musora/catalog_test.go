@@ -72,16 +72,42 @@ func TestCollectLeaves(t *testing.T) {
 	}
 }
 
-func TestLeafIDsDropsZeroID(t *testing.T) {
+func TestLeafItemsDropsZeroID(t *testing.T) {
 	// A tree whose leaves include a zero-id (structural) leaf: that leaf must be
-	// dropped, the real railcontent leaves kept in order.
+	// dropped, the real railcontent leaves kept in order with their titles.
 	tree := &Node{RailcontentID: 1, Children: []Node{
-		{RailcontentID: 4},
-		{RailcontentID: 0}, // structural leaf with no railcontent reference
-		{RailcontentID: 5},
+		{RailcontentID: 4, Title: "Lesson Four"},
+		{RailcontentID: 0, Title: "structural"}, // no railcontent reference
+		{RailcontentID: 5, Title: "Lesson Five"},
 	}}
-	got := leafIDs(CollectLeaves(tree, nil))
-	if !reflect.DeepEqual(got, []int{4, 5}) {
-		t.Fatalf("leafIDs = %v, want [4 5] (zero-id leaf dropped)", got)
+	got := leafItems(CollectLeaves(tree, nil))
+	want := []LessonItem{
+		{ID: 4, Title: "Lesson Four"},
+		{ID: 5, Title: "Lesson Five"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("leafItems = %v, want %v (zero-id leaf dropped, titles kept)", got, want)
+	}
+}
+
+// TestResolveLessonIDsReturnsOrderedItemsWithTitles: the node hierarchy walk must
+// return ordered LessonItems carrying the railcontent id AND the node title, so
+// the planner can persist the title (Task 5) and a per-follow position.
+func TestResolveLessonIDsReturnsOrderedItemsWithTitles(t *testing.T) {
+	// A two-leaf hierarchy: the root has two child lessons in order.
+	serveSanity(t, `{"result":[{"railcontent_id":1,"title":"Course","children":[
+		{"railcontent_id":10,"title":"First Lesson","children":[]},
+		{"railcontent_id":11,"title":"Second Lesson","children":[]}
+	]}]}`)
+	_, items, err := ResolveLessonIDs(1, false, "")
+	if err != nil {
+		t.Fatalf("ResolveLessonIDs: %v", err)
+	}
+	want := []LessonItem{
+		{ID: 10, Title: "First Lesson"},
+		{ID: 11, Title: "Second Lesson"},
+	}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("ResolveLessonIDs items = %v, want %v", items, want)
 	}
 }

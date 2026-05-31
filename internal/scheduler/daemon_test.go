@@ -155,9 +155,9 @@ func (s *fakeDaemonStore) TouchLastSynced(ctx context.Context, id int64) error {
 // each cycle has one job to enqueue and drain.
 type daemonExpander struct{ next int }
 
-func (e *daemonExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
+func (e *daemonExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
 	e.next++
-	return []int{1000 + e.next}, nil
+	return []musora.LessonItem{{ID: 1000 + e.next}}, nil
 }
 
 // daemonResolver resolves any id to a trivially downloadable lesson.

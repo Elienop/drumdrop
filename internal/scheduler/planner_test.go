@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/musora"
 )
 
 // enqueueCall records one EnqueueJob invocation so tests can assert the exact
@@ -122,17 +123,24 @@ func (s *fakePlannerStore) RequeueStaleRunning(ctx context.Context) (int, error)
 	panic("RequeueStaleRunning: not expected from Planner")
 }
 
-// fakeExpander returns canned ids (or an error) per follow id.
+// fakeExpander returns canned ids (or an error) per follow id. The ids map keeps
+// the per-follow lesson ids; titles are synthesized so tests that only assert on
+// ids stay unchanged while the planner now receives []LessonItem.
 type fakeExpander struct {
 	ids  map[int64][]int
 	errs map[int64]error
 }
 
-func (e fakeExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
+func (e fakeExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
 	if err := e.errs[f.ID]; err != nil {
 		return nil, err
 	}
-	return e.ids[f.ID], nil
+	ids := e.ids[f.ID]
+	items := make([]musora.LessonItem, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, musora.LessonItem{ID: id})
+	}
+	return items, nil
 }
 
 // enqueuedIDs returns the sorted set of railcontent ids that were enqueued.

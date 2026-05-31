@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/musora"
 	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
@@ -17,8 +18,12 @@ import (
 // something to count without touching the network.
 type stubExpander struct{ ids []int }
 
-func (e stubExpander) Expand(_ database.Follow, _ string) ([]int, error) {
-	return e.ids, nil
+func (e stubExpander) Expand(_ database.Follow, _ string) ([]musora.LessonItem, error) {
+	items := make([]musora.LessonItem, 0, len(e.ids))
+	for _, id := range e.ids {
+		items = append(items, musora.LessonItem{ID: id})
+	}
+	return items, nil
 }
 
 // newSyncTestStore opens a fresh temp-file store with migrations applied.

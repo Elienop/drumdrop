@@ -185,8 +185,13 @@ func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error)        
 // cliExpander returns a fixed id list per follow id.
 type cliExpander struct{ ids map[int64][]int }
 
-func (e cliExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
-	return e.ids[f.ID], nil
+func (e cliExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
+	ids := e.ids[f.ID]
+	items := make([]musora.LessonItem, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, musora.LessonItem{ID: id})
+	}
+	return items, nil
 }
 
 // cliResolver returns a stub lesson for every id without touching the network.

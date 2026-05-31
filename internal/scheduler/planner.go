@@ -87,7 +87,7 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 	seen := map[int]bool{}
 
 	for _, f := range follows {
-		ids, err := p.Expander.Expand(f, p.PermIDs)
+		items, err := p.Expander.Expand(f, p.PermIDs)
 		if err != nil {
 			// Expansion failure is isolated: log, skip, and leave last_synced_at
 			// untouched so this follow is retried next cycle.
@@ -103,10 +103,12 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		}
 
 		fNew := 0
-		for _, id := range ids {
+		for _, item := range items {
+			id := item.ID
 			// Record the lesson regardless of whether we enqueue it, attributing it
 			// to the follow currently being expanded (first-follow-wins on conflict).
-			if err := p.Store.UpsertLesson(ctx, id, "", parent, f.Brand, sql.NullInt64{}, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
+			// Position stays NULL here; Task 5 sets the per-follow 1-based index.
+			if err := p.Store.UpsertLesson(ctx, id, item.Title, parent, f.Brand, sql.NullInt64{}, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
 				return enqueued, fmt.Errorf("upsert lesson %d: %w", id, err)
 			}
 

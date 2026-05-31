@@ -37,7 +37,7 @@ type Downloader interface {
 // Node follows expand via the catalog walk; instructor follows via the
 // instructor-lessons query.
 type Expander interface {
-	Expand(f database.Follow, permIDs string) (ids []int, err error)
+	Expand(f database.Follow, permIDs string) (items []musora.LessonItem, err error)
 }
 
 // Store is the subset of *database.Store the scheduler uses. Declaring it as an

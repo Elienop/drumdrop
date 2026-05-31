@@ -7,7 +7,16 @@ import (
 
 type Node struct {
 	RailcontentID int    `json:"railcontent_id"`
+	Title         string `json:"title"`
 	Children      []Node `json:"children"`
+}
+
+// LessonItem carries a downloadable lesson's railcontent id and its title in
+// expansion order. The planner persists the title and a per-follow position
+// from this, so the order of a []LessonItem is significant.
+type LessonItem struct {
+	ID    int
+	Title string
 }
 
 func TopParent(id int, permIDs string) (int, error) {
@@ -70,20 +79,22 @@ func CollectLeaves(n *Node, acc []Node) []Node {
 	return acc
 }
 
-// leafIDs returns the RailcontentIDs of the given leaves, dropping any leaf with
-// a zero id (e.g. a structural node with no railcontent reference).
-func leafIDs(leaves []Node) []int {
-	var ids []int
+// leafItems returns the railcontent id + title of the given leaves in order,
+// dropping any leaf with a zero id (e.g. a structural node with no railcontent
+// reference).
+func leafItems(leaves []Node) []LessonItem {
+	var items []LessonItem
 	for _, leaf := range leaves {
 		if leaf.RailcontentID != 0 {
-			ids = append(ids, leaf.RailcontentID)
+			items = append(items, LessonItem{ID: leaf.RailcontentID, Title: leaf.Title})
 		}
 	}
-	return ids
+	return items
 }
 
 // ResolveLessonIDs: whole=false -> exactly the node pointed at; whole=true -> walk to top parent.
-func ResolveLessonIDs(targetID int, whole bool, permIDs string) (rootID int, lessonIDs []int, err error) {
+// Returns the resolved root id and the ordered lesson items (id+title) under it.
+func ResolveLessonIDs(targetID int, whole bool, permIDs string) (rootID int, lessons []LessonItem, err error) {
 	rootID = targetID
 	if whole {
 		if rootID, err = TopParent(targetID, permIDs); err != nil {
@@ -94,6 +105,6 @@ func ResolveLessonIDs(targetID int, whole bool, permIDs string) (rootID int, les
 	if err != nil {
 		return
 	}
-	lessonIDs = leafIDs(CollectLeaves(root, nil))
+	lessons = leafItems(CollectLeaves(root, nil))
 	return
 }
