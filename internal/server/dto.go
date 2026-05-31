@@ -68,6 +68,9 @@ type SummaryDTO struct {
 	Follows int            `json:"follows"`
 	Lessons map[string]int `json:"lessons"`
 	Jobs    map[string]int `json:"jobs"`
+	// Paused reflects the daemon's pause flag (false when no daemon is attached),
+	// so the UI has a single source for the paused indicator.
+	Paused bool `json:"paused"`
 }
 
 // nullInt64 returns a *int64 that is nil when n is NULL, or points at the value

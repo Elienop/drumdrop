@@ -432,6 +432,57 @@ func TestMarkSkipped(t *testing.T) {
 	}
 }
 
+func TestUnskipLesson(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
+		t.Fatalf("MarkSkipped: %v", err)
+	}
+	if err := s.UnskipLesson(ctx, 1); err != nil {
+		t.Fatalf("UnskipLesson: %v", err)
+	}
+	got, err := s.GetLesson(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if got.Status != StatusPending {
+		t.Errorf("status = %q, want %q", got.Status, StatusPending)
+	}
+	if got.Error.Valid {
+		t.Errorf("Error = %+v, want NULL after un-skip", got.Error)
+	}
+}
+
+// TestUnskipLessonOnlySkipped asserts the guard: un-skipping a lesson that is
+// not skipped (or an unknown id) is a benign no-op (0 rows -> nil, no mutation).
+func TestUnskipLessonOnlySkipped(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	// A pending lesson is not skipped: un-skip is a no-op, not an error.
+	if err := s.UnskipLesson(ctx, 1); err != nil {
+		t.Fatalf("UnskipLesson on a pending lesson: %v", err)
+	}
+	got, err := s.GetLesson(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if got.Status != StatusPending {
+		t.Errorf("status = %q, want %q (unchanged)", got.Status, StatusPending)
+	}
+	// An unknown id is also a benign no-op.
+	if err := s.UnskipLesson(ctx, 404); err != nil {
+		t.Errorf("UnskipLesson on a missing id returned %v, want nil (benign no-op)", err)
+	}
+}
+
 // TestMarkTransitionMissing asserts the mark helpers report an error when no
 // lesson row matches, rather than silently succeeding on zero rows.
 func TestMarkTransitionMissing(t *testing.T) {

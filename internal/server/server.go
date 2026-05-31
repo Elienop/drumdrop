@@ -32,6 +32,19 @@ type Deps struct {
 	// out-of-band cycle. POST /api/sync does a non-blocking send on it. Nil when
 	// no daemon is attached (e.g. tests of read-only endpoints).
 	Kick chan<- struct{}
+	// CancelRunning kills the in-flight download for a running job, returning true
+	// when the job was found in this process's worker registry (the worker then
+	// finalizes the job to canceled + the lesson to skipped asynchronously). It is
+	// nil when no worker is attached; handleCancelJob then falls back to the DB
+	// status flip. These are plain func handles (not the *Daemon/*Worker structs)
+	// so server tests stay injectable without a real worker/daemon — mirroring Kick.
+	CancelRunning func(jobID int64) bool
+	// Pause/Resume gate the daemon's sync cycles; IsPaused reports the current
+	// flag. All three are nil when no daemon is attached: the pause/resume
+	// endpoints then return 503 and the summary reports paused=false.
+	Pause    func()
+	Resume   func()
+	IsPaused func() bool
 }
 
 // Server holds the shared state behind drumdrop's inbound HTTP API: the database
@@ -85,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/lessons/{id}", s.handleGetLesson)
 	s.mux.HandleFunc("POST /api/lessons/{id}/download", s.handleDownloadLesson)
 	s.mux.HandleFunc("POST /api/lessons/{id}/skip", s.handleSkipLesson)
+	s.mux.HandleFunc("POST /api/lessons/{id}/unskip", s.handleUnskipLesson)
 
 	s.mux.HandleFunc("GET /api/jobs", s.handleListJobs)
 	s.mux.HandleFunc("GET /api/jobs/{id}", s.handleGetJob)
@@ -94,6 +108,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 
 	s.mux.HandleFunc("POST /api/sync", s.handleSync)
+
+	s.mux.HandleFunc("POST /api/pause", s.handlePause)
+	s.mux.HandleFunc("POST /api/resume", s.handleResume)
 
 	s.mux.HandleFunc("GET /api/preview", s.handlePreview)
 	s.mux.HandleFunc("GET /api/session", s.handleGetSession)

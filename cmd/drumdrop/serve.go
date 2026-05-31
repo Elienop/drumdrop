@@ -56,7 +56,7 @@ func cmdServe(argv []string) error {
 
 	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
 	hub := server.NewHub()
-	planner, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, hub)
+	planner, worker, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, hub)
 
 	// Kick is the on-demand sync channel: POST /api/sync sends on the server's
 	// write end; the daemon's Run select drains the read end. One buffered
@@ -69,7 +69,14 @@ func cmdServe(argv []string) error {
 		APIToken:   config.APIToken(),
 		CORSOrigin: config.CORSOrigin(),
 	}
-	deps := server.Deps{Planner: planner, Kick: kick}
+	deps := server.Deps{
+		Planner:       planner,
+		Kick:          kick,
+		CancelRunning: worker.CancelRunning,
+		Pause:         daemon.Pause,
+		Resume:        daemon.Resume,
+		IsPaused:      daemon.IsPaused,
+	}
 	handler := server.NewServer(store, deps, hub, srvCfg, version)
 	srv := &http.Server{Handler: handler}
 

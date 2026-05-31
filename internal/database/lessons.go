@@ -190,6 +190,29 @@ func (s *Store) MarkSkipped(ctx context.Context, id int, reason string) error {
 	)
 }
 
+// UnskipLesson is the inverse of MarkSkipped: a guarded UPDATE that resets a
+// skipped lesson back to pending and clears its error, ONLY while it is still
+// skipped. Like MarkJobCanceled it tolerates zero rows as a benign no-op and
+// returns nil — an already-pending/terminal lesson (or an unknown id) is left
+// untouched rather than erroring. It executes directly rather than through
+// updateStatus (which treats 0 rows as "no such lesson").
+func (s *Store) UnskipLesson(ctx context.Context, id int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE lessons
+			    SET status = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
+			  WHERE railcontent_id = ? AND status = ?`,
+			StatusPending, id, StatusSkipped,
+		)
+		if err != nil {
+			return fmt.Errorf("unskip lesson %d: %w", id, err)
+		}
+		// Zero rows affected (not skipped, or unknown id) is intentional: only a
+		// skipped lesson is reset here, and any other state is a no-op.
+		return nil
+	})
+}
+
 // updateStatus runs a status-mutating UPDATE through withTx and fails if it
 // touched zero rows (the lesson id was unknown). All Mark* helpers funnel
 // through here so the "no such lesson" behavior is defined in exactly one place.

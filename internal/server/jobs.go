@@ -49,23 +49,25 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobDTO(j))
 }
 
-// handleCancelJob serves POST /api/jobs/{id}/cancel: it moves a queued or
-// running job to canceled and returns the updated job with 200. It reads the
-// job first so an unknown id maps cleanly to 404; CancelJob's own miss is a
-// wrapped sql.ErrNoRows too, but the explicit GetJob keeps the 404/409 split
-// readable. A job already in a terminal status yields ErrJobNotActive, which
-// writeStoreErr turns into 409. A non-integer id is a 400.
+// handleCancelJob serves POST /api/jobs/{id}/cancel: it cancels a queued or
+// running job and returns the (re-fetched) job with 200. It reads the job first
+// so an unknown id maps cleanly to 404.
+//
+// A RUNNING job has a live yt-dlp process: a bare DB status flip would leave it
+// downloading (the original bug). So for a running job we ask the worker, via
+// deps.CancelRunning, to kill the process; the worker's cancel-first branch then
+// finalizes the job to canceled + the lesson to skipped ASYNCHRONOUSLY and emits
+// a lesson_skipped SSE event the UI refetches on. The handler does not block on
+// that, so the re-fetched job may still read "running" — that is expected. When
+// no worker is attached (CancelRunning nil) or the job is not in-flight in this
+// process (returns false), we fall back to the DB CancelJob flip.
+//
+// A QUEUED job has no process to kill, so the DB flip is sufficient. CancelJob
+// on a terminal job yields ErrJobNotActive, which writeStoreErr turns into 409.
+// A non-integer id is a 400.
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
-		return
-	}
-	if _, err := s.store.GetJob(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "job not found")
-		return
-	}
-	if err := s.store.CancelJob(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "job not found")
 		return
 	}
 	j, err := s.store.GetJob(r.Context(), id)
@@ -73,7 +75,49 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "job not found")
 		return
 	}
+
+	// For a running job, prefer killing the in-flight process via the worker; it
+	// owns the canceled/skipped finalization. Only fall back to the DB flip when
+	// no worker handled it.
+	handledByWorker := j.Status == database.JobRunning &&
+		s.deps.CancelRunning != nil && s.deps.CancelRunning(id)
+	if !handledByWorker {
+		if err := s.store.CancelJob(r.Context(), id); err != nil {
+			writeStoreErr(w, err, "job not found")
+			return
+		}
+	}
+
+	j, err = s.store.GetJob(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "job not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, jobDTO(j))
+}
+
+// handlePause serves POST /api/pause: it pauses the daemon's sync cycles and
+// returns {"paused":true} with 200. When no daemon is attached (deps.Pause nil)
+// it returns 503.
+func (s *Server) handlePause(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.Pause == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no daemon attached")
+		return
+	}
+	s.deps.Pause()
+	writeJSON(w, http.StatusOK, map[string]bool{"paused": true})
+}
+
+// handleResume serves POST /api/resume: it resumes the daemon's sync cycles and
+// returns {"paused":false} with 200. When no daemon is attached (deps.Resume
+// nil) it returns 503.
+func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.Resume == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no daemon attached")
+		return
+	}
+	s.deps.Resume()
+	writeJSON(w, http.StatusOK, map[string]bool{"paused": false})
 }
 
 // handleRetryJob serves POST /api/jobs/{id}/retry: it requeues a failed or
@@ -149,6 +193,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		Follows: len(follows),
 		Lessons: fillCounts(lessonStatuses, lessonCounts),
 		Jobs:    fillCounts(jobStatuses, jobCounts),
+		Paused:  s.deps.IsPaused != nil && s.deps.IsPaused(),
 	})
 }
 
