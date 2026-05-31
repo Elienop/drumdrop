@@ -1,6 +1,7 @@
 package musora
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -58,7 +60,7 @@ func TestYtDlpArgsEndOfOptionsBeforeURL(t *testing.T) {
 func TestDownloadLessonRejectsNonHTTPHLS(t *testing.T) {
 	for _, bad := range []string{"-evil://m3u8", "file:///etc/passwd", "ftp://x/y.m3u8", "javascript:alert(1)"} {
 		l := &Lesson{ID: 7, Title: "Bad", Video: Video{HLSManifestURL: bad}}
-		err := DownloadLesson(l, DownloadOpts{Dir: t.TempDir(), Index: 1})
+		err := DownloadLesson(context.Background(), l, DownloadOpts{Dir: t.TempDir(), Index: 1})
 		if err == nil {
 			t.Fatalf("DownloadLesson accepted non-http(s) HLS URL %q, want error", bad)
 		}
@@ -150,7 +152,7 @@ func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson must not fail on aux fetch failure: %v", err)
 	}
 
@@ -250,7 +252,7 @@ func TestDownloadLessonOnProgress(t *testing.T) {
 		seen []DownloadProgress
 	)
 	l := &Lesson{ID: 9, Title: "Prog", Video: Video{HLSManifestURL: "https://example.com/x.m3u8"}}
-	err := DownloadLesson(l, DownloadOpts{
+	err := DownloadLesson(context.Background(), l, DownloadOpts{
 		Dir:   t.TempDir(),
 		Index: 1,
 		OnProgress: func(p DownloadProgress) {
@@ -273,6 +275,42 @@ func TestDownloadLessonOnProgress(t *testing.T) {
 		if seen[i] != want[i] {
 			t.Errorf("progress[%d] = %+v, want %+v", i, seen[i], want[i])
 		}
+	}
+}
+
+// A context canceled before DownloadLesson runs must abort the yt-dlp run
+// promptly (CommandContext): even a fake yt-dlp that sleeps for seconds must
+// not stall the call, and DownloadLesson must return a (non-nil) error rather
+// than completing the download.
+func TestDownloadLessonContextCanceled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake yt-dlp shell script is POSIX-only")
+	}
+	binDir := t.TempDir()
+	// A yt-dlp that would block for 30s if it ran to completion; a canceled
+	// context must kill it (process-group SIGKILL) so the call returns fast.
+	script := "#!/bin/sh\nsleep 30\n"
+	fake := filepath.Join(binDir, "yt-dlp")
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	l := &Lesson{ID: 11, Title: "Canceled", Video: Video{HLSManifestURL: "https://example.com/x.m3u8"}}
+	done := make(chan error, 1)
+	go func() {
+		done <- DownloadLesson(ctx, l, DownloadOpts{Dir: t.TempDir(), Index: 1})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("DownloadLesson with a canceled context returned nil, want a cancellation error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DownloadLesson did not return within 10s for a canceled context (yt-dlp not killed)")
 	}
 }
 
@@ -374,7 +412,7 @@ func TestDownloadLessonLayout(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson: %v", err)
 	}
 

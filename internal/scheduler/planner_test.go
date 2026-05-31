@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/musora"
 )
 
 // enqueueCall records one EnqueueJob invocation so tests can assert the exact
@@ -23,8 +24,10 @@ type enqueueCall struct {
 // lesson was discovered under.
 type upsertCall struct {
 	id       int
+	title    string
 	parent   sql.NullInt64
 	brand    string
+	position sql.NullInt64
 	followID sql.NullInt64
 }
 
@@ -34,6 +37,7 @@ type fakePlannerStore struct {
 	follows []database.Follow
 
 	downloaded map[int]bool // railcontent_id → already downloaded
+	skipped    map[int]bool // railcontent_id → recorded as skipped
 	active     map[int]bool // railcontent_id → has a queued/running job
 
 	enqueued []enqueueCall
@@ -47,13 +51,17 @@ func (s *fakePlannerStore) ListFollows(ctx context.Context) ([]database.Follow, 
 	return s.follows, nil
 }
 
-func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
-	s.upserts = append(s.upserts, upsertCall{id: railcontentID, parent: parent, brand: brand, followID: followID})
+func (s *fakePlannerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
+	s.upserts = append(s.upserts, upsertCall{id: railcontentID, title: title, parent: parent, brand: brand, position: position, followID: followID})
 	return nil
 }
 
 func (s *fakePlannerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	return s.downloaded[id], nil
+}
+
+func (s *fakePlannerStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	return s.downloaded[id] || s.skipped[id], nil
 }
 
 func (s *fakePlannerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
@@ -88,6 +96,9 @@ func (s *fakePlannerStore) ClaimNextJob(ctx context.Context) (database.Job, bool
 func (s *fakePlannerStore) GetFollow(ctx context.Context, id int64) (database.Follow, error) {
 	panic("GetFollow: not expected from Planner")
 }
+func (s *fakePlannerStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	panic("GetLesson: not expected from Planner")
+}
 func (s *fakePlannerStore) MarkJobRunning(ctx context.Context, id int64) error {
 	panic("MarkJobRunning: not expected from Planner")
 }
@@ -96,6 +107,9 @@ func (s *fakePlannerStore) MarkJobDone(ctx context.Context, id int64) error {
 }
 func (s *fakePlannerStore) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
 	panic("MarkJobFailed: not expected from Planner")
+}
+func (s *fakePlannerStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	panic("MarkJobCanceled: not expected from Planner")
 }
 func (s *fakePlannerStore) MarkDownloading(ctx context.Context, id int) error {
 	panic("MarkDownloading: not expected from Planner")
@@ -113,17 +127,27 @@ func (s *fakePlannerStore) RequeueStaleRunning(ctx context.Context) (int, error)
 	panic("RequeueStaleRunning: not expected from Planner")
 }
 
-// fakeExpander returns canned ids (or an error) per follow id.
+// fakeExpander returns canned ids (or an error) per follow id. The ids map keeps
+// the per-follow lesson ids; titles are synthesized so tests that only assert on
+// ids stay unchanged while the planner now receives []LessonItem.
 type fakeExpander struct {
 	ids  map[int64][]int
 	errs map[int64]error
+	// titles optionally maps railcontent_id → title; ids without an entry get an
+	// empty title, preserving the prior id-only behavior for existing tests.
+	titles map[int]string
 }
 
-func (e fakeExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
+func (e fakeExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
 	if err := e.errs[f.ID]; err != nil {
 		return nil, err
 	}
-	return e.ids[f.ID], nil
+	ids := e.ids[f.ID]
+	items := make([]musora.LessonItem, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, musora.LessonItem{ID: id, Title: e.titles[id]})
+	}
+	return items, nil
 }
 
 // enqueuedIDs returns the sorted set of railcontent ids that were enqueued.
@@ -169,6 +193,36 @@ func TestPlanEnqueuesOnlyNewLessons(t *testing.T) {
 	// The processed follow was touched exactly once.
 	if got, want := store.touched, []int64{1}; !reflect.DeepEqual(got, want) {
 		t.Errorf("touched = %v, want %v", got, want)
+	}
+}
+
+func TestPlanDoesNotReEnqueueSkipped(t *testing.T) {
+	// A lesson recorded as skipped must NOT be re-enqueued, while a failed lesson
+	// is still retried. Both are still upserted (record-keeping).
+	store := &fakePlannerStore{
+		follows: []database.Follow{nodeFollow()},
+		skipped: map[int]bool{
+			21: true, // skipped → recorded but never re-enqueued
+		},
+	}
+	exp := fakeExpander{ids: map[int64][]int{1: {20, 21, 22}}}
+
+	p := &Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	enqueued, err := p.Plan(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+
+	// 20 (new) and 22 (failed, still retried) enqueue; 21 (skipped) does not.
+	if enqueued != 2 {
+		t.Errorf("enqueued = %d, want 2 (skipped 21 excluded)", enqueued)
+	}
+	if got, want := enqueuedIDs(store.enqueued), []int{20, 22}; !reflect.DeepEqual(got, want) {
+		t.Errorf("enqueued ids = %v, want %v (skipped must not re-enqueue)", got, want)
+	}
+	// Every lesson is still upserted, including the skipped one.
+	if len(store.upserts) != 3 {
+		t.Errorf("upserts = %d, want 3 (all seen lessons recorded)", len(store.upserts))
 	}
 }
 
@@ -397,6 +451,51 @@ func TestPlanAndDryRunAgreeOnDuplicateAcrossFollows(t *testing.T) {
 	// Plan actually enqueued 500 exactly once.
 	if got, want := enqueuedIDs(planStore.enqueued), []int{500, 501, 502}; !reflect.DeepEqual(got, want) {
 		t.Errorf("enqueued ids = %v, want %v", got, want)
+	}
+}
+
+func TestPlanUpsertsTitleAndPosition(t *testing.T) {
+	// Every lesson is recorded with its resolved title and a 1-based position
+	// matching its place in expansion order (so the worker's "NN -" prefix lines
+	// up). The downloaded/skipped/active lessons are still upserted with their
+	// position, because record-keeping happens before any dedup.
+	store := &fakePlannerStore{
+		follows: []database.Follow{nodeFollow()},
+		downloaded: map[int]bool{
+			11: true, // still upserted with position, just not enqueued
+		},
+	}
+	exp := fakeExpander{
+		ids: map[int64][]int{1: {10, 11, 12}},
+		titles: map[int]string{
+			10: "Intro",
+			11: "Warmup",
+			12: "Finale",
+		},
+	}
+
+	p := &Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	if _, err := p.Plan(context.Background(), 0); err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+
+	wantTitle := map[int]string{10: "Intro", 11: "Warmup", 12: "Finale"}
+	wantPos := map[int]int64{10: 1, 11: 2, 12: 3}
+
+	if len(store.upserts) != 3 {
+		t.Fatalf("upserts = %d, want 3", len(store.upserts))
+	}
+	for _, u := range store.upserts {
+		if got, want := u.title, wantTitle[u.id]; got != want {
+			t.Errorf("lesson %d title = %q, want %q", u.id, got, want)
+		}
+		if !u.position.Valid {
+			t.Errorf("lesson %d position invalid, want valid %d", u.id, wantPos[u.id])
+			continue
+		}
+		if got, want := u.position.Int64, wantPos[u.id]; got != want {
+			t.Errorf("lesson %d position = %d, want %d", u.id, got, want)
+		}
 	}
 }
 

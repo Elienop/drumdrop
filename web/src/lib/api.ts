@@ -59,6 +59,8 @@ export const api = {
     requestWithStatus<JobDTO>(`/lessons/${id}/download`, { method: "POST" }),
   skipLesson: (id: number, body: SkipLessonRequest = {}) =>
     request<LessonDTO>(`/lessons/${id}/skip`, { method: "POST", body: JSON.stringify(body) }),
+  unskipLesson: (id: number) =>
+    request<LessonDTO>(`/lessons/${id}/unskip`, { method: "POST" }),
 
   listJobs: (params: { state?: string; limit?: number } = {}) =>
     request<JobDTO[]>(`/jobs${qs(params)}`),
@@ -78,6 +80,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ dry_run: dryRun }),
     }),
+
+  pause: () => request<{ paused: boolean }>("/pause", { method: "POST" }),
+  resume: () => request<{ paused: boolean }>("/resume", { method: "POST" }),
 }
 
 // requestWithStatus returns both the body and the HTTP status so callers can

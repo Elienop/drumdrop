@@ -28,16 +28,18 @@ type Resolver interface {
 	Resolve(id int, permIDs string) (*musora.Lesson, error)
 }
 
-// Downloader performs the actual download of a resolved lesson.
+// Downloader performs the actual download of a resolved lesson. ctx cancels the
+// in-flight download (killing yt-dlp and its child); a nil ctx preserves the
+// uncancelable CLI behaviour.
 type Downloader interface {
-	Download(l *musora.Lesson, o musora.DownloadOpts) error
+	Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error
 }
 
 // Expander turns one follow into the railcontent ids of the lessons under it.
 // Node follows expand via the catalog walk; instructor follows via the
 // instructor-lessons query.
 type Expander interface {
-	Expand(f database.Follow, permIDs string) (ids []int, err error)
+	Expand(f database.Follow, permIDs string) (items []musora.LessonItem, err error)
 }
 
 // Store is the subset of *database.Store the scheduler uses. Declaring it as an
@@ -47,17 +49,20 @@ type Expander interface {
 type Store interface {
 	// planner
 	ListFollows(ctx context.Context) ([]database.Follow, error)
-	UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error
+	UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error
 	IsDownloaded(ctx context.Context, id int) (bool, error)
+	ShouldSkipEnqueue(ctx context.Context, id int) (bool, error)
 	ActiveJobExists(ctx context.Context, railcontentID int) (bool, error)
 	EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (id int64, created bool, err error)
 	TouchLastSynced(ctx context.Context, id int64) error
 	// worker
 	ClaimNextJob(ctx context.Context) (database.Job, bool, error)
 	GetFollow(ctx context.Context, id int64) (database.Follow, error)
+	GetLesson(ctx context.Context, id int) (database.Lesson, error)
 	MarkJobRunning(ctx context.Context, id int64) error
 	MarkJobDone(ctx context.Context, id int64) error
 	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
+	MarkJobCanceled(ctx context.Context, id int64) error
 	MarkDownloading(ctx context.Context, id int) error
 	MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error
 	MarkFailed(ctx context.Context, id int, errMsg string) error

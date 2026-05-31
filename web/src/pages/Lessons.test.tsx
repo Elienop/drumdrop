@@ -79,6 +79,37 @@ const job: JobDTO = {
   finished_at: null,
 }
 
+// A running job for the downloading lesson (railcontent 300), used to resolve
+// the Cancel action's job id.
+const runningJob: JobDTO = {
+  id: 77,
+  follow_id: null,
+  railcontent_id: 300,
+  status: "running",
+  attempts: 1,
+  error: null,
+  created_at: "2026-05-30T00:00:00Z",
+  started_at: "2026-05-30T00:01:00Z",
+  finished_at: null,
+}
+
+const skippedLesson: LessonDTO = {
+  railcontent_id: 400,
+  title: "Flam Tap",
+  parent_railcontent_id: null,
+  brand: "drumeo",
+  status: "skipped",
+  quality: "1080p",
+  output_dir: null,
+  video_path: null,
+  bytes: null,
+  error: null,
+  follow_id: null,
+  first_seen_at: "2026-05-04T00:00:00Z",
+  downloaded_at: null,
+  updated_at: "2026-05-30T00:00:00Z",
+}
+
 it("renders lessons with status badges and human sizes", async () => {
   server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
   renderWithProviders(<Lessons />)
@@ -119,6 +150,57 @@ it("queues a download (202) and shows a 'Queued' toast", async () => {
   // 202 branch must fail this test.
   expect(await screen.findByText(/^queued/i)).toBeInTheDocument()
   expect(screen.queryByText(/already queued/i)).not.toBeInTheDocument()
+})
+
+it("offers Cancel (not Download) for a downloading lesson and hits /jobs/{id}/cancel", async () => {
+  let canceledId: string | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
+    http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json([runningJob])),
+    http.post(`${ORIGIN}/api/jobs/:id/cancel`, ({ params }) => {
+      canceledId = params.id as string
+      return HttpResponse.json({ ...runningJob, status: "canceled" })
+    }),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Lessons />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Paradiddle")
+  await user.click(screen.getByRole("button", { name: /actions for paradiddle/i }))
+  // Cancel is offered; Download is not.
+  expect(await screen.findByRole("menuitem", { name: /cancel/i })).toBeInTheDocument()
+  expect(screen.queryByRole("menuitem", { name: /download/i })).not.toBeInTheDocument()
+
+  await user.click(screen.getByRole("menuitem", { name: /cancel/i }))
+  await waitFor(() => expect(canceledId).toBe("77"))
+})
+
+it("offers Un-skip for a skipped lesson and hits /lessons/{id}/unskip", async () => {
+  let unskippedId: string | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([skippedLesson])),
+    http.post(`${ORIGIN}/api/lessons/:id/unskip`, ({ params }) => {
+      unskippedId = params.id as string
+      return HttpResponse.json({ ...skippedLesson, status: "pending" })
+    }),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Lessons />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Flam Tap")
+  await user.click(screen.getByRole("button", { name: /actions for flam tap/i }))
+  await user.click(await screen.findByRole("menuitem", { name: /un-?skip/i }))
+  await waitFor(() => expect(unskippedId).toBe("400"))
 })
 
 it("shows 'Already queued' when download returns 200", async () => {

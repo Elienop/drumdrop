@@ -83,6 +83,18 @@ export function Lessons() {
           ),
   })
 
+  // Running jobs let us resolve a downloading lesson's job id for Cancel.
+  const runningJobs = useQuery({
+    queryKey: qk.jobs({ state: "running" }),
+    queryFn: () => api.listJobs({ state: "running" }),
+  })
+
+  const runningJobByRailcontent = React.useMemo(() => {
+    const m = new Map<number, number>()
+    for (const j of runningJobs.data ?? []) m.set(j.railcontent_id, j.id)
+    return m
+  }, [runningJobs.data])
+
   const { state } = useSSE()
   const active = React.useMemo(() => {
     const byRailcontent: Record<number, ActiveDownload> = {}
@@ -115,6 +127,32 @@ export function Lessons() {
     },
     onError: (err) => {
       toast.error(err instanceof ApiHttpError ? err.message : "Skip failed")
+    },
+  })
+
+  const cancel = useMutation({
+    mutationFn: (jobId: number) => api.cancelJob(jobId),
+    onSuccess: () => {
+      toast.success("Download canceled")
+      qc.invalidateQueries({ queryKey: qk.jobs() })
+      qc.invalidateQueries({ queryKey: ["lessons"] })
+      qc.invalidateQueries({ queryKey: qk.summary })
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Cancel failed")
+    },
+  })
+
+  const unskip = useMutation({
+    mutationFn: (id: number) => api.unskipLesson(id),
+    onSuccess: () => {
+      toast.success("Lesson un-skipped")
+      qc.invalidateQueries({ queryKey: qk.jobs() })
+      qc.invalidateQueries({ queryKey: ["lessons"] })
+      qc.invalidateQueries({ queryKey: qk.summary })
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Un-skip failed")
     },
   })
 
@@ -255,14 +293,50 @@ export function Lessons() {
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuGroup>
-                              <DropdownMenuItem
-                                onSelect={() => download.mutate(lesson.railcontent_id)}
-                              >
-                                Download
-                              </DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => setSkipping(lesson)}>
-                                Skip
-                              </DropdownMenuItem>
+                              {lesson.status === "downloading" ? (
+                                (() => {
+                                  const jobId = runningJobByRailcontent.get(
+                                    lesson.railcontent_id,
+                                  )
+                                  return (
+                                    <DropdownMenuItem
+                                      disabled={jobId === undefined}
+                                      onSelect={() => {
+                                        if (jobId !== undefined) cancel.mutate(jobId)
+                                      }}
+                                    >
+                                      Cancel
+                                    </DropdownMenuItem>
+                                  )
+                                })()
+                              ) : lesson.status === "downloaded" ? null : (
+                                <>
+                                  {lesson.status === "skipped" && (
+                                    <DropdownMenuItem
+                                      onSelect={() =>
+                                        unskip.mutate(lesson.railcontent_id)
+                                      }
+                                    >
+                                      Un-skip
+                                    </DropdownMenuItem>
+                                  )}
+                                  <DropdownMenuItem
+                                    onSelect={() =>
+                                      download.mutate(lesson.railcontent_id)
+                                    }
+                                  >
+                                    Download
+                                  </DropdownMenuItem>
+                                  {(lesson.status === "pending" ||
+                                    lesson.status === "failed") && (
+                                    <DropdownMenuItem
+                                      onSelect={() => setSkipping(lesson)}
+                                    >
+                                      Skip
+                                    </DropdownMenuItem>
+                                  )}
+                                </>
+                              )}
                               <DropdownMenuItem onSelect={() => copyPath(lesson)}>
                                 Copy path
                               </DropdownMenuItem>

@@ -132,6 +132,33 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, lessonDTO(l))
 }
 
+// handleUnskipLesson serves POST /api/lessons/{id}/unskip: it resets a skipped
+// lesson back to pending (clearing its error) and returns the updated lesson
+// with 200. It reads the lesson first so an unknown id maps cleanly to 404
+// (UnskipLesson itself tolerates a non-skipped lesson as a benign no-op rather
+// than erroring). A non-integer id is a 400. It mirrors handleSkipLesson.
+func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt(w, r, "id")
+	if !ok {
+		return
+	}
+
+	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+	if err := s.store.UnskipLesson(r.Context(), id); err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+	l, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, lessonDTO(l))
+}
+
 // queryInt parses an optional integer query param. An empty value is treated as
 // "not supplied" and yields 0 with ok=true (the store applies its own defaults);
 // a non-integer value writes a 400 and returns ok=false.

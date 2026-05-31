@@ -15,9 +15,21 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 type Kind = "node" | "instructor"
+
+// Quality presets passed through to the follow; "best" lets yt-dlp pick the
+// highest available, the rest cap the video height (e.g. 1080 → ≤1080p).
+const QUALITY_OPTIONS = ["best", "2160", "1440", "1080", "720", "480"] as const
 
 // AddFollowDialog is the preview-then-add flow: a segmented kind control
 // (node | instructor), an input (URL-or-id for node, slug + optional brand for
@@ -36,6 +48,7 @@ export function AddFollowDialog({
   const [id, setId] = React.useState("")
   const [slug, setSlug] = React.useState("")
   const [brand, setBrand] = React.useState("")
+  const [quality, setQuality] = React.useState("best")
   const [preview, setPreview] = React.useState<PreviewResponse | null>(null)
 
   // Reset the form whenever the dialog closes so a reopen starts clean.
@@ -45,6 +58,7 @@ export function AddFollowDialog({
       setId("")
       setSlug("")
       setBrand("")
+      setQuality("best")
       setPreview(null)
     }
   }, [open])
@@ -70,8 +84,8 @@ export function AddFollowDialog({
     mutationFn: () => {
       const body: CreateFollowRequest =
         kind === "node"
-          ? { kind: "node", id }
-          : { kind: "instructor", slug, brand: brand || undefined }
+          ? { kind: "node", id, quality }
+          : { kind: "instructor", slug, brand: brand || undefined, quality }
       return api.createFollow(body)
     },
     onSuccess: ({ status, data }) => {
@@ -133,6 +147,24 @@ export function AddFollowDialog({
             />
           </TabsContent>
         </Tabs>
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="follow-quality">Quality</Label>
+          <Select value={quality} onValueChange={setQuality}>
+            <SelectTrigger id="follow-quality" aria-label="Quality">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {QUALITY_OPTIONS.map((q) => (
+                  <SelectItem key={q} value={q}>
+                    {q}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
 
         {preview && (
           <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">

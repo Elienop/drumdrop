@@ -3,10 +3,11 @@ import { cn } from "@/lib/utils"
 
 // GlobalProgress renders the live activity strip in the center of the TopBar:
 // a slim amber bar (average pct across active downloads) while downloads are in
-// flight, a "syncing…" chip during a sync cycle, and a transient "reconnecting…"
-// chip when the SSE stream is down. The `connected` flag is the EventSource
-// stream status (reactive React state) — NOT the Musora account session.
-export function GlobalProgress() {
+// flight, a "syncing…" chip during a sync cycle, a "paused" chip when the daemon
+// is paused, and a transient "reconnecting…" chip when the SSE stream is down.
+// The `connected` flag is the EventSource stream status (reactive React state) —
+// NOT the Musora account session. `paused` is the daemon flag (from summary).
+export function GlobalProgress({ paused = false }: { paused?: boolean }) {
   const { state, connected } = useSSE()
   const active = Object.values(state.active)
   const avgPct =
@@ -34,6 +35,11 @@ export function GlobalProgress() {
       {state.syncing && (
         <span className="rounded-full bg-primary/15 px-2 py-0.5 font-medium text-primary">
           syncing…
+        </span>
+      )}
+      {paused && (
+        <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-foreground">
+          paused
         </span>
       )}
       {!connected && (

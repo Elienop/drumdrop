@@ -7,6 +7,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -75,14 +76,14 @@ func Config(out, quality string, resourcesOnly bool) scheduler.Config {
 // Expander adapts the musora package to scheduler.Expander.
 type Expander struct{}
 
-func (Expander) Expand(f database.Follow, permIDs string) ([]int, error) {
+func (Expander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
 	switch f.Kind {
 	case "node":
 		if !f.RailcontentID.Valid {
 			return nil, fmt.Errorf("node follow #%d has no railcontent_id", f.ID)
 		}
-		_, ids, err := musora.ResolveLessonIDs(int(f.RailcontentID.Int64), false, permIDs)
-		return ids, err
+		_, items, err := musora.ResolveLessonIDs(int(f.RailcontentID.Int64), false, permIDs)
+		return items, err
 	case "instructor":
 		if !f.Slug.Valid {
 			return nil, fmt.Errorf("instructor follow #%d has no slug", f.ID)
@@ -91,11 +92,11 @@ func (Expander) Expand(f database.Follow, permIDs string) ([]int, error) {
 		if err != nil {
 			return nil, err
 		}
-		ids := make([]int, 0, len(refs))
+		items := make([]musora.LessonItem, 0, len(refs))
 		for _, r := range refs {
-			ids = append(ids, r.ID)
+			items = append(items, musora.LessonItem{ID: r.ID, Title: r.Title})
 		}
-		return ids, nil
+		return items, nil
 	default:
 		return nil, fmt.Errorf("unknown follow kind %q", f.Kind)
 	}
@@ -111,8 +112,8 @@ func (Resolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // Downloader adapts musora.DownloadLesson to scheduler.Downloader.
 type Downloader struct{}
 
-func (Downloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
-	return musora.DownloadLesson(l, o)
+func (Downloader) Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	return musora.DownloadLesson(ctx, l, o)
 }
 
 // Compile-time assertions that the real adapters satisfy the scheduler

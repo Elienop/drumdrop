@@ -16,7 +16,7 @@ import (
 func seedJob(t *testing.T, store *database.Store, railcontentID int) int64 {
 	t.Helper()
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, railcontentID, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, railcontentID, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson %d: %v", railcontentID, err)
 	}
 	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, railcontentID)
@@ -154,10 +154,10 @@ func TestGetJobBadID(t *testing.T) {
 func TestSummary(t *testing.T) {
 	store := newTestStore(t)
 	ctx := t.Context()
-	if err := store.UpsertLesson(ctx, 31, "Pending", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 31, "Pending", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 31: %v", err)
 	}
-	if err := store.UpsertLesson(ctx, 32, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := store.UpsertLesson(ctx, 32, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 32: %v", err)
 	}
 	if err := store.MarkSkipped(ctx, 32, "no"); err != nil {

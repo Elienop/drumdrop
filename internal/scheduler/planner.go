@@ -87,7 +87,7 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 	seen := map[int]bool{}
 
 	for _, f := range follows {
-		ids, err := p.Expander.Expand(f, p.PermIDs)
+		items, err := p.Expander.Expand(f, p.PermIDs)
 		if err != nil {
 			// Expansion failure is isolated: log, skip, and leave last_synced_at
 			// untouched so this follow is retried next cycle.
@@ -103,10 +103,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		}
 
 		fNew := 0
-		for _, id := range ids {
+		for i, item := range items {
+			id := item.ID
 			// Record the lesson regardless of whether we enqueue it, attributing it
 			// to the follow currently being expanded (first-follow-wins on conflict).
-			if err := p.Store.UpsertLesson(ctx, id, "", parent, f.Brand, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
+			// Position is the 1-based index in expansion order, matching the worker's
+			// "NN -" folder prefix; UpsertLesson keeps the first follow's position for
+			// a lesson shared across follows (COALESCE).
+			position := sql.NullInt64{Int64: int64(i + 1), Valid: true}
+			if err := p.Store.UpsertLesson(ctx, id, item.Title, parent, f.Brand, position, sql.NullInt64{Int64: f.ID, Valid: true}); err != nil {
 				return enqueued, fmt.Errorf("upsert lesson %d: %w", id, err)
 			}
 
@@ -118,11 +123,15 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 				continue
 			}
 
-			done, err := p.Store.IsDownloaded(ctx, id)
+			// Skip a lesson that is already downloaded or was intentionally
+			// skipped (locked/missing content): both are recorded above but must
+			// never be re-enqueued. A 'failed' lesson is NOT skipped here, so it is
+			// retried on the next cycle.
+			skip, err := p.Store.ShouldSkipEnqueue(ctx, id)
 			if err != nil {
-				return enqueued, fmt.Errorf("check lesson %d downloaded: %w", id, err)
+				return enqueued, fmt.Errorf("check lesson %d should-skip-enqueue: %w", id, err)
 			}
-			if done {
+			if skip {
 				continue
 			}
 

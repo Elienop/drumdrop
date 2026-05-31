@@ -669,6 +669,87 @@ func TestCancelJobMissing(t *testing.T) {
 	}
 }
 
+// TestMarkJobCanceledRunning asserts the worker-side guarded cancel transitions
+// a running job to canceled, stamps finished_at, and returns nil.
+func TestMarkJobCanceledRunning(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.MarkJobRunning(ctx, id); err != nil {
+		t.Fatalf("MarkJobRunning: %v", err)
+	}
+
+	if err := s.MarkJobCanceled(ctx, id); err != nil {
+		t.Fatalf("MarkJobCanceled on a running job: %v", err)
+	}
+
+	got, err := s.GetJob(ctx, id)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != JobCanceled {
+		t.Errorf("status = %q, want %q", got.Status, JobCanceled)
+	}
+	if !got.FinishedAt.Valid {
+		t.Error("finished_at is NULL after MarkJobCanceled, want set")
+	}
+}
+
+// TestMarkJobCanceledNonRunningNoOp asserts MarkJobCanceled is a silent no-op
+// (0 rows, returns nil — NOT an error) when the job is queued or already in a
+// terminal status, so the server-then-worker double-cancel race is safe.
+func TestMarkJobCanceledNonRunningNoOp(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Queued: not running, so the guard touches zero rows.
+	queuedID, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob (queued): %v", err)
+	}
+	if err := s.MarkJobCanceled(ctx, queuedID); err != nil {
+		t.Fatalf("MarkJobCanceled on a queued job err = %v, want nil (no-op)", err)
+	}
+	got, err := s.GetJob(ctx, queuedID)
+	if err != nil {
+		t.Fatalf("GetJob (queued): %v", err)
+	}
+	if got.Status != JobQueued {
+		t.Errorf("queued job status = %q after no-op cancel, want unchanged %q", got.Status, JobQueued)
+	}
+
+	// Terminal (done): also a silent no-op.
+	doneID, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
+	if err != nil {
+		t.Fatalf("EnqueueJob (done): %v", err)
+	}
+	if err := s.MarkJobRunning(ctx, doneID); err != nil {
+		t.Fatalf("MarkJobRunning (done): %v", err)
+	}
+	if err := s.MarkJobDone(ctx, doneID); err != nil {
+		t.Fatalf("MarkJobDone: %v", err)
+	}
+	if err := s.MarkJobCanceled(ctx, doneID); err != nil {
+		t.Fatalf("MarkJobCanceled on a done job err = %v, want nil (no-op)", err)
+	}
+	got, err = s.GetJob(ctx, doneID)
+	if err != nil {
+		t.Fatalf("GetJob (done): %v", err)
+	}
+	if got.Status != JobDone {
+		t.Errorf("done job status = %q after no-op cancel, want unchanged %q", got.Status, JobDone)
+	}
+
+	// Unknown id: still a benign no-op (0 rows), returns nil.
+	if err := s.MarkJobCanceled(ctx, 404); err != nil {
+		t.Fatalf("MarkJobCanceled on a missing id err = %v, want nil (no-op)", err)
+	}
+}
+
 // TestRetryJobFailed asserts retrying a failed job resets the job back to
 // queued (clearing attempts/timestamps/error) AND resets its lesson back to
 // pending (clearing the lesson error) so the worker re-downloads it.
@@ -677,7 +758,7 @@ func TestRetryJobFailed(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 500
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 
@@ -745,7 +826,7 @@ func TestRetryJobCanceled(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 600
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)
@@ -776,7 +857,7 @@ func TestRetryJobActive(t *testing.T) {
 	ctx := context.Background()
 
 	const lesson = 700
-	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}); err != nil {
+	if err := s.UpsertLesson(ctx, lesson, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
 	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, lesson)

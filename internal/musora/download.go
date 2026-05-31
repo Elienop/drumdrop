@@ -2,6 +2,7 @@ package musora
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -120,7 +121,10 @@ const progressSentinel = "DRUMDROP|"
 func progressArgs() []string {
 	return []string{
 		"--progress-template",
-		"download:" + progressSentinel + "%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s",
+		// _speed_str (not raw .speed) gives a pre-formatted rate like "3.15MiB/s"
+		// — matching _percent_str and what parseProgressLine's tests expect — so
+		// the SSE/UI shows a human speed, not a raw bytes/sec float.
+		"download:" + progressSentinel + "%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._speed_str)s",
 	}
 }
 
@@ -235,7 +239,15 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 // could not be fetched. Auxiliary-artifact failures are logged to os.Stderr but
 // never make DownloadLesson fail, so the lesson is not endlessly re-downloaded
 // over a permanently-missing resource.
-func DownloadLesson(l *Lesson, o DownloadOpts) error {
+//
+// ctx cancels the yt-dlp run: the command runs under exec.CommandContext and is
+// killed by process group (SIGKILL to -pid) so yt-dlp and its ffmpeg child both
+// die. A nil ctx is treated as context.Background(), preserving the original CLI
+// behaviour byte-for-byte (the run is never canceled out from under it).
+func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	base := fmt.Sprintf("%02d - %s", o.Index, Sanitize(l.Title))
 	dir := filepath.Join(o.Dir, base)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -250,7 +262,11 @@ func DownloadLesson(l *Lesson, o DownloadOpts) error {
 		if o.OnProgress != nil {
 			args = append(progressArgs(), args...)
 		}
-		cmd := exec.Command("yt-dlp", args...)
+		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+		// On context cancel, kill yt-dlp AND its ffmpeg child. The mechanism is
+		// platform-specific (process-group SIGKILL on Unix; the os/exec default on
+		// Windows) — see configureCancelKill in proc_kill_{unix,windows}.go.
+		configureCancelKill(cmd)
 		cmd.Stderr = os.Stderr
 		if o.OnProgress != nil {
 			// Capture stdout so progress lines can be parsed; scanProgress still

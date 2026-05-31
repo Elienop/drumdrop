@@ -97,12 +97,16 @@ func (s *fakeDaemonStore) ClaimNextJob(ctx context.Context) (database.Job, bool,
 func (s *fakeDaemonStore) GetFollow(ctx context.Context, id int64) (database.Follow, error) {
 	return nodeFollow(), nil
 }
+func (s *fakeDaemonStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	return database.Lesson{}, nil
+}
 func (s *fakeDaemonStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
 func (s *fakeDaemonStore) MarkJobDone(ctx context.Context, id int64) error {
 	s.record("job-done")
 	return nil
 }
 func (s *fakeDaemonStore) MarkJobFailed(ctx context.Context, id int64, m string) error { return nil }
+func (s *fakeDaemonStore) MarkJobCanceled(ctx context.Context, id int64) error         { return nil }
 func (s *fakeDaemonStore) MarkDownloading(ctx context.Context, id int) error           { return nil }
 func (s *fakeDaemonStore) MarkDownloaded(ctx context.Context, id int, q, o, v string, b int64) error {
 	return nil
@@ -123,10 +127,13 @@ func (s *fakeDaemonStore) ListFollows(ctx context.Context) ([]database.Follow, e
 	return []database.Follow{nodeFollow()}, nil
 }
 
-func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+func (s *fakeDaemonStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	return nil
 }
 func (s *fakeDaemonStore) IsDownloaded(ctx context.Context, id int) (bool, error) { return false, nil }
+func (s *fakeDaemonStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	return false, nil
+}
 func (s *fakeDaemonStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
 	return false, nil
 }
@@ -151,9 +158,9 @@ func (s *fakeDaemonStore) TouchLastSynced(ctx context.Context, id int64) error {
 // each cycle has one job to enqueue and drain.
 type daemonExpander struct{ next int }
 
-func (e *daemonExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
+func (e *daemonExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
 	e.next++
-	return []int{1000 + e.next}, nil
+	return []musora.LessonItem{{ID: 1000 + e.next}}, nil
 }
 
 // daemonResolver resolves any id to a trivially downloadable lesson.
@@ -166,7 +173,9 @@ func (daemonResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // daemonDownloader always succeeds.
 type daemonDownloader struct{}
 
-func (daemonDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error { return nil }
+func (daemonDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	return nil
+}
 
 func newTestDaemon(store *fakeDaemonStore) *Daemon {
 	planner := &Planner{Store: store, Expander: &daemonExpander{}, PermIDs: "perm"}
@@ -382,6 +391,60 @@ func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
 	// Startup cycle + kick cycle = 2; the hour-long ticker cannot have fired.
 	if plans != 2 {
 		t.Errorf("planRuns = %d, want exactly 2 (startup + kick, no ticker tick)", plans)
+	}
+}
+
+func TestDaemonPauseSkipsCyclesThenResumes(t *testing.T) {
+	// A paused daemon must not run any cycle: its ticker ticks and any kick are
+	// dropped while paused, so no Plan/drain happens. Resuming lets the next tick
+	// (or kick) run a cycle again.
+	store := newFakeDaemonStore()
+	d := newTestDaemon(store)
+	d.Pause()
+	if !d.IsPaused() {
+		t.Fatal("IsPaused() = false after Pause(), want true")
+	}
+	kick := make(chan struct{}, 1)
+	d.Kick = kick
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, 2*time.Millisecond) }()
+
+	// Let the immediate (startup) cycle and several ticker ticks fire while paused.
+	// A kick while paused must also be dropped.
+	kick <- struct{}{}
+	time.Sleep(40 * time.Millisecond)
+
+	store.mu.Lock()
+	pausedPlans := store.planRuns
+	store.mu.Unlock()
+	if pausedPlans != 0 {
+		t.Errorf("planRuns = %d while paused, want 0 (no cycles run)", pausedPlans)
+	}
+
+	// Resume: the next tick must run a cycle.
+	d.Resume()
+	if d.IsPaused() {
+		t.Fatal("IsPaused() = true after Resume(), want false")
+	}
+	waitCycle(t, store.cycleDone)
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v, want nil on cancel", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after cancel")
+	}
+
+	store.mu.Lock()
+	plans := store.planRuns
+	store.mu.Unlock()
+	if plans < 1 {
+		t.Errorf("planRuns = %d after Resume, want >= 1", plans)
 	}
 }
 

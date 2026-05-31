@@ -144,10 +144,10 @@ func TestFollowLessons(t *testing.T) {
 		t.Fatalf("AddNodeFollow: %v", err)
 	}
 	fid := sql.NullInt64{Int64: f.ID, Valid: true}
-	if err := store.UpsertLesson(ctx, 11, "Lesson One", sql.NullInt64{}, "drumeo", fid); err != nil {
+	if err := store.UpsertLesson(ctx, 11, "Lesson One", sql.NullInt64{}, "drumeo", sql.NullInt64{}, fid); err != nil {
 		t.Fatalf("UpsertLesson 11: %v", err)
 	}
-	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", fid); err != nil {
+	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", sql.NullInt64{}, fid); err != nil {
 		t.Fatalf("UpsertLesson 12: %v", err)
 	}
 	if err := store.MarkSkipped(ctx, 12, "no thanks"); err != nil {

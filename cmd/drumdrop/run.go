@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -129,21 +130,24 @@ func cmdDownload(argv []string) error {
 	} else {
 		fmt.Printf("Resolving target id %d …\n", targetID)
 	}
-	rootID, lessonIDs, err := musora.ResolveLessonIDs(targetID, *whole, permIDs)
+	rootID, lessonItems, err := musora.ResolveLessonIDs(targetID, *whole, permIDs)
 	if err != nil {
 		return err
 	}
-	if len(lessonIDs) == 0 {
+	if len(lessonItems) == 0 {
 		return fmt.Errorf("no lessons found (content gated, or unknown id)")
 	}
-	ids := lessonIDs
+	ids := make([]int, len(lessonItems))
+	for i, item := range lessonItems {
+		ids[i] = item.ID
+	}
 	if *limit > 0 && *limit < len(ids) {
 		ids = ids[:*limit]
 	}
 	if *limit > 0 {
-		fmt.Printf("Found %d lesson(s) under root %d, taking first %d.\n", len(lessonIDs), rootID, len(ids))
+		fmt.Printf("Found %d lesson(s) under root %d, taking first %d.\n", len(lessonItems), rootID, len(ids))
 	} else {
-		fmt.Printf("Found %d lesson(s) under root %d.\n", len(lessonIDs), rootID)
+		fmt.Printf("Found %d lesson(s) under root %d.\n", len(lessonItems), rootID)
 	}
 
 	// Resolve metadata first (gives titles + the course/series name for foldering).
@@ -202,7 +206,7 @@ func cmdDownload(argv []string) error {
 			continue
 		}
 		fmt.Printf("\n▼ [%02d] %s\n", r.index, r.lesson.Title)
-		err := musora.DownloadLesson(r.lesson, musora.DownloadOpts{
+		err := musora.DownloadLesson(context.Background(), r.lesson, musora.DownloadOpts{
 			Dir:           outDir,
 			Index:         r.index,
 			Quality:       *quality,

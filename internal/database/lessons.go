@@ -26,6 +26,7 @@ type Lesson struct {
 	Title               string         `json:"title"`
 	ParentRailcontentID sql.NullInt64  `json:"parent_railcontent_id"`
 	Brand               string         `json:"brand"`
+	Position            sql.NullInt64  `json:"position"`
 	Status              string         `json:"status"`
 	Quality             sql.NullString `json:"quality"`
 	OutputDir           sql.NullString `json:"output_dir"`
@@ -40,7 +41,7 @@ type Lesson struct {
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
-const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, status,
+const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
 	first_seen_at, downloaded_at, updated_at`
 
@@ -51,7 +52,7 @@ func scanLesson(row interface {
 }) (Lesson, error) {
 	var l Lesson
 	err := row.Scan(
-		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Status,
+		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Position, &l.Status,
 		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
 		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
 	)
@@ -66,16 +67,23 @@ func scanLesson(row interface {
 // re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
 // attributed to the follow that first discovered it even if a later follow also
 // covers it. New rows take the table default status='pending'.
-func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+//
+// position is the lesson's sequence within its follow (the "NN - " folder
+// prefix). On conflict it is first-write-wins via COALESCE(lessons.position,
+// excluded.position): a lesson shared by two follows keeps the first number, and
+// a prior NULL is filled in by a later numbered upsert. (title stays
+// last-write-wins.)
+func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, follow_id)
-			 VALUES(?, ?, ?, ?, ?)
+			`INSERT INTO lessons(railcontent_id, title, parent_railcontent_id, brand, position, follow_id)
+			 VALUES(?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
 			     parent_railcontent_id = excluded.parent_railcontent_id,
+			     position              = COALESCE(lessons.position, excluded.position),
 			     updated_at            = CURRENT_TIMESTAMP`,
-			railcontentID, title, parent, brand, followID,
+			railcontentID, title, parent, brand, position, followID,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert lesson %d: %w", railcontentID, err)
@@ -107,6 +115,24 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("check downloaded for lesson %d: %w", id, err)
+	}
+	return n > 0, nil
+}
+
+// ShouldSkipEnqueue reports whether the planner must NOT enqueue a download job
+// for the lesson with the given railcontent_id: true when its status is
+// 'downloaded' (already have it) OR 'skipped' (intentionally passed over, e.g.
+// locked/missing content — re-enqueuing would loop forever). A 'failed' lesson
+// is deliberately NOT skipped so it is retried. An unknown id is not an error:
+// it reports false, so a never-seen lesson enqueues normally.
+func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND status IN (?, ?)`,
+		id, StatusDownloaded, StatusSkipped,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check should-skip-enqueue for lesson %d: %w", id, err)
 	}
 	return n > 0, nil
 }
@@ -162,6 +188,29 @@ func (s *Store) MarkSkipped(ctx context.Context, id int, reason string) error {
 		  WHERE railcontent_id = ?`,
 		StatusSkipped, reason, id,
 	)
+}
+
+// UnskipLesson is the inverse of MarkSkipped: a guarded UPDATE that resets a
+// skipped lesson back to pending and clears its error, ONLY while it is still
+// skipped. Like MarkJobCanceled it tolerates zero rows as a benign no-op and
+// returns nil — an already-pending/terminal lesson (or an unknown id) is left
+// untouched rather than erroring. It executes directly rather than through
+// updateStatus (which treats 0 rows as "no such lesson").
+func (s *Store) UnskipLesson(ctx context.Context, id int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE lessons
+			    SET status = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
+			  WHERE railcontent_id = ? AND status = ?`,
+			StatusPending, id, StatusSkipped,
+		)
+		if err != nil {
+			return fmt.Errorf("unskip lesson %d: %w", id, err)
+		}
+		// Zero rows affected (not skipped, or unknown id) is intentional: only a
+		// skipped lesson is reset here, and any other state is a no-op.
+		return nil
+	})
 }
 
 // updateStatus runs a status-mutating UPDATE through withTx and fails if it

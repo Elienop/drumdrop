@@ -95,11 +95,14 @@ func newCLIStore(follows []database.Follow) *cliStore {
 func (s *cliStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	return s.follows, nil
 }
-func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+func (s *cliStore) UpsertLesson(ctx context.Context, id int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	s.upserts = append(s.upserts, id)
 	return nil
 }
 func (s *cliStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
+	return s.downloaded[id], nil
+}
+func (s *cliStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	return s.downloaded[id], nil
 }
 func (s *cliStore) ActiveJobExists(ctx context.Context, id int) (bool, error) {
@@ -148,6 +151,13 @@ func (s *cliStore) GetFollow(ctx context.Context, id int64) (database.Follow, er
 	}
 	return database.Follow{}, sql.ErrNoRows
 }
+
+// GetLesson returns a zero lesson (no recorded position) so the worker's
+// numbering falls back to 1; the CLI tests assert behaviour that predates real
+// positions, so a zero row keeps their expectations intact.
+func (s *cliStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	return database.Lesson{}, nil
+}
 func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
 func (s *cliStore) MarkJobDone(ctx context.Context, id int64) error {
 	j := s.jobs[id]
@@ -159,6 +169,14 @@ func (s *cliStore) MarkJobFailed(ctx context.Context, id int64, msg string) erro
 	j := s.jobs[id]
 	j.Status = database.JobFailed
 	s.jobs[id] = j
+	return nil
+}
+func (s *cliStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	j := s.jobs[id]
+	if j.Status == database.JobRunning {
+		j.Status = database.JobCanceled
+		s.jobs[id] = j
+	}
 	return nil
 }
 func (s *cliStore) MarkDownloading(ctx context.Context, id int) error { return nil }
@@ -174,8 +192,13 @@ func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error)        
 // cliExpander returns a fixed id list per follow id.
 type cliExpander struct{ ids map[int64][]int }
 
-func (e cliExpander) Expand(f database.Follow, permIDs string) ([]int, error) {
-	return e.ids[f.ID], nil
+func (e cliExpander) Expand(f database.Follow, permIDs string) ([]musora.LessonItem, error) {
+	ids := e.ids[f.ID]
+	items := make([]musora.LessonItem, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, musora.LessonItem{ID: id})
+	}
+	return items, nil
 }
 
 // cliResolver returns a stub lesson for every id without touching the network.
@@ -188,7 +211,7 @@ func (cliResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 // cliDownloader records every download and never touches yt-dlp.
 type cliDownloader struct{ calls []int }
 
-func (d *cliDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
+func (d *cliDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, l.ID)
 	return nil
 }

@@ -48,6 +48,7 @@ export interface SummaryDTO {
   follows: number
   lessons: Record<string, number> // every LessonStatus, zero-filled
   jobs: Record<string, number> // every JobStatus, zero-filled
+  paused: boolean // the daemon's pause flag (deps.IsPaused)
 }
 
 export interface PreviewResponse {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,7 +35,26 @@ type Daemon struct {
 	// blocks forever in the select, so the plain CLI daemon never kicks. The serve
 	// entrypoint creates a buffered channel and sends on it for POST /api/sync.
 	Kick <-chan struct{}
+
+	// paused gates the scheduling loop: while set, the immediate startup cycle,
+	// every ticker tick, and every kick skip RunOnce entirely (a kick received
+	// while paused is dropped, not buffered for resume). It is read/written
+	// atomically because Pause/Resume are called from the HTTP handler goroutine
+	// while Run executes on the daemon goroutine.
+	paused atomic.Bool
 }
+
+// Pause stops the daemon from starting new cycles. While paused, the startup
+// cycle, ticker ticks, and kicks all skip RunOnce; an in-flight cycle is not
+// interrupted (pause takes effect at the next scheduling decision). Idempotent.
+func (d *Daemon) Pause() { d.paused.Store(true) }
+
+// Resume re-enables scheduling so the next tick (or kick) runs a cycle again.
+// Idempotent. A kick dropped while paused is not replayed; the next tick covers it.
+func (d *Daemon) Resume() { d.paused.Store(false) }
+
+// IsPaused reports whether scheduling is currently paused.
+func (d *Daemon) IsPaused() bool { return d.paused.Load() }
 
 // log returns the configured writer or io.Discard so callers can write without a
 // nil check and logic stays independent of logging.
@@ -105,9 +125,12 @@ func (d *Daemon) Run(ctx context.Context, interval time.Duration) error {
 	}
 
 	// Run one cycle immediately so the daemon does useful work without waiting a
-	// full interval on startup.
-	if err := d.RunOnce(ctx); err != nil {
-		fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
+	// full interval on startup — unless paused, in which case the next un-paused
+	// tick covers it.
+	if !d.IsPaused() {
+		if err := d.RunOnce(ctx); err != nil {
+			fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
+		}
 	}
 
 	ticker := time.NewTicker(interval)
@@ -120,13 +143,21 @@ func (d *Daemon) Run(ctx context.Context, interval time.Duration) error {
 			// claim; we simply stop scheduling further cycles.
 			return nil
 		case <-ticker.C:
+			// Skip the cycle entirely while paused; the next un-paused tick runs.
+			if d.IsPaused() {
+				continue
+			}
 			if err := d.RunOnce(ctx); err != nil {
 				fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
 			}
 		case <-d.Kick:
 			// On-demand sync: run one immediate cycle out of band. A nil Kick
 			// channel blocks forever here, so this case never fires for the plain
-			// CLI daemon.
+			// CLI daemon. A kick received while paused is dropped (not replayed on
+			// resume) — the next un-paused tick covers any work it would have done.
+			if d.IsPaused() {
+				continue
+			}
 			if err := d.RunOnce(ctx); err != nil {
 				fmt.Fprintf(d.log(), "cycle error (continuing): %v\n", err)
 			}

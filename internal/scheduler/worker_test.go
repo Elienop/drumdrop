@@ -24,16 +24,18 @@ type fakeWorkerStore struct {
 	queue   []database.Job         // jobs still waiting to be claimed (FIFO)
 	jobs    map[int64]database.Job // id → latest state of every job seen
 	follows map[int64]database.Follow
+	lessons map[int]database.Lesson // railcontent id → stored lesson row (for GetLesson)
 
 	// Recorded calls, in invocation order.
-	claims         int
-	markRunning    []int64
-	markDownloaded []markDownloadedCall
-	markDone       []int64
-	markJobFailed  []int64
-	markFailed     []int // railcontent ids marked failed
-	markSkipped    []int // railcontent ids marked skipped
-	markDownloadng []int // railcontent ids marked downloading
+	claims          int
+	markRunning     []int64
+	markDownloaded  []markDownloadedCall
+	markDone        []int64
+	markJobFailed   []int64
+	markJobCanceled []int64
+	markFailed      []int // railcontent ids marked failed
+	markSkipped     []int // railcontent ids marked skipped
+	markDownloadng  []int // railcontent ids marked downloading
 
 	// Optional fault injection.
 	claimErr     error
@@ -52,6 +54,7 @@ func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
 	s := &fakeWorkerStore{
 		jobs:    map[int64]database.Job{},
 		follows: map[int64]database.Follow{},
+		lessons: map[int]database.Lesson{},
 	}
 	for _, j := range jobs {
 		s.queue = append(s.queue, j)
@@ -89,6 +92,13 @@ func (s *fakeWorkerStore) GetFollow(ctx context.Context, id int64) (database.Fol
 	return f, nil
 }
 
+// GetLesson returns the stored lesson row for an id (its Position drives the
+// worker's folder numbering). An unknown id returns a zero lesson with no error,
+// so the worker falls back to index 1 — never panicking on a download path.
+func (s *fakeWorkerStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	return s.lessons[id], nil
+}
+
 func (s *fakeWorkerStore) MarkJobRunning(ctx context.Context, id int64) error {
 	s.markRunning = append(s.markRunning, id)
 	j := s.jobs[id]
@@ -112,6 +122,19 @@ func (s *fakeWorkerStore) MarkJobFailed(ctx context.Context, id int64, errMsg st
 	j.Status = database.JobFailed
 	j.Error = sql.NullString{String: errMsg, Valid: true}
 	s.jobs[id] = j
+	return nil
+}
+
+// MarkJobCanceled mirrors the store's guarded cancel: it only transitions a
+// running job and is a benign no-op otherwise, so worker cancel-branch tests
+// see the same status semantics as production.
+func (s *fakeWorkerStore) MarkJobCanceled(ctx context.Context, id int64) error {
+	s.markJobCanceled = append(s.markJobCanceled, id)
+	j := s.jobs[id]
+	if j.Status == database.JobRunning {
+		j.Status = database.JobCanceled
+		s.jobs[id] = j
+	}
 	return nil
 }
 
@@ -149,11 +172,14 @@ func (s *fakeWorkerStore) RequeueStaleRunning(ctx context.Context) (int, error) 
 func (s *fakeWorkerStore) ListFollows(ctx context.Context) ([]database.Follow, error) {
 	panic("ListFollows: not expected from Worker")
 }
-func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, followID sql.NullInt64) error {
+func (s *fakeWorkerStore) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	panic("UpsertLesson: not expected from Worker")
 }
 func (s *fakeWorkerStore) IsDownloaded(ctx context.Context, id int) (bool, error) {
 	panic("IsDownloaded: not expected from Worker")
+}
+func (s *fakeWorkerStore) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
+	panic("ShouldSkipEnqueue: not expected from Worker")
 }
 func (s *fakeWorkerStore) ActiveJobExists(ctx context.Context, railcontentID int) (bool, error) {
 	panic("ActiveJobExists: not expected from Worker")
@@ -202,7 +228,7 @@ func newFakeDownloader() *fakeDownloader {
 	return &fakeDownloader{failsBefore: map[int]int{}, attempts: map[int]int{}}
 }
 
-func (d *fakeDownloader) Download(l *musora.Lesson, o musora.DownloadOpts) error {
+func (d *fakeDownloader) Download(_ context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
 	d.calls = append(d.calls, o)
 	d.attempts[l.ID]++
 	if o.OnProgress != nil {
@@ -831,5 +857,217 @@ func TestWorkerMarkDownloadedNoVideoWhenResourcesOnly(t *testing.T) {
 	got := store.markDownloaded[0]
 	if got.videoPath != "" || got.bytes != 0 {
 		t.Errorf("videoPath/bytes = %q/%d, want empty/0 on ResourcesOnly", got.videoPath, got.bytes)
+	}
+}
+
+// blockingDownloader blocks inside Download until its ctx is cancelled, then
+// returns ctx.Err() (context.Canceled). started is closed on the first call so a
+// test can wait until the download is genuinely in flight before cancelling.
+type blockingDownloader struct {
+	started chan struct{}
+	calls   int
+}
+
+func newBlockingDownloader() *blockingDownloader {
+	return &blockingDownloader{started: make(chan struct{})}
+}
+
+func (d *blockingDownloader) Download(ctx context.Context, _ *musora.Lesson, _ musora.DownloadOpts) error {
+	d.calls++
+	if d.calls == 1 {
+		close(d.started)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestWorkerCancelRunningSkipsAndCancelsJob verifies the cancel-error-first
+// branch: a running download whose job is cancelled via CancelRunning is recorded
+// as a skipped lesson + a canceled job, has its partial files cleaned up, is NOT
+// retried, and never falls through to the success branch.
+func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newBlockingDownloader()
+
+	tmp := t.TempDir()
+	// Pre-create the lesson dir with a partial file so cleanupPartials has work.
+	lessonDirPath := filepath.Join(tmp, "Beginner Course", "01 - Lesson A")
+	if err := os.MkdirAll(lessonDirPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	partial := filepath.Join(lessonDirPath, "01 - Lesson A.mp4.part")
+	if err := os.WriteFile(partial, []byte("half a file"), 0o644); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.MaxAttempts = 5 // ensure cancel beats retries
+	w.Cfg.DownloadsDir = tmp
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = w.RunOnce(context.Background(), 0)
+		close(done)
+	}()
+
+	// Wait until the download is in flight, then cancel the running job.
+	<-dl.started
+	if !w.CancelRunning(1) {
+		t.Fatal("CancelRunning(1) = false, want true (job is running)")
+	}
+	<-done
+
+	if dl.calls != 1 {
+		t.Errorf("download calls = %d, want 1 (no retry after cancel)", dl.calls)
+	}
+	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Errorf("markSkipped = %v, want %v", got, want)
+	}
+	if got, want := store.markJobCanceled, []int64{1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("markJobCanceled = %v, want %v", got, want)
+	}
+	if got := store.jobs[1].Status; got != database.JobCanceled {
+		t.Errorf("job status = %q, want canceled", got)
+	}
+	// Success/failure branches must NOT have run.
+	if len(store.markDownloaded) != 0 || len(store.markDone) != 0 {
+		t.Errorf("success branch ran: markDownloaded=%+v markDone=%v", store.markDownloaded, store.markDone)
+	}
+	if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 {
+		t.Errorf("failure branch ran: markFailed=%v markJobFailed=%v", store.markFailed, store.markJobFailed)
+	}
+	// Partial file removed; the directory itself is left in place.
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Errorf("partial file still present (stat err = %v), want removed", err)
+	}
+}
+
+// TestWorkerCancelRunningUnknownJob verifies CancelRunning returns false when no
+// job by that id is currently registered as running.
+func TestWorkerCancelRunningUnknownJob(t *testing.T) {
+	w := newTestWorker(newFakeWorkerStore(), fakeResolver{}, newFakeDownloader(), func(time.Duration) {})
+	if w.CancelRunning(999) {
+		t.Error("CancelRunning(999) = true, want false (no such running job)")
+	}
+}
+
+// TestWorkerUsesLessonPositionForNumbering proves the worker folders a node
+// follow's lesson under its REAL stored position (not the old hardcoded 1): a
+// lesson at position 2 lands in "<course>/02 - <title>", and both the
+// DownloadOpts.Index and the recorded output dir share that value.
+func TestWorkerUsesLessonPositionForNumbering(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 2, Valid: true}}
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	wantDir := "/dl/Beginner Course/02 - Lesson A"
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
+		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
+	}
+	if len(dl.calls) != 1 {
+		t.Fatalf("download calls = %d, want 1", len(dl.calls))
+	}
+	if dl.calls[0].Index != 2 {
+		t.Errorf("DownloadOpts.Index = %d, want 2 (lesson's real position)", dl.calls[0].Index)
+	}
+}
+
+// TestWorkerNullPositionFallsBackToOne proves a lesson with no recorded position
+// still numbers as "01 - <title>" (the historical default), so a position-less
+// lesson keeps working.
+func TestWorkerNullPositionFallsBackToOne(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100} // Position invalid
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	wantDir := "/dl/Beginner Course/01 - Lesson A"
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
+		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
+	}
+	if len(dl.calls) != 1 || dl.calls[0].Index != 1 {
+		t.Errorf("DownloadOpts.Index = %+v, want 1 (NULL position fallback)", dl.calls)
+	}
+}
+
+// TestWorkerInstructorFollowGroupsByParentCourse proves an instructor follow
+// groups each lesson under "<instructor>/<parent course>/NN - <title>" instead
+// of the old flat outDirFor dir. producedVideo must find the written mp4 at that
+// exact path (real position 3 here).
+func TestWorkerInstructorFollowGroupsByParentCourse(t *testing.T) {
+	job := queuedJob(1, instructorFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[instructorFollow().ID] = instructorFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 3, Valid: true}}
+
+	les := lesson(100, "Paradiddle Power")
+	les.ParentContentData = []struct {
+		Title string `json:"title"`
+	}{{Title: "Hand Technique"}}
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("video-bytes")
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	tmp := t.TempDir()
+	w.Cfg.DownloadsDir = tmp
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	wantDir := filepath.Join(tmp, "Mike Johnston", "Hand Technique", "03 - Paradiddle Power")
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("MarkDownloaded calls = %+v, want 1", store.markDownloaded)
+	}
+	if got := store.markDownloaded[0].outputDir; got != wantDir {
+		t.Errorf("lessonDir = %q, want %q", got, wantDir)
+	}
+	// producedVideo found the written mp4 at the grouped path.
+	wantVideo := filepath.Join(wantDir, "03 - Paradiddle Power.mp4")
+	if got := store.markDownloaded[0].videoPath; got != wantVideo {
+		t.Errorf("videoPath = %q, want %q", got, wantVideo)
+	}
+	if got := store.markDownloaded[0].bytes; got != int64(len("video-bytes")) {
+		t.Errorf("bytes = %d, want %d", got, len("video-bytes"))
+	}
+}
+
+// TestWorkerInstructorFollowNoParentCourse proves a lesson under an instructor
+// follow with no parent course falls back to just "<instructor>/NN - <title>".
+func TestWorkerInstructorFollowNoParentCourse(t *testing.T) {
+	job := queuedJob(1, instructorFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[instructorFollow().ID] = instructorFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 4, Valid: true}}
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Solo Lesson")}}
+	dl := newFakeDownloader()
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	wantDir := "/dl/Mike Johnston/04 - Solo Lesson"
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
+		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
 }

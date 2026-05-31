@@ -14,3 +14,11 @@ it("opens when auth is required (401) and saves the token", async () => {
   await userEvent.click(screen.getByRole("button", { name: /save/i }))
   expect(getToken()).toBe("secret")
 })
+
+it("submits on Enter (form submit), not just clicking Save", async () => {
+  render(<TokenGate onSaved={() => {}} />)
+  clearToken()
+  const input = await screen.findByLabelText(/access token/i)
+  await userEvent.type(input, "entered-token{Enter}") // Enter submits the form
+  expect(getToken()).toBe("entered-token")
+})
