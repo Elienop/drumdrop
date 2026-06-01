@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ConfigDir is resolved at call time so tests can override via DRUMDROP_CONFIG_DIR.
@@ -79,3 +80,11 @@ func Interval() string {
 // time from DRUMDROP_QUALITY; an empty result (the default, when unset) means
 // "use each follow's own quality" — unchanged behavior.
 func Quality() string { return os.Getenv("DRUMDROP_QUALITY") }
+
+// Layout selects the library destination layout, read at call time from
+// DRUMDROP_LAYOUT and lower-cased so "Plex-TV"/"PLEX-TV" all normalize. An empty
+// result (the default) or "default" keeps today's per-lesson-subfolder layout;
+// "plex-tv" emits Plex's TV-Shows naming (<Show>/Season 01/<Show> - sXXeYY -
+// Title.ext). It shapes only the library move and has no effect without a
+// LibraryDir.
+func Layout() string { return strings.ToLower(os.Getenv("DRUMDROP_LAYOUT")) }

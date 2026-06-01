@@ -32,6 +32,18 @@ services:
       # (no host-path mapping). See the single-parent bind-mount note above for an
       # instant, atomic move. A move failure is non-fatal (file stays in /downloads).
       # - DRUMDROP_LIBRARY_DIR=/media/library
+      # Optional Plex TV layout (requires DRUMDROP_LIBRARY_DIR). With this set, the
+      # library copy uses Plex's TV-Shows naming instead of the default
+      # Course/NN - Lesson/... folders:
+      #   <library>/<Show>/Season 01/<Show> - s01e05 - Lesson Title.mp4
+      #   (sidecars — .nfo, .en.vtt, -poster.jpg — share the episode base, flat in
+      #   the season folder). Show = the course (node follows), the lesson's parent
+      #   course for instructor follows (else the instructor name), or content-<id>.
+      # On the PLEX side: create a *TV Shows* library pointing at DRUMDROP_LIBRARY_DIR
+      # and enable the *Local Media Assets* agent for it (Settings > Agents, or mark
+      # the show "personal media") so episode titles come from the filenames — the
+      # show will not match TheTVDB. Empty/unset (or "default") keeps today's layout.
+      # - DRUMDROP_LAYOUT=plex-tv
       # Set this to the SAME host path you bind-mount to /downloads above, and the
       # UI's "Copy path" yields a host path (paste-ready in your file manager)
       # instead of the container's /downloads. Leave unset to keep container paths.

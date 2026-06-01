@@ -417,19 +417,55 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		if derr == nil {
 			// Move the finished lesson into the library (single location) when
 			// configured, BEFORE producedVideo/MarkDownloaded so they record the
-			// LIBRARY path. The rename preserves the "NN - title" leaf, so
-			// producedVideo still finds <base>.mp4 at the new dir. Non-fatal: a move
-			// failure logs a warning and keeps dir as the scratch downloads path (the
-			// file is still there, the download succeeded); the move must never turn a
-			// successful download into a failure.
-			if w.Cfg.LibraryDir != "" {
+			// LIBRARY path. Non-fatal in either layout: a move failure logs a warning
+			// and keeps dir as the scratch downloads path (the file is still there,
+			// the download succeeded); the move must never turn a successful download
+			// into a failure.
+			videoPath, bytes := "", int64(0)
+			recorded := false
+			if w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "" {
+				// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
+				// the lesson + sidecars to the episode base. output_dir = the season
+				// folder; video_path = the moved episode .mp4 (stat for bytes). The
+				// move returns the .mp4 path directly, so producedVideo's
+				// "<dir>/<base>.mp4" assumption (which no longer holds once the file is
+				// renamed and flat) is bypassed here.
+				show := plexShow(follow, job, lesson)
+				seasonDir, vp, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir)
+				if err != nil {
+					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
+				}
+				// A non-empty seasonDir means every file was placed in the library; the
+				// only error that can accompany it is the best-effort scratch-dir
+				// cleanup (logged above), which leaves the files correctly in place. Record
+				// the library paths in that case so we never fall back to producedVideo's
+				// now-emptied scratch dir. A true move failure returns an empty seasonDir,
+				// keeping the scratch dir and the producedVideo fallback below.
+				if seasonDir != "" {
+					dir = seasonDir
+					videoPath = vp
+					if !w.Cfg.ResourcesOnly && vp != "" {
+						if info, serr := os.Stat(vp); serr == nil {
+							bytes = info.Size()
+						}
+					}
+					recorded = true
+				}
+			} else if w.Cfg.LibraryDir != "" {
+				// Default layout: move the whole "NN - title" leaf into the library at
+				// the same path relative to DownloadsDir. The rename preserves the leaf,
+				// so producedVideo still finds <base>.mp4 at the new dir.
 				if newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir); err != nil {
 					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 				} else {
 					dir = newDir
 				}
 			}
-			videoPath, bytes := w.producedVideo(dir)
+			// For the default layout (and for a plex-tv move that FAILED, leaving the
+			// file at the scratch dir) derive the video from the dir's "<base>.mp4".
+			if !recorded {
+				videoPath, bytes = w.producedVideo(dir)
+			}
 			if err := w.Store.MarkDownloaded(ctx, id, quality, dir, videoPath, bytes); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
 			}
@@ -505,6 +541,30 @@ func (w *Worker) outDir(f database.Follow, job database.Job, lesson *musora.Less
 		title = fmt.Sprintf("content-%d", job.RailcontentID)
 	}
 	return filepath.Join(w.Cfg.DownloadsDir, musora.Sanitize(title))
+}
+
+// plexShow is the single top-level show name for the plex-tv layout. It mirrors
+// outDir's grouping decision but FLATTENS it to one segment (Plex TV misreads a
+// nested <Instructor>/<Course> as two levels): an instructor follow uses the
+// lesson's parent course, falling back to the instructor name for a course-less
+// lesson; any other real follow uses its folder title; a NULL/zero follow uses
+// the lesson's parent title, or content-<id> when even that is missing. The raw
+// (un-Sanitized) title is returned — moveToLibraryPlexTV Sanitizes it into the
+// path segment, matching how outDir feeds folderTitle through Sanitize.
+func plexShow(f database.Follow, job database.Job, lesson *musora.Lesson) string {
+	if hasFollow(f) && f.Kind == "instructor" {
+		if parent := lessonParentTitle(lesson); parent != "" {
+			return parent
+		}
+		return folderTitle(f)
+	}
+	if hasFollow(f) {
+		return folderTitle(f)
+	}
+	if title := lessonParentTitle(lesson); title != "" {
+		return title
+	}
+	return fmt.Sprintf("content-%d", job.RailcontentID)
 }
 
 // hasFollow reports whether the loaded follow carries enough identity to drive
