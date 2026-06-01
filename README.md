@@ -29,6 +29,7 @@ the defaults give a working setup with no env at all.
 | --- | --- | --- |
 | `DRUMDROP_CONFIG_DIR` | `~/.config/drumdrop` | Directory for all at-rest state: `drumdrop.db` (follow/download state), `secret.key` (credential-encryption key), `credentials.enc` (encrypted login), `session.cookie` (saved session). Override to relocate the whole config directory. |
 | `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. |
+| `DRUMDROP_LIBRARY_DIR` | _(none)_ | Optional Plex library mirror. When set, each finished lesson folder is hardlinked (with a byte-copy fallback) into this dir at the same path relative to the downloads root — sidecars first, the video last. Plex watches a directory of **only** finished files and never the in-progress partials in the downloads dir. Empty disables the mirror (no library writes). For true zero-disk hardlinks, downloads and library must be on **one filesystem as the process/container sees it** (see [single-parent bind mount](#run-with-docker)); otherwise it falls back to a copy. |
 | `DRUMDROP_LISTEN` | `127.0.0.1:8080` | Address `serve` binds. A non-loopback bind (e.g. `0.0.0.0:8080`, as in the Docker image) refuses to start without `DRUMDROP_API_TOKEN`. |
 | `DRUMDROP_API_TOKEN` | _(none)_ | Bearer token for the `/api/*` data plane. Required for any non-loopback bind; the SPA shell stays unauthenticated. |
 | `DRUMDROP_CORS_ORIGIN` | _(none)_ | Allowed CORS origin for the HTTP API. Empty disables cross-origin requests. |
@@ -189,6 +190,30 @@ docker run -d --name drumdrop -p 3737:8080 \
 
 The image is fully env-configured via the `DRUMDROP_*` vars in the [Environment](#environment)
 table; `PUID`/`PGID`/`TZ` set the runtime user/timezone. The published port maps `3737:8080`.
+
+#### Plex library mirror (single-parent bind mount)
+
+Set `DRUMDROP_LIBRARY_DIR` to hardlink every finished lesson folder into a separate
+directory that Plex watches — a Sonarr-style split where Plex only ever sees finished
+files (never the in-progress partials in the downloads dir) at zero extra disk.
+
+For **true hardlinks**, the downloads dir and the library dir must be one filesystem
+*as the container sees it*. Bind a **single parent** and point both dirs inside it:
+
+```yaml
+services:
+  drumdrop:
+    volumes:
+      - /mnt/pool/media:/media          # one parent → one filesystem in-container
+    environment:
+      - DRUMDROP_DOWNLOADS_DIR=/media/downloads/drumdrop
+      - DRUMDROP_LIBRARY_DIR=/media/library
+```
+
+Point Plex at `/mnt/pool/media/library`. Two **separate** binds (e.g. `./downloads:/downloads`
+and `./library:/library`) cross filesystems inside the container, so drumdrop silently
+falls back to a byte copy (correct, just not zero-disk). The per-lesson log line
+(`→ library …: N linked, M copied`) tells you which path you're getting.
 
 ### Standalone binary
 

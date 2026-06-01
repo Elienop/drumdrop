@@ -33,6 +33,22 @@ func TestDownloadsDir(t *testing.T) {
 	}
 }
 
+func TestLibraryDir(t *testing.T) {
+	// Set: the env value wins verbatim.
+	t.Setenv("DRUMDROP_LIBRARY_DIR", "/media/library")
+	if got, want := LibraryDir(), "/media/library"; got != want {
+		t.Fatalf("LibraryDir (env set) = %q, want %q", got, want)
+	}
+
+	// Unset: empty (feature off). t.Setenv restores the prior value on cleanup.
+	if err := os.Unsetenv("DRUMDROP_LIBRARY_DIR"); err != nil {
+		t.Fatalf("unset DRUMDROP_LIBRARY_DIR: %v", err)
+	}
+	if got, want := LibraryDir(), ""; got != want {
+		t.Fatalf("LibraryDir (env unset) = %q, want %q", got, want)
+	}
+}
+
 func TestListenAddr(t *testing.T) {
 	tests := []struct {
 		name string
