@@ -29,7 +29,7 @@ type Kind = "node" | "instructor"
 
 // Quality presets passed through to the follow; "best" lets yt-dlp pick the
 // highest available, the rest cap the video height (e.g. 1080 → ≤1080p).
-const QUALITY_OPTIONS = ["best", "2160", "1440", "1080", "720", "480"] as const
+export const QUALITY_OPTIONS = ["best", "2160", "1440", "1080", "720", "480"] as const
 
 // AddFollowDialog is the preview-then-add flow: a segmented kind control
 // (node | instructor), an input (URL-or-id for node, slug + optional brand for

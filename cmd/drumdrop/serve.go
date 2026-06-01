@@ -70,6 +70,7 @@ func cmdServe(argv []string) error {
 		CORSOrigin:       config.CORSOrigin(),
 		DownloadsDir:     cfg.DownloadsDir,
 		HostDownloadsDir: config.HostDownloadsDir(),
+		LibraryDir:       cfg.LibraryDir,
 	}
 	deps := server.Deps{
 		Planner:       planner,

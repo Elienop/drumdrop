@@ -213,6 +213,37 @@ func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 	})
 }
 
+// UpdateLessonDeleted tombstone-skips a lesson whose files have just been
+// removed: it sets status='skipped', error='deleted', and clears the now-stale
+// download metadata (output_dir/video_path/bytes) so the row no longer claims a
+// path that's gone. It is a tombstone, not a row delete, because the follow is
+// still active and the next sync would otherwise re-discover and re-download the
+// lesson — ShouldSkipEnqueue already skips 'skipped', and UnskipLesson can bring
+// it back later. Like UnskipLesson it executes directly (not via updateStatus)
+// and tolerates zero rows as a benign no-op, so an unknown id is not an error
+// (the API handler reads the lesson first for the 404).
+func (s *Store) UpdateLessonDeleted(ctx context.Context, id int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE lessons
+			    SET status = ?,
+			        error = 'deleted',
+			        output_dir = NULL,
+			        video_path = NULL,
+			        bytes = NULL,
+			        updated_at = CURRENT_TIMESTAMP
+			  WHERE railcontent_id = ?`,
+			StatusSkipped, id,
+		)
+		if err != nil {
+			return fmt.Errorf("mark lesson %d deleted: %w", id, err)
+		}
+		// Zero rows (unknown id) is intentional: the handler reads the lesson
+		// first, so a miss here is a benign no-op rather than an error.
+		return nil
+	})
+}
+
 // updateStatus runs a status-mutating UPDATE through withTx and fails if it
 // touched zero rows (the lesson id was unknown). All Mark* helpers funnel
 // through here so the "no such lesson" behavior is defined in exactly one place.

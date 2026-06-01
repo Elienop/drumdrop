@@ -50,7 +50,12 @@ export const api = {
     request<LessonDTO[]>(`/follows/${id}/lessons${qs({ status })}`),
   createFollow: (body: CreateFollowRequest) =>
     requestWithStatus<FollowDTO>("/follows", { method: "POST", body: JSON.stringify(body) }),
-  deleteFollow: (id: number) => request<void>(`/follows/${id}`, { method: "DELETE" }),
+  updateFollow: (id: number, body: { quality: string }) =>
+    request<FollowDTO>(`/follows/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  unfollow: (id: number, opts: { deleteFiles?: boolean } = {}) =>
+    request<void>(`/follows/${id}${qs({ files: opts.deleteFiles ? "true" : undefined })}`, {
+      method: "DELETE",
+    }),
 
   listLessons: (params: { status?: string; limit?: number; offset?: number } = {}) =>
     request<LessonDTO[]>(`/lessons${qs(params)}`),
@@ -61,6 +66,8 @@ export const api = {
     request<LessonDTO>(`/lessons/${id}/skip`, { method: "POST", body: JSON.stringify(body) }),
   unskipLesson: (id: number) =>
     request<LessonDTO>(`/lessons/${id}/unskip`, { method: "POST" }),
+  deleteLesson: (id: number) =>
+    request<LessonDTO>(`/lessons/${id}`, { method: "DELETE" }),
 
   listJobs: (params: { state?: string; limit?: number } = {}) =>
     request<JobDTO[]>(`/jobs${qs(params)}`),

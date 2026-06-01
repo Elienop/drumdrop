@@ -190,10 +190,66 @@ func (s *Server) writeFollowResult(w http.ResponseWriter, f database.Follow, err
 	}
 }
 
+// handleUpdateFollow serves PATCH /api/follows/{id}: it changes the follow's
+// quality preset in place and returns the updated row with 200. Only quality is
+// editable — the follow's identity (kind/railcontent_id/slug/brand) is immutable
+// — and the change is forward-only (existing lessons are untouched; the new
+// quality governs lessons enqueued from now on). The quality is validated
+// against the allowed preset set (400 on anything else, reusing validQuality so
+// it matches create). It reads the follow first so an unknown id maps cleanly to
+// 404. A malformed body is a 400; a non-integer id is a 400.
+func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var req updateFollowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !validQuality(req.Quality) {
+		writeErr(w, http.StatusBadRequest, "quality must be one of: best, 2160, 1440, 1080, 720, 480")
+		return
+	}
+
+	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
+		writeStoreErr(w, err, "follow not found")
+		return
+	}
+	if err := s.store.UpdateFollowQuality(r.Context(), id, req.Quality); err != nil {
+		writeStoreErr(w, err, "follow not found")
+		return
+	}
+	f, err := s.store.GetFollow(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "follow not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, followDTO(f))
+}
+
 // handleDeleteFollow serves DELETE /api/follows/{id}: 204 on success, 404 if no
 // follow has that id, 400 for a non-integer id. It reads the follow first so an
-// unknown id maps cleanly to 404 (RemoveFollow's own miss error is not a wrapped
-// sql.ErrNoRows).
+// unknown id maps cleanly to 404 (RemoveFollowCascade's own miss error is not a
+// wrapped sql.ErrNoRows).
+//
+// Order of operations:
+//  1. Cancel the follow's running job(s) so a live download actually stops
+//     (mirrors handleCancelJob: deps.CancelRunning kills the yt-dlp process; the
+//     worker finalizes the job/lesson asynchronously). nil-safe when no worker.
+//  2. With ?files=true, remove the follow's downloaded lessons' files (the
+//     downloads copy AND the library mirror) BEFORE the rows are deleted, since
+//     the lesson rows carry the on-disk paths. Default (?files absent/false)
+//     keeps the files — delete is opt-in.
+//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx).
+//
+// The cancel→files→cascade ordering is best-effort: the worker's async
+// canceled/skipped finalization may still be in flight, so a file delete can
+// race a worker still writing the lesson dir, and the cascade's job delete makes
+// the worker's later MarkJobCanceled a benign 0-row no-op. The handler does not
+// block on the worker (mirroring handleCancelJob).
 func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
@@ -203,11 +259,53 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "follow not found")
 		return
 	}
-	if err := s.store.RemoveFollow(r.Context(), id); err != nil {
+
+	// 1. Cancel any running job(s) for this follow so a live download stops. No
+	// by-follow jobs query exists, so list running jobs and filter by follow_id.
+	if s.deps.CancelRunning != nil {
+		running, err := s.store.ListJobsByStatus(r.Context(), database.JobRunning)
+		if err != nil {
+			writeStoreErr(w, err, "follow not found")
+			return
+		}
+		for _, j := range running {
+			if j.FollowID.Valid && j.FollowID.Int64 == id {
+				s.deps.CancelRunning(j.ID)
+			}
+		}
+	}
+
+	// 2. With ?files=true, remove the downloaded lessons' files before the rows go.
+	if deleteFilesRequested(r) {
+		lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
+		if err != nil {
+			writeStoreErr(w, err, "follow not found")
+			return
+		}
+		for _, l := range lessons {
+			if l.Status == database.StatusDownloaded && l.OutputDir.Valid {
+				// Best-effort: use the RAW stored container path (not the host-mapped
+				// DTO). A failure is logged-by-being-ignored — file cleanup must not
+				// block removing the follow records.
+				_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String)
+			}
+		}
+	}
+
+	// 3. Cascade-delete jobs + lessons + the follow.
+	if err := s.store.RemoveFollowCascade(r.Context(), id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not delete follow")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteFilesRequested reports whether the request asked to also delete on-disk
+// files via ?files=. A missing or unparseable value is false (files kept), so
+// delete is strictly opt-in.
+func deleteFilesRequested(r *http.Request) bool {
+	v, err := strconv.ParseBool(r.URL.Query().Get("files"))
+	return err == nil && v
 }
 
 // filterLessonsByStatus returns the lessons whose Status equals status,

@@ -1,7 +1,7 @@
 import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
-import { ChevronLeft, ChevronRight, MoreHorizontal, X } from "lucide-react"
+import { ChevronLeft, ChevronRight, MoreHorizontal, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
@@ -66,6 +66,7 @@ export function Lessons() {
   const [offset, setOffset] = React.useState(0)
   const [search, setSearch] = React.useState("")
   const [skipping, setSkipping] = React.useState<LessonDTO | null>(null)
+  const [deleting, setDeleting] = React.useState<LessonDTO | null>(null)
 
   const status = tab === "all" ? undefined : tab
 
@@ -153,6 +154,24 @@ export function Lessons() {
     },
     onError: (err) => {
       toast.error(err instanceof ApiHttpError ? err.message : "Un-skip failed")
+    },
+  })
+
+  // Per-lesson delete removes both file copies then tombstone-skips the row
+  // (status downloaded -> skipped, paths cleared). Invalidate the raw ["lessons"]
+  // prefix so every keyed/live variant refetches, plus summary (the per-status
+  // counts shift) and jobs (history mutation, mirrors skip/unskip).
+  const deleteLesson = useMutation({
+    mutationFn: (id: number) => api.deleteLesson(id),
+    onSuccess: () => {
+      toast.success("Lesson deleted")
+      setDeleting(null)
+      qc.invalidateQueries({ queryKey: qk.jobs() })
+      qc.invalidateQueries({ queryKey: ["lessons"] })
+      qc.invalidateQueries({ queryKey: qk.summary })
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiHttpError ? err.message : "Delete failed")
     },
   })
 
@@ -309,7 +328,15 @@ export function Lessons() {
                                     </DropdownMenuItem>
                                   )
                                 })()
-                              ) : lesson.status === "downloaded" ? null : (
+                              ) : lesson.status === "downloaded" ? (
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={() => setDeleting(lesson)}
+                                >
+                                  <Trash2 />
+                                  Delete
+                                </DropdownMenuItem>
+                              ) : (
                                 <>
                                   {lesson.status === "skipped" && (
                                     <DropdownMenuItem
@@ -398,6 +425,39 @@ export function Lessons() {
             }}
             onCancel={() => setSkipping(null)}
           />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleting !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleting(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {deleting ? `Delete "${deleting.title}"?` : "Delete lesson?"}
+            </DialogTitle>
+            <DialogDescription>
+              This removes the downloaded files (downloads + library). The lesson
+              is marked skipped so it is not re-downloaded; un-skip to restore it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleting(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteLesson.isPending}
+              onClick={() => {
+                if (deleting) deleteLesson.mutate(deleting.railcontent_id)
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
