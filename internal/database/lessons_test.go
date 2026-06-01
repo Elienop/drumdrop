@@ -790,6 +790,56 @@ func TestCountLessonsByStatus(t *testing.T) {
 	}
 }
 
+// TestUpdateLessonDeleted asserts a downloaded lesson is tombstone-skipped:
+// status→skipped, error→'deleted', and the download metadata (output_dir/
+// video_path/bytes) cleared so the row no longer claims a path that's gone.
+func TestUpdateLessonDeleted(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertLesson(ctx, 5001, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	if err := s.MarkDownloaded(ctx, 5001, "1080", "/dl/5001", "/dl/5001/v.mp4", 123); err != nil {
+		t.Fatalf("MarkDownloaded: %v", err)
+	}
+
+	if err := s.UpdateLessonDeleted(ctx, 5001); err != nil {
+		t.Fatalf("UpdateLessonDeleted: %v", err)
+	}
+
+	got, err := s.GetLesson(ctx, 5001)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if got.Status != StatusSkipped {
+		t.Errorf("Status = %q, want %q", got.Status, StatusSkipped)
+	}
+	if !got.Error.Valid || got.Error.String != "deleted" {
+		t.Errorf("Error = %v, want 'deleted'", got.Error)
+	}
+	if got.OutputDir.Valid {
+		t.Errorf("OutputDir = %v, want NULL after delete", got.OutputDir)
+	}
+	if got.VideoPath.Valid {
+		t.Errorf("VideoPath = %v, want NULL after delete", got.VideoPath)
+	}
+	if got.Bytes.Valid {
+		t.Errorf("Bytes = %v, want NULL after delete", got.Bytes)
+	}
+}
+
+// TestUpdateLessonDeletedUnknownIsNoOp asserts an unknown id is a benign no-op
+// (no error), matching UnskipLesson — the API handler reads the lesson first
+// for the 404.
+func TestUpdateLessonDeletedUnknownIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.UpdateLessonDeleted(context.Background(), 999999); err != nil {
+		t.Errorf("UpdateLessonDeleted on unknown id = %v, want nil (benign no-op)", err)
+	}
+}
+
 // TestCountLessonsByStatusEmpty asserts an empty lessons table yields an empty
 // (non-nil) map and no error.
 func TestCountLessonsByStatusEmpty(t *testing.T) {

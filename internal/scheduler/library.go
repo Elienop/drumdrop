@@ -39,7 +39,7 @@ func mirrorToLibrary(downloadsDir, libraryDir, lessonDir string, log io.Writer) 
 	if err != nil {
 		return fmt.Errorf("relativize %q under %q: %w", lessonDir, downloadsDir, err)
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return fmt.Errorf("lesson dir %q is not under downloads dir %q", lessonDir, downloadsDir)
 	}
 	dstDir := filepath.Join(libraryDir, rel)

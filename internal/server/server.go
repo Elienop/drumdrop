@@ -24,6 +24,12 @@ type Config struct {
 	// empty (the default), lesson paths are returned exactly as stored.
 	DownloadsDir     string
 	HostDownloadsDir string
+	// LibraryDir is the root the worker mirrors finished lessons into (the Plex/
+	// media library hardlink tree), matching scheduler.Config.LibraryDir. The
+	// delete-files path removes a lesson's library mirror at
+	// filepath.Join(LibraryDir, rel(DownloadsDir, output_dir)). Empty (the
+	// default) means no library is configured: only the downloads copy is removed.
+	LibraryDir string
 }
 
 // Deps bundles the engine handles the write/sync handlers need beyond the
@@ -98,11 +104,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/follows", s.handleListFollows)
 	s.mux.HandleFunc("POST /api/follows", s.handleCreateFollow)
 	s.mux.HandleFunc("GET /api/follows/{id}", s.handleGetFollow)
+	s.mux.HandleFunc("PATCH /api/follows/{id}", s.handleUpdateFollow)
 	s.mux.HandleFunc("DELETE /api/follows/{id}", s.handleDeleteFollow)
 	s.mux.HandleFunc("GET /api/follows/{id}/lessons", s.handleFollowLessons)
 
 	s.mux.HandleFunc("GET /api/lessons", s.handleListLessons)
 	s.mux.HandleFunc("GET /api/lessons/{id}", s.handleGetLesson)
+	s.mux.HandleFunc("DELETE /api/lessons/{id}", s.handleDeleteLesson)
 	s.mux.HandleFunc("POST /api/lessons/{id}/download", s.handleDownloadLesson)
 	s.mux.HandleFunc("POST /api/lessons/{id}/skip", s.handleSkipLesson)
 	s.mux.HandleFunc("POST /api/lessons/{id}/unskip", s.handleUnskipLesson)

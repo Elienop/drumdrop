@@ -17,6 +17,12 @@ import (
 // shape that sql.NullString marshals to by default. Nullable columns become
 // pointers (nil → JSON null); non-nullable columns keep their plain Go types.
 
+// updateFollowRequest is the PATCH /api/follows/{id} body. Only quality is
+// editable; the follow's identity (kind/railcontent_id/slug/brand) is immutable.
+type updateFollowRequest struct {
+	Quality string `json:"quality"`
+}
+
 // FollowDTO is the JSON wire shape of a database.Follow.
 type FollowDTO struct {
 	ID            int64      `json:"id"`

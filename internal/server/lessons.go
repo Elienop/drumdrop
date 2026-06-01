@@ -159,6 +159,48 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
 }
 
+// handleDeleteLesson serves DELETE /api/lessons/{id}: it removes a downloaded
+// lesson's files (both the downloads copy and the library mirror, via the shared
+// primitive) and tombstone-skips the row (status='skipped', error='deleted',
+// paths cleared), returning the updated lesson with 200. It is a tombstone, not
+// a row delete, because the follow is still active and the next sync would
+// otherwise re-discover and re-download it — ShouldSkipEnqueue already skips
+// 'skipped', and un-skip can bring it back later.
+//
+// It reads the lesson first so an unknown id maps cleanly to 404 (mirroring
+// handleSkipLesson; UpdateLessonDeleted's own miss is a benign no-op). File
+// removal uses the RAW stored output_dir (the container path under DownloadsDir),
+// NOT the host-mapped DTO value, and is best-effort. A non-integer id is a 400.
+func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt(w, r, "id")
+	if !ok {
+		return
+	}
+
+	l, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+
+	// Best-effort file removal before clearing the paths; a failure must not block
+	// the tombstone (the row would otherwise keep claiming a path we tried to drop).
+	if l.OutputDir.Valid {
+		_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String)
+	}
+
+	if err := s.store.UpdateLessonDeleted(r.Context(), id); err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+	updated, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.viewLesson(updated))
+}
+
 // queryInt parses an optional integer query param. An empty value is treated as
 // "not supplied" and yields 0 with ok=true (the store applies its own defaults);
 // a non-integer value writes a 400 and returns ok=false.

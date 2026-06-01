@@ -136,6 +136,66 @@ func (s *Store) RemoveFollow(ctx context.Context, id int64) error {
 	})
 }
 
+// UpdateFollowQuality changes a follow's quality preset in place, leaving its
+// identity (kind/railcontent_id/slug/brand) untouched. It is forward-only: it
+// does NOT re-download or otherwise touch existing lessons — the new quality
+// governs lessons enqueued from now on (the worker reads follow.Quality at
+// download time). 0 rows matched → "no follow with id" error so the caller can
+// map it to a 404 (mirroring RemoveFollow / TouchLastSynced; the API handler
+// also reads the follow first). quality is validated by the caller against the
+// allowed preset set before this is called.
+func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE follows SET quality = ? WHERE id = ?`, quality, id,
+		)
+		if err != nil {
+			return fmt.Errorf("update quality for follow %d: %w", id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected updating follow %d: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("no follow with id %d", id)
+		}
+		return nil
+	})
+}
+
+// RemoveFollowCascade deletes the follow and resets the history it spawned: in
+// one transaction it deletes the follow's jobs, then its lessons, then the
+// follow row itself. The explicit child deletes go beyond the schema's
+// ON DELETE SET NULL so nothing is left orphaned with a dangling follow_id; the
+// order (jobs + lessons before the follow) keeps the cascade self-consistent.
+// 0 follow rows → "no follow with id" error (not a wrapped sql.ErrNoRows, like
+// RemoveFollow), so the caller reads the follow first for a clean 404.
+//
+// File removal is NOT done here — the handler removes downloaded files (when the
+// caller opts in) BEFORE calling this, since the lesson rows carry the paths.
+func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE follow_id = ?`, id); err != nil {
+			return fmt.Errorf("delete jobs for follow %d: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM lessons WHERE follow_id = ?`, id); err != nil {
+			return fmt.Errorf("delete lessons for follow %d: %w", id, err)
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("delete follow %d: %w", id, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected deleting follow %d: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("no follow with id %d", id)
+		}
+		return nil
+	})
+}
+
 // ListFollows returns every follow ordered by added_at (oldest first), with id
 // as a stable tiebreaker so the order is deterministic when timestamps collide.
 func (s *Store) ListFollows(ctx context.Context) ([]Follow, error) {

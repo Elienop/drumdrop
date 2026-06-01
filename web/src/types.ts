@@ -71,6 +71,9 @@ export interface CreateFollowRequest {
   brand?: string
   quality?: string
 }
+export interface UpdateFollowRequest {
+  quality: string
+}
 export interface SkipLessonRequest {
   reason?: string
 }

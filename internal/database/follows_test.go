@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -230,6 +231,114 @@ func TestTouchLastSynced(t *testing.T) {
 	}
 	if !got.LastSyncedAt.Valid {
 		t.Error("after TouchLastSynced, last_synced_at is still NULL")
+	}
+}
+
+// TestUpdateFollowQuality asserts the quality is changed in place while the
+// follow's identity (kind/railcontent_id/slug/brand) is untouched.
+func TestUpdateFollowQuality(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	added, err := s.AddNodeFollow(ctx, 12345, "Title", "drumeo", "best")
+	if err != nil {
+		t.Fatalf("AddNodeFollow: %v", err)
+	}
+
+	if err := s.UpdateFollowQuality(ctx, added.ID, "1080"); err != nil {
+		t.Fatalf("UpdateFollowQuality: %v", err)
+	}
+
+	got, err := s.GetFollow(ctx, added.ID)
+	if err != nil {
+		t.Fatalf("GetFollow: %v", err)
+	}
+	if got.Quality != "1080" {
+		t.Errorf("Quality = %q, want %q", got.Quality, "1080")
+	}
+	// Identity must be untouched.
+	if got.Kind != "node" || !got.RailcontentID.Valid || got.RailcontentID.Int64 != 12345 || got.Brand != "drumeo" {
+		t.Errorf("identity changed: kind=%q railcontent_id=%v brand=%q", got.Kind, got.RailcontentID, got.Brand)
+	}
+}
+
+// TestUpdateFollowQualityNotFound asserts an unknown id is reported as an error
+// so the API handler can map it to a 404.
+func TestUpdateFollowQualityNotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.UpdateFollowQuality(context.Background(), 999999, "720"); err == nil {
+		t.Error("UpdateFollowQuality on an unknown id returned nil, want error")
+	}
+}
+
+// TestRemoveFollowCascade asserts the follow plus its jobs and lessons are all
+// gone, while another follow's records are left untouched.
+func TestRemoveFollowCascade(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	target, err := s.AddNodeFollow(ctx, 100, "Target", "drumeo", "best")
+	if err != nil {
+		t.Fatalf("AddNodeFollow target: %v", err)
+	}
+	other, err := s.AddNodeFollow(ctx, 200, "Other", "drumeo", "best")
+	if err != nil {
+		t.Fatalf("AddNodeFollow other: %v", err)
+	}
+
+	// Seed a lesson + job under each follow.
+	if err := s.UpsertLesson(ctx, 1001, "L1", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{Int64: target.ID, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson target: %v", err)
+	}
+	if err := s.UpsertLesson(ctx, 2001, "L2", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{Int64: other.ID, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson other: %v", err)
+	}
+	targetJob, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: target.ID, Valid: true}, 1001)
+	if err != nil {
+		t.Fatalf("EnqueueJob target: %v", err)
+	}
+	otherJob, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: other.ID, Valid: true}, 2001)
+	if err != nil {
+		t.Fatalf("EnqueueJob other: %v", err)
+	}
+
+	if err := s.RemoveFollowCascade(ctx, target.ID); err != nil {
+		t.Fatalf("RemoveFollowCascade: %v", err)
+	}
+
+	// Target follow gone.
+	if _, err := s.GetFollow(ctx, target.ID); err == nil {
+		t.Error("target follow still present after cascade")
+	}
+	// Target lesson gone.
+	if _, err := s.GetLesson(ctx, 1001); err == nil {
+		t.Error("target lesson still present after cascade")
+	}
+	// Target job gone.
+	if _, err := s.GetJob(ctx, targetJob); err == nil {
+		t.Error("target job still present after cascade")
+	}
+
+	// Other follow + its records untouched.
+	if _, err := s.GetFollow(ctx, other.ID); err != nil {
+		t.Errorf("other follow gone after cascade: %v", err)
+	}
+	if _, err := s.GetLesson(ctx, 2001); err != nil {
+		t.Errorf("other lesson gone after cascade: %v", err)
+	}
+	if _, err := s.GetJob(ctx, otherJob); err != nil {
+		t.Errorf("other job gone after cascade: %v", err)
+	}
+}
+
+// TestRemoveFollowCascadeNotFound asserts an unknown id is reported as an error
+// so the API handler can map it to a 404.
+func TestRemoveFollowCascadeNotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.RemoveFollowCascade(context.Background(), 999999); err == nil {
+		t.Error("RemoveFollowCascade on an unknown id returned nil, want error")
 	}
 }
 

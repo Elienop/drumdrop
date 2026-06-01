@@ -226,3 +226,54 @@ it("shows 'Already queued' when download returns 200", async () => {
     expect(screen.getByText(/already queued/i)).toBeInTheDocument(),
   )
 })
+
+it("deletes a downloaded lesson via DELETE /api/lessons/{id}, confirms, and invalidates the lessons list", async () => {
+  let deletedId: string | null = null
+  // Count GET /api/lessons: the page mounts one list query, so a successful
+  // delete that invalidates ["lessons"] must trigger a SECOND list fetch.
+  // Dropping the ["lessons"] invalidate from deleteLesson.onSuccess leaves
+  // listFetches at 1 and fails here.
+  let listFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => {
+      listFetches++
+      return HttpResponse.json(lessons)
+    }),
+    http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
+      deletedId = params.id as string
+      return HttpResponse.json({
+        ...lessons[0],
+        status: "skipped",
+        error: "deleted",
+        output_dir: null,
+        video_path: null,
+        bytes: null,
+      })
+    }),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Lessons />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Single Stroke Roll")
+  await waitFor(() => expect(listFetches).toBe(1))
+  // The downloaded lesson (railcontent 100) offers Delete, not Download/Skip.
+  await user.click(screen.getByRole("button", { name: /actions for single stroke roll/i }))
+  expect(await screen.findByRole("menuitem", { name: /delete/i })).toBeInTheDocument()
+  expect(screen.queryByRole("menuitem", { name: /download/i })).not.toBeInTheDocument()
+  await user.click(screen.getByRole("menuitem", { name: /delete/i }))
+
+  // Confirm in the dialog before the request fires.
+  const dialog = await screen.findByRole("dialog")
+  expect(deletedId).toBeNull()
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+
+  await waitFor(() => expect(deletedId).toBe("100"))
+  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
+  // The invalidate refetched the list (dropped ["lessons"] invalidate stays at 1).
+  await waitFor(() => expect(listFetches).toBe(2))
+})
