@@ -79,9 +79,11 @@ var _ Store = (*database.Store)(nil)
 type Config struct {
 	// DownloadsDir is the root under which per-follow folders are created.
 	DownloadsDir string
-	// LibraryDir, when non-empty, is the root the Worker mirrors each finished
-	// lesson folder into (hardlink, copy-fallback) at the lesson's path relative
-	// to DownloadsDir. Empty disables the library mirror entirely.
+	// LibraryDir, when non-empty, is the root the Worker MOVES each finished
+	// lesson folder into (single location) at the lesson's path relative to
+	// DownloadsDir — os.Rename on the same filesystem, copy-tree + remove-source
+	// across filesystems. The downloads dir is then pure scratch. Empty disables
+	// the move: the lesson stays in DownloadsDir.
 	LibraryDir string
 	// Quality overrides each follow's saved quality when non-empty; empty means
 	// use the follow's own quality.

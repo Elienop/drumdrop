@@ -6,11 +6,11 @@ services:
       - "3737:8080"
     volumes:
       - drumdrop-config:/config
-      - ./downloads:/downloads
-      # Optional library mirror (DRUMDROP_LIBRARY_DIR below): for real hardlinks
-      # (zero extra disk) downloads and library must be ONE filesystem as the
+      - ./downloads:/downloads        # scratch for in-progress downloads
+      # Optional library (DRUMDROP_LIBRARY_DIR below): for an instant, atomic move
+      # (a plain rename) downloads and library must be ONE filesystem as the
       # container sees it — bind a single parent (e.g. /mnt/pool/media:/media) and
-      # point both dirs inside it. Two separate binds fall back to a byte copy.
+      # point both dirs inside it. Two separate binds fall back to a copy-then-delete.
     environment:
       - PUID=1000
       - PGID=1000
@@ -18,9 +18,10 @@ services:
       # REQUIRED (same 0.0.0.0 bind as prod): serve refuses to start without a
       # token. Generate one: `openssl rand -hex 32`.
       # - DRUMDROP_API_TOKEN=<paste a 64-char hex token here>
-      # Optional Plex library mirror: each finished lesson folder is hardlinked
-      # (copy-fallback) into this dir so Plex sees only finished files. See the
-      # single-parent bind-mount note above for true (zero-disk) hardlinks.
+      # Optional Plex library: each finished lesson folder is MOVED into this dir
+      # (single copy) so Plex sees only finished files and /downloads is scratch.
+      # Plex owns the path (no host-path mapping). See the single-parent bind-mount
+      # note above for an instant, atomic move. A move failure is non-fatal.
       # - DRUMDROP_LIBRARY_DIR=/media/library
       # Set to the ABSOLUTE host path of ./downloads so the UI's "Copy path" gives
       # a host path you can paste into a file manager (else it shows /downloads).

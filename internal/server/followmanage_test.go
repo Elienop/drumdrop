@@ -86,30 +86,27 @@ func TestUpdateFollowNotFound(t *testing.T) {
 }
 
 // seedDownloadedLesson upserts a lesson attributed to followID and marks it
-// downloaded with real on-disk files under downloads (and a library mirror under
-// library when non-empty). It returns the downloads output dir.
+// downloaded with real on-disk files at its single stored location: the library
+// path (rel under library) when library is non-empty — mirroring the worker's
+// move — otherwise the downloads path. It returns that stored output dir.
 func seedDownloadedLesson(t *testing.T, store *database.Store, downloads, library string, rcID int, followID int64, rel string) string {
 	t.Helper()
 	ctx := t.Context()
 	if err := store.UpsertLesson(ctx, rcID, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{Int64: followID, Valid: true}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	outDir := filepath.Join(downloads, rel)
+	// The single stored location: library when configured (post-move), else downloads.
+	root := downloads
+	if library != "" {
+		root = library
+	}
+	outDir := filepath.Join(root, rel)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll downloads: %v", err)
+		t.Fatalf("MkdirAll %q: %v", outDir, err)
 	}
 	video := filepath.Join(outDir, "v.mp4")
 	if err := os.WriteFile(video, []byte("video"), 0o644); err != nil {
-		t.Fatalf("WriteFile downloads: %v", err)
-	}
-	if library != "" {
-		libDir := filepath.Join(library, rel)
-		if err := os.MkdirAll(libDir, 0o755); err != nil {
-			t.Fatalf("MkdirAll library: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(libDir, "v.mp4"), []byte("video"), 0o644); err != nil {
-			t.Fatalf("WriteFile library: %v", err)
-		}
+		t.Fatalf("WriteFile %q: %v", video, err)
 	}
 	if err := store.MarkDownloaded(ctx, rcID, "1080", outDir, video, 5); err != nil {
 		t.Fatalf("MarkDownloaded: %v", err)
@@ -185,12 +182,9 @@ func TestDeleteFollowFilesTrue(t *testing.T) {
 	if _, err := store.GetLesson(ctx, 1001); err == nil {
 		t.Error("lesson still present after cascade")
 	}
-	// Files gone (both copies).
+	// The single stored location (the library path) is gone.
 	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
-		t.Errorf("downloads copy still present (err=%v)", err)
-	}
-	if _, err := os.Stat(filepath.Join(library, "01 - Lesson")); !os.IsNotExist(err) {
-		t.Errorf("library mirror still present (err=%v)", err)
+		t.Errorf("lesson files still present (err=%v)", err)
 	}
 }
 
@@ -221,12 +215,9 @@ func TestDeleteFollowFilesFalseKeepsFiles(t *testing.T) {
 	if _, err := store.GetFollow(ctx, follow.ID); err == nil {
 		t.Error("follow still present after delete")
 	}
-	// Files KEPT.
+	// Files KEPT (the single stored location survives a files=false delete).
 	if _, err := os.Stat(outDir); err != nil {
-		t.Errorf("downloads copy removed (err=%v), want kept when files=false", err)
-	}
-	if _, err := os.Stat(filepath.Join(library, "03 - Lesson")); err != nil {
-		t.Errorf("library mirror removed (err=%v), want kept when files=false", err)
+		t.Errorf("lesson files removed (err=%v), want kept when files=false", err)
 	}
 }
 
@@ -267,12 +258,9 @@ func TestDeleteLessonHandler(t *testing.T) {
 	if got.OutputDir != nil || got.VideoPath != nil || got.Bytes != nil {
 		t.Errorf("paths/bytes not cleared: output_dir=%v video_path=%v bytes=%v", got.OutputDir, got.VideoPath, got.Bytes)
 	}
-	// Files gone (both copies).
+	// The single stored location (the library path) is gone.
 	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
-		t.Errorf("downloads copy still present (err=%v)", err)
-	}
-	if _, err := os.Stat(filepath.Join(library, "04 - Lesson")); !os.IsNotExist(err) {
-		t.Errorf("library mirror still present (err=%v)", err)
+		t.Errorf("lesson files still present (err=%v)", err)
 	}
 }
 

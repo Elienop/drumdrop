@@ -24,11 +24,13 @@ type Config struct {
 	// empty (the default), lesson paths are returned exactly as stored.
 	DownloadsDir     string
 	HostDownloadsDir string
-	// LibraryDir is the root the worker mirrors finished lessons into (the Plex/
-	// media library hardlink tree), matching scheduler.Config.LibraryDir. The
-	// delete-files path removes a lesson's library mirror at
-	// filepath.Join(LibraryDir, rel(DownloadsDir, output_dir)). Empty (the
-	// default) means no library is configured: only the downloads copy is removed.
+	// LibraryDir is the root the worker MOVES finished lessons into (the Plex/
+	// media library), matching scheduler.Config.LibraryDir. When set, a lesson's
+	// stored output_dir is its library path, so the delete-files path removes that
+	// single location; LibraryDir is the second accepted root (besides
+	// DownloadsDir) for the delete guard. Empty (the default) means no library:
+	// lessons stay in downloads and output_dir is the downloads path. There is no
+	// host-path mapping for the library — Plex owns the path.
 	LibraryDir string
 }
 

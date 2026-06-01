@@ -415,21 +415,26 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		}
 
 		if derr == nil {
+			// Move the finished lesson into the library (single location) when
+			// configured, BEFORE producedVideo/MarkDownloaded so they record the
+			// LIBRARY path. The rename preserves the "NN - title" leaf, so
+			// producedVideo still finds <base>.mp4 at the new dir. Non-fatal: a move
+			// failure logs a warning and keeps dir as the scratch downloads path (the
+			// file is still there, the download succeeded); the move must never turn a
+			// successful download into a failure.
+			if w.Cfg.LibraryDir != "" {
+				if newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir); err != nil {
+					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
+				} else {
+					dir = newDir
+				}
+			}
 			videoPath, bytes := w.producedVideo(dir)
 			if err := w.Store.MarkDownloaded(ctx, id, quality, dir, videoPath, bytes); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
 			}
 			if err := w.Store.MarkJobDone(ctx, job.ID); err != nil {
 				fmt.Fprintf(w.log(), "  ⚠ mark job done %d: %v\n", job.ID, err)
-			}
-			// Mirror the finished lesson into the library (hardlink, copy-fallback)
-			// when configured. Non-fatal — like the aux-artifact fetches, a mirror
-			// failure logs a warning and the job still succeeds; the download itself
-			// is done and mirroring is secondary.
-			if w.Cfg.LibraryDir != "" {
-				if err := mirrorToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir, w.log()); err != nil {
-					fmt.Fprintf(w.log(), "  ⚠ mirror to library %d: %v\n", id, err)
-				}
 			}
 			fmt.Fprintf(w.log(), "  ✓ %d\n", id)
 			w.progress().Emit(ProgressEvent{
