@@ -17,6 +17,13 @@ type Config struct {
 	ListenAddr string
 	APIToken   string
 	CORSOrigin string
+	// DownloadsDir is the container-side download root the worker writes under (the
+	// stored output_dir/video_path prefix). HostDownloadsDir, when set, is the host
+	// path it is bind-mounted from; the lesson DTO rewrites the former prefix to the
+	// latter so the UI's "Copy path" resolves on the host. When HostDownloadsDir is
+	// empty (the default), lesson paths are returned exactly as stored.
+	DownloadsDir     string
+	HostDownloadsDir string
 }
 
 // Deps bundles the engine handles the write/sync handlers need beyond the

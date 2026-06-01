@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -30,6 +31,31 @@ func newTestStore(t *testing.T) *database.Store {
 		}
 	})
 	return store
+}
+
+// TestCreateFollowRejectsInvalidQuality verifies the create handler rejects a
+// quality outside the allowed preset set (400) and persists nothing, so a
+// malformed value can't slip through and silently degrade to an uncapped
+// download. The 400 fires before any musora resolve, so no network is touched.
+func TestCreateFollowRejectsInvalidQuality(t *testing.T) {
+	store := newTestStore(t)
+	srv := NewServer(store, Deps{}, nil, Config{}, "test")
+
+	body := `{"kind":"node","id":"123","quality":"1080p"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/follows", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	follows, err := store.ListFollows(t.Context())
+	if err != nil {
+		t.Fatalf("ListFollows: %v", err)
+	}
+	if len(follows) != 0 {
+		t.Errorf("follows persisted = %d, want 0 (invalid quality must not create a row)", len(follows))
+	}
 }
 
 func TestListFollows(t *testing.T) {

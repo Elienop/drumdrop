@@ -40,6 +40,12 @@ type Worker struct {
 	// It is nil by default; progress() substitutes a noopSink so callers emit
 	// unconditionally. engine.Build sets it via assignment after NewWorker.
 	Progress ProgressSink
+	// IsPaused, when non-nil and returning true, makes the drain loop stop
+	// claiming the NEXT job: the in-flight download finishes but no new one
+	// starts, honoring "pause = stop starting new ones" within an active cycle
+	// (the daemon's own pause flag only gates whole cycles). nil => never paused
+	// (the CLI sync path has no daemon). engine.Build wires it to Daemon.IsPaused.
+	IsPaused func() bool
 	// sleep waits between retry attempts. It defaults to time.Sleep; tests inject
 	// a no-op so retry paths run instantly.
 	sleep func(time.Duration)
@@ -223,6 +229,12 @@ func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err err
 		if err := ctx.Err(); err != nil {
 			return processed, nil
 		}
+		// Pause stops the queue from advancing: the in-flight download (if any)
+		// already finished this iteration; do not claim the next job. The leftover
+		// jobs stay queued and drain on the next cycle after Resume.
+		if w.IsPaused != nil && w.IsPaused() {
+			return processed, nil
+		}
 
 		job, ok, err := w.Store.ClaimNextJob(ctx)
 		if err != nil {
@@ -292,8 +304,13 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Err:           reason,
 			Time:          time.Now(),
 		})
-		_ = w.Store.MarkSkipped(ctx, id, reason)
-		_ = w.Store.MarkJobFailed(ctx, job.ID, reason)
+		// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
+		// landing mid-resolve reaches here with ctx already cancelled. Finalize via
+		// WithoutCancel (same reasoning as the cancel branch below) so the lesson is
+		// not stranded in its prior status with the job stuck 'running'.
+		finishCtx := context.WithoutCancel(ctx)
+		_ = w.Store.MarkSkipped(finishCtx, id, reason)
+		_ = w.Store.MarkJobFailed(finishCtx, job.ID, reason)
 		return
 	}
 
@@ -369,8 +386,16 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 
 		// Cancel-error-first: a CancelRunning kill (jobCtx cancelled) must never
 		// fall through to the success or failure branches. Clean the partials, mark
-		// the lesson skipped + the job canceled, and stop — no retry. The store
-		// writes use the outer ctx because jobCtx is already cancelled.
+		// the lesson skipped + the job canceled, and stop — no retry.
+		//
+		// The two finalization writes use context.WithoutCancel(ctx): on a user
+		// Cancel the outer ctx is still alive, but on SIGINT/SIGTERM shutdown the
+		// outer ctx is ALSO cancelled (it is what cancelled jobCtx), and a plain
+		// ctx here would make withTx's BeginTx fail immediately — stranding the job
+		// 'running' and the lesson 'downloading' until the next startup requeue.
+		// WithoutCancel keeps the deadline/values but drops cancellation so these
+		// short writes land; gracefulServe joins the daemon goroutine before
+		// closing the store, so the DB is still open when they run.
 		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
 			cleanupPartials(dir)
 			fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
@@ -383,8 +408,9 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 				Err:           "canceled",
 				Time:          time.Now(),
 			})
-			_ = w.Store.MarkSkipped(ctx, id, "canceled")
-			_ = w.Store.MarkJobCanceled(ctx, job.ID)
+			finishCtx := context.WithoutCancel(ctx)
+			_ = w.Store.MarkSkipped(finishCtx, id, "canceled")
+			_ = w.Store.MarkJobCanceled(finishCtx, job.ID)
 			return
 		}
 
@@ -433,8 +459,13 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	if lastErr != nil {
 		msg = lastErr.Error()
 	}
-	_ = w.Store.MarkFailed(ctx, id, msg)
-	_ = w.Store.MarkJobFailed(ctx, job.ID, msg)
+	// WithoutCancel for parity with the cancel/resolve branches: the per-attempt
+	// ctx.Err() guard makes a cancelled ctx here practically unreachable, but
+	// keeping all terminal writes uncancellable makes "shutdown never strands a
+	// job" a single, obvious invariant.
+	finishCtx := context.WithoutCancel(ctx)
+	_ = w.Store.MarkFailed(finishCtx, id, msg)
+	_ = w.Store.MarkJobFailed(finishCtx, job.ID, msg)
 }
 
 // outDir is the single source of truth for a job's output directory. An

@@ -14,6 +14,9 @@ services:
       # REQUIRED (same 0.0.0.0 bind as prod): serve refuses to start without a
       # token. Generate one: `openssl rand -hex 32`.
       # - DRUMDROP_API_TOKEN=<paste a 64-char hex token here>
+      # Set to the ABSOLUTE host path of ./downloads so the UI's "Copy path" gives
+      # a host path you can paste into a file manager (else it shows /downloads).
+      # - DRUMDROP_HOST_DOWNLOADS_DIR=/abs/path/to/drumdrop/downloads
     restart: unless-stopped
 
 volumes:

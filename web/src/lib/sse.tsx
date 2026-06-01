@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useReducer, useState, type ReactNode } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import type { ProgressEvent } from "@/types"
-import { getToken } from "./auth"
+import { getToken, subscribe } from "./auth"
 import { initialSSEState, invalidationKeys, seedFromSnapshot, sseReducer, type SSEState } from "./sse-reducer"
 
 interface SSEContextValue {
@@ -26,11 +26,25 @@ function reducer(state: SSEState, action: Action): SSEState {
 export function SSEProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, initialSSEState)
   const [connected, setConnected] = useState(false) // reactive so the chip re-renders
+  // Track the token in state so a change (entered via the gate or Settings, both
+  // of which call setToken) re-runs the connect effect below. EventSource can't
+  // send an Authorization header, so the token rides the URL as ?access_token —
+  // which means a token change MUST tear down and re-open the stream. Without this
+  // the stream stayed bolted to whatever token existed at first mount and 401-
+  // looped ("reconnecting…") until a full page reload.
+  const [token, setTok] = useState<string | null>(getToken)
   const qc = useQueryClient()
 
+  useEffect(() => subscribe((t) => setTok(t)), [])
+
   useEffect(() => {
-    const token = getToken()
-    const url = "/api/events" + (token ? `?access_token=${encodeURIComponent(token)}` : "")
+    // No credential yet: don't open a doomed connection that just 401-loops. The
+    // subscribe above reconnects once a token is set.
+    if (!token) {
+      setConnected(false)
+      return
+    }
+    const url = `/api/events?access_token=${encodeURIComponent(token)}`
     const es = new EventSource(url)
 
     es.addEventListener("ready", (e) => {
@@ -50,7 +64,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
     es.onerror = () => setConnected(false) // EventSource auto-reconnects; chip shows "reconnecting…"
 
     return () => es.close()
-  }, [qc])
+  }, [qc, token])
 
   return <SSEContext.Provider value={{ state, connected }}>{children}</SSEContext.Provider>
 }

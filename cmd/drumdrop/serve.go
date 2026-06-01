@@ -65,9 +65,11 @@ func cmdServe(argv []string) error {
 	daemon.Kick = kick
 
 	srvCfg := server.Config{
-		ListenAddr: opts.listen,
-		APIToken:   config.APIToken(),
-		CORSOrigin: config.CORSOrigin(),
+		ListenAddr:       opts.listen,
+		APIToken:         config.APIToken(),
+		CORSOrigin:       config.CORSOrigin(),
+		DownloadsDir:     cfg.DownloadsDir,
+		HostDownloadsDir: config.HostDownloadsDir(),
 	}
 	deps := server.Deps{
 		Planner:       planner,
