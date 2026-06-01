@@ -7,6 +7,13 @@ services:
     volumes:
       - drumdrop-config:/config       # DB + AES-GCM secret + cookie
       - ./downloads:/downloads        # your archive lands on the host disk
+      # For the optional library mirror (DRUMDROP_LIBRARY_DIR below), downloads and
+      # library MUST be one filesystem AS THE CONTAINER SEES IT for real hardlinks
+      # (zero extra disk). Bind a single parent and point both dirs inside it, e.g.:
+      #   - /mnt/pool/media:/media
+      # then set DRUMDROP_DOWNLOADS_DIR=/media/downloads/drumdrop and
+      # DRUMDROP_LIBRARY_DIR=/media/library. Two separate binds (as above) cross
+      # filesystems inside the container and silently fall back to a byte copy.
     environment:
       - PUID=1000
       - PGID=1000
@@ -18,6 +25,11 @@ services:
       # - DRUMDROP_INTERVAL=12h
       # - DRUMDROP_QUALITY=1080
       # - DRUMDROP_CORS_ORIGIN=https://drumdrop.example.com
+      # Optional Plex library mirror: when set, each finished lesson folder is
+      # hardlinked (copy-fallback) into this dir, so Plex watches a dir of ONLY
+      # finished files and never the in-progress partials in /downloads. See the
+      # single-parent bind-mount note above for true (zero-disk) hardlinks.
+      # - DRUMDROP_LIBRARY_DIR=/media/library
       # Set this to the SAME host path you bind-mount to /downloads above, and the
       # UI's "Copy path" yields a host path (paste-ready in your file manager)
       # instead of the container's /downloads. Leave unset to keep container paths.

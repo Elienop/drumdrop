@@ -1198,6 +1198,97 @@ func TestWorkerInstructorFollowGroupsByParentCourse(t *testing.T) {
 	}
 }
 
+// TestWorkerMirrorsToLibraryOnSuccess proves that with Cfg.LibraryDir set, a
+// successful download is mirrored into the library at the lesson's path relative
+// to DownloadsDir — the finished .mp4 appears under <library>/<...>/NN - title.
+func TestWorkerMirrorsToLibraryOnSuccess(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	library := filepath.Join(tmp, "lib")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.LibraryDir = library
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Fatalf("job status = %q, want done", got)
+	}
+
+	// The lesson folder is mirrored at the same relative path, with its .mp4.
+	wantVideo := filepath.Join(library, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4")
+	got, err := os.ReadFile(wantVideo)
+	if err != nil {
+		t.Fatalf("mirrored video missing: %v", err)
+	}
+	if string(got) != string(dl.writeMP4) {
+		t.Errorf("mirrored video content = %q, want %q", got, dl.writeMP4)
+	}
+	// True hardlink to the source (same tmp filesystem).
+	srcInfo, err := os.Stat(filepath.Join(downloads, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4"))
+	if err != nil {
+		t.Fatalf("stat source video: %v", err)
+	}
+	dstInfo, err := os.Stat(wantVideo)
+	if err != nil {
+		t.Fatalf("stat mirrored video: %v", err)
+	}
+	if !os.SameFile(srcInfo, dstInfo) {
+		t.Errorf("mirrored video is not a hardlink to the source")
+	}
+}
+
+// TestWorkerNoLibraryDirNoMirror proves that with an empty Cfg.LibraryDir the
+// worker writes nothing to any library and behaves exactly as before (job done,
+// downloads dir populated).
+func TestWorkerNoLibraryDirNoMirror(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	// Cfg.LibraryDir stays empty: feature off.
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	// Behavior unchanged: job done, the download landed under the downloads dir.
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Errorf("job status = %q, want done", got)
+	}
+	srcVideo := filepath.Join(downloads, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4")
+	if _, err := os.Stat(srcVideo); err != nil {
+		t.Errorf("download video missing: %v", err)
+	}
+	// No sibling "lib" tree was created — only the downloads dir exists under tmp.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("read tmp: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "dl" {
+			t.Errorf("unexpected dir %q under tmp, want only the downloads dir (no library written)", e.Name())
+		}
+	}
+}
+
 // TestWorkerInstructorFollowNoParentCourse proves a lesson under an instructor
 // follow with no parent course falls back to just "<instructor>/NN - <title>".
 func TestWorkerInstructorFollowNoParentCourse(t *testing.T) {

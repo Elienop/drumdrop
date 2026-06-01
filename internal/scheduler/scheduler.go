@@ -79,6 +79,10 @@ var _ Store = (*database.Store)(nil)
 type Config struct {
 	// DownloadsDir is the root under which per-follow folders are created.
 	DownloadsDir string
+	// LibraryDir, when non-empty, is the root the Worker mirrors each finished
+	// lesson folder into (hardlink, copy-fallback) at the lesson's path relative
+	// to DownloadsDir. Empty disables the library mirror entirely.
+	LibraryDir string
 	// Quality overrides each follow's saved quality when non-empty; empty means
 	// use the follow's own quality.
 	Quality string
