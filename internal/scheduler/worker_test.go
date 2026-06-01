@@ -1363,3 +1363,155 @@ func TestWorkerInstructorFollowNoParentCourse(t *testing.T) {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
 }
+
+// TestWorkerPlexTvLayoutOnSuccess proves that with Cfg.Layout="plex-tv" and a
+// LibraryDir set, a successful download is moved into the Plex TV layout:
+// <library>/<Show>/Season 01/<Show> - s01eNN - Title.mp4, with output_dir = the
+// Season folder and video_path = the episode mp4. The show is the node follow's
+// course title (flat, no NN-subfolder).
+func TestWorkerPlexTvLayoutOnSuccess(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 5, Valid: true}}
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	library := filepath.Join(tmp, "lib")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.LibraryDir = library
+	w.Cfg.Layout = "plex-tv"
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Fatalf("job status = %q, want done", got)
+	}
+
+	seasonDir := filepath.Join(library, "Beginner Course", "Season 01")
+	wantVideo := filepath.Join(seasonDir, "Beginner Course - s01e05 - Lesson A.mp4")
+	got, err := os.ReadFile(wantVideo)
+	if err != nil {
+		t.Fatalf("plex-tv video missing: %v", err)
+	}
+	if string(got) != string(dl.writeMP4) {
+		t.Errorf("moved video content = %q, want %q", got, dl.writeMP4)
+	}
+	// The scratch downloads lesson dir is gone.
+	srcDir := filepath.Join(downloads, "Beginner Course", "05 - Lesson A")
+	if _, err := os.Stat(srcDir); !os.IsNotExist(err) {
+		t.Errorf("downloads scratch lesson dir still present (stat err = %v), want moved away", err)
+	}
+	// output_dir is the SEASON folder; video_path is the episode mp4.
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("markDownloaded calls = %d, want 1", len(store.markDownloaded))
+	}
+	if got := store.markDownloaded[0].outputDir; got != seasonDir {
+		t.Errorf("outputDir = %q, want season dir %q", got, seasonDir)
+	}
+	if got := store.markDownloaded[0].videoPath; got != wantVideo {
+		t.Errorf("videoPath = %q, want %q", got, wantVideo)
+	}
+	if got := store.markDownloaded[0].bytes; got != int64(len(dl.writeMP4)) {
+		t.Errorf("bytes = %d, want %d", got, len(dl.writeMP4))
+	}
+}
+
+// TestWorkerPlexTvLayoutNoLibraryKeepsInDownloads proves plex-tv has no effect
+// without a LibraryDir: the file stays in the default downloads layout.
+func TestWorkerPlexTvLayoutNoLibraryKeepsInDownloads(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.Layout = "plex-tv" // but no LibraryDir
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	srcDir := filepath.Join(downloads, "Beginner Course", "01 - Lesson A")
+	if _, err := os.Stat(filepath.Join(srcDir, "01 - Lesson A.mp4")); err != nil {
+		t.Errorf("download video missing: %v", err)
+	}
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != srcDir {
+		t.Errorf("outputDir = %+v, want downloads path %q (plex-tv no-op without library)", store.markDownloaded, srcDir)
+	}
+}
+
+// TestPlexShow exercises the flattened show resolution for each follow shape:
+// node -> course title; instructor with a parent course -> the parent course
+// (flat, NOT <instructor>/<course>); course-less instructor -> instructor name;
+// no follow -> parent title else content-<id>.
+func TestPlexShow(t *testing.T) {
+	withParent := func(l *musora.Lesson, title string) *musora.Lesson {
+		l.ParentContentData = []struct {
+			Title string `json:"title"`
+		}{{Title: title}}
+		return l
+	}
+
+	tests := []struct {
+		name   string
+		follow database.Follow
+		job    database.Job
+		lesson *musora.Lesson
+		want   string
+	}{
+		{
+			name:   "node follow uses course title",
+			follow: nodeFollow(),
+			job:    queuedJob(1, nodeFollow().ID, 100),
+			lesson: lesson(100, "L"),
+			want:   "Beginner Course",
+		},
+		{
+			name:   "instructor with parent course flattens to the course",
+			follow: instructorFollow(),
+			job:    queuedJob(1, instructorFollow().ID, 100),
+			lesson: withParent(lesson(100, "L"), "Hand Technique"),
+			want:   "Hand Technique",
+		},
+		{
+			name:   "course-less instructor falls back to instructor name",
+			follow: instructorFollow(),
+			job:    queuedJob(1, instructorFollow().ID, 100),
+			lesson: lesson(100, "L"),
+			want:   "Mike Johnston",
+		},
+		{
+			name:   "no follow uses parent title",
+			follow: database.Follow{},
+			job:    database.Job{ID: 1, RailcontentID: 100},
+			lesson: withParent(lesson(100, "L"), "Some Course"),
+			want:   "Some Course",
+		},
+		{
+			name:   "no follow no parent uses content id",
+			follow: database.Follow{},
+			job:    database.Job{ID: 1, RailcontentID: 777},
+			lesson: lesson(777, "L"),
+			want:   "content-777",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := plexShow(tc.follow, tc.job, tc.lesson); got != tc.want {
+				t.Errorf("plexShow = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

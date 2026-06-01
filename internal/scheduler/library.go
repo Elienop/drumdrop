@@ -7,7 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/elienop/drumdrop/internal/musora"
 )
+
+// LayoutPlexTV is the DRUMDROP_LAYOUT value (lower-cased) that selects Plex's
+// TV-Shows library layout for the move target. Any other value (including "" and
+// "default") keeps the per-lesson-subfolder layout.
+const LayoutPlexTV = "plex-tv"
 
 // rename is the move primitive moveToLibrary uses, isolated behind a package var
 // so a test can force the cross-filesystem copy fallback. It defaults to
@@ -73,6 +80,83 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 		return dstDir, fmt.Errorf("remove source after copy %q: %w", lessonDir, rerr)
 	}
 	return dstDir, nil
+}
+
+// moveToLibraryPlexTV moves the finished lesson's files out of the scratch
+// lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each file
+// from its scratch "NN - Title" base to the episode base
+// "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>" while preserving the suffix
+// (".mp4", ".en.vtt", ".nfo", "-poster.jpg", …). Files end up FLAT in the season
+// folder, which is shared across the show's episodes. It returns the season dir
+// and the moved episode .mp4 path (empty if no .mp4 was present, e.g.
+// ResourcesOnly). The emptied scratch lessonDir is removed after.
+//
+// Move semantics mirror moveToLibrary: try the rename seam first, fall back to a
+// per-file copyFile + remove-source on ANY rename error (cross-filesystem). Unlike
+// moveToLibrary it composes the destination from show/season directly rather than
+// from a downloads-relative path, but it still guards the scratch lessonDir: a
+// "." / ".." / ".."-prefixed / absolute Base would be a malformed scratch path, so
+// it refuses before any write. The error is for the caller to LOG; the move is
+// non-fatal and must never fail the job.
+func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string) (seasonDir, videoPath string, err error) {
+	scratchBase := filepath.Base(lessonDir)
+	// A malformed scratch base (root, escape, absolute) would make the per-file
+	// TrimPrefix below meaningless and could read an unexpected dir; refuse it.
+	if scratchBase == "." || scratchBase == ".." || strings.HasPrefix(scratchBase, ".."+string(filepath.Separator)) || filepath.IsAbs(scratchBase) {
+		return "", "", fmt.Errorf("malformed scratch lesson dir %q", lessonDir)
+	}
+
+	episodeBase := fmt.Sprintf("%s - s%02de%02d - %s", musora.Sanitize(show), season, episode, musora.Sanitize(title))
+	seasonDir = filepath.Join(libraryDir, musora.Sanitize(show), fmt.Sprintf("Season %02d", season))
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create season dir %q: %w", seasonDir, err)
+	}
+
+	entries, err := os.ReadDir(lessonDir)
+	if err != nil {
+		return "", "", fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue // drumdrop produces a flat lesson dir; ignore any nested dir
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			return "", "", fmt.Errorf("stat scratch file %q: %w", e.Name(), ierr)
+		}
+		if !info.Mode().IsRegular() {
+			continue // skip symlinks/devices: drumdrop only produces regular files
+		}
+		name := e.Name()
+		// Reuse the scratch base, swapping it for the episode base so the suffix
+		// (and thus the sidecar's role: .nfo/.vtt/-poster.jpg) is preserved.
+		newName := episodeBase + strings.TrimPrefix(name, scratchBase)
+		src := filepath.Join(lessonDir, name)
+		dst := filepath.Join(seasonDir, newName)
+
+		if rerr := rename(src, dst); rerr != nil {
+			// Cross-filesystem (or otherwise unrenamable): copy the single file then
+			// drop the source. A copy failure leaves the source in place.
+			if cerr := copyFile(src, dst, info.Mode()); cerr != nil {
+				return "", "", fmt.Errorf("copy %q -> %q (rename failed: %v): %w", src, dst, rerr, cerr)
+			}
+			if rmerr := os.Remove(src); rmerr != nil {
+				return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
+			}
+		}
+		if name == scratchBase+".mp4" {
+			videoPath = dst
+		}
+	}
+
+	// Remove the now-emptied scratch lesson dir (best-effort: a leftover scratch
+	// dir is a warn-worthy stray, not a lost file). Any nested non-regular content
+	// we skipped above stays in the source, so RemoveAll cleans the whole leaf.
+	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
+		return seasonDir, videoPath, fmt.Errorf("remove emptied scratch dir %q: %w", lessonDir, rmerr)
+	}
+	return seasonDir, videoPath, nil
 }
 
 // copyTree recursively copies the file tree at src into dst, recreating

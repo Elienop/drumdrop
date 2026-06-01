@@ -287,7 +287,7 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 				// Best-effort: use the RAW stored container path (not the host-mapped
 				// DTO). A failure is logged-by-being-ignored — file cleanup must not
 				// block removing the follow records.
-				_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String)
+				_ = removeLessonFiles(s.cfg.Layout, s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
 			}
 		}
 	}

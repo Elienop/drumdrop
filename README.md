@@ -30,6 +30,7 @@ the defaults give a working setup with no env at all.
 | `DRUMDROP_CONFIG_DIR` | `~/.config/drumdrop` | Directory for all at-rest state: `drumdrop.db` (follow/download state), `secret.key` (credential-encryption key), `credentials.enc` (encrypted login), `session.cookie` (saved session). Override to relocate the whole config directory. |
 | `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. |
 | `DRUMDROP_LIBRARY_DIR` | _(none)_ | Optional Plex library. When set, each finished lesson folder is **moved** into this dir at the same path relative to the downloads root — a single copy, Sonarr-style. The downloads dir is then pure scratch for in-progress downloads; Plex watches a directory of **only** finished files and never the partials. drumdrop records the library path as the lesson's location, and Plex owns the file from there (no host-path mapping). Empty disables the move: the lesson stays in the downloads dir. For an **instant, atomic** move, downloads and library must be on **one filesystem as the process/container sees it** (see [single-parent bind mount](#run-with-docker)); across filesystems it falls back to a copy-then-delete. |
+| `DRUMDROP_LAYOUT` | _(none)_ | Library destination layout (case-insensitive). Empty or `default` keeps the per-lesson-subfolder layout (`<library>/Course/NN - Lesson/…`). `plex-tv` switches the library copy to Plex's TV-Shows naming — see [Plex TV layout](#plex-tv-layout). Requires `DRUMDROP_LIBRARY_DIR`; has no effect without one. It shapes **only** the library move target, not the in-progress scratch layout. |
 | `DRUMDROP_LISTEN` | `127.0.0.1:8080` | Address `serve` binds. A non-loopback bind (e.g. `0.0.0.0:8080`, as in the Docker image) refuses to start without `DRUMDROP_API_TOKEN`. |
 | `DRUMDROP_API_TOKEN` | _(none)_ | Bearer token for the `/api/*` data plane. Required for any non-loopback bind; the SPA shell stays unauthenticated. |
 | `DRUMDROP_CORS_ORIGIN` | _(none)_ | Allowed CORS origin for the HTTP API. Empty disables cross-origin requests. |
@@ -216,6 +217,33 @@ Point Plex at `/mnt/pool/media/library`. Two **separate** binds (e.g. `./downloa
 and `./library:/library`) cross filesystems inside the container, so the move falls back
 to a copy-then-delete (correct, just not instant). A move failure is non-fatal: the
 download still succeeds and the file stays in the downloads dir.
+
+#### Plex TV layout
+
+Set `DRUMDROP_LAYOUT=plex-tv` (alongside `DRUMDROP_LIBRARY_DIR`) to make the **library
+copy** use Plex's TV-Shows naming instead of the default `Course/NN - Lesson/…` folders.
+Each course becomes one *show*, each lesson an *episode*:
+
+```
+<library>/<Show>/Season 01/
+    <Show> - s01e05 - Day 4 — Workout.mp4
+    <Show> - s01e05 - Day 4 — Workout.en.vtt     ← sidecars share the episode base
+    <Show> - s01e05 - Day 4 — Workout.nfo
+    <Show> - s01e05 - Day 4 — Workout-poster.jpg
+```
+
+- **Show** — the course for a node follow; the lesson's parent course for an instructor
+  follow (falling back to the instructor name for course-less lessons); else `content-<id>`.
+- **Season** is always `01`; the **episode number** is the lesson's position in the course
+  (the same `NN` used in the default layout). Files are flat in the season folder.
+- It shapes **only** the library move: downloads still happen in the usual scratch layout,
+  and a move failure is non-fatal (the file stays in downloads). With no `DRUMDROP_LIBRARY_DIR`
+  the setting does nothing.
+
+**On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
+enable the **Local Media Assets** agent for it (Settings → Agents → *TV Shows*, or mark the
+show as *personal media*). The show won't match TheTVDB, so Plex reads the episode number
+and title straight from the filenames — which is exactly what this layout encodes.
 
 ### Standalone binary
 

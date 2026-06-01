@@ -215,3 +215,129 @@ func TestMoveToLibraryRejectsOutsideRoot(t *testing.T) {
 		t.Errorf("library dir created despite rejection (stat err = %v)", err)
 	}
 }
+
+// plexFiles maps each sidecar/video suffix to the content seedLesson wrote, so a
+// plex-tv move can be checked for an exact rename of every file.
+var plexFiles = map[string]string{
+	".mp4":        "video-bytes",
+	".nfo":        "<nfo/>",
+	"-poster.jpg": "poster-bytes",
+	".en.vtt":     "WEBVTT",
+}
+
+// TestMoveToLibraryPlexTV proves that moveToLibraryPlexTV flattens the scratch
+// "NN - Title" lesson into <lib>/<Show>/Season 01/ with every file renamed to the
+// episode base "<Show> - s01eNN - Title<suffix>", content intact, the scratch dir
+// removed, and the returned videoPath pointing at the moved .mp4.
+func TestMoveToLibraryPlexTV(t *testing.T) {
+	_, lessonDir := seedLesson(t)
+	libraryDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(lessonDir)))), "lib")
+
+	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
+	if err != nil {
+		t.Fatalf("moveToLibraryPlexTV: %v", err)
+	}
+
+	wantSeason := filepath.Join(libraryDir, "Beginner Course", "Season 01")
+	if seasonDir != wantSeason {
+		t.Errorf("seasonDir = %q, want %q", seasonDir, wantSeason)
+	}
+	base := "Beginner Course - s01e05 - Lesson Five"
+	wantVideo := filepath.Join(wantSeason, base+".mp4")
+	if videoPath != wantVideo {
+		t.Errorf("videoPath = %q, want %q", videoPath, wantVideo)
+	}
+	// Every file is flat in the season folder under the episode base, content intact.
+	for suffix, body := range plexFiles {
+		p := filepath.Join(wantSeason, base+suffix)
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("missing moved file %s: %v", base+suffix, err)
+			continue
+		}
+		if string(got) != body {
+			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+		}
+	}
+	// The scratch lesson dir is gone.
+	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
+		t.Errorf("scratch lesson dir still present (stat err = %v), want removed", err)
+	}
+}
+
+// TestMoveToLibraryPlexTVCrossFsFallback proves the per-file copy fallback runs
+// when rename fails (cross-filesystem): files land in the season folder and the
+// scratch source is removed.
+func TestMoveToLibraryPlexTVCrossFsFallback(t *testing.T) {
+	_, lessonDir := seedLesson(t)
+	libraryDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(lessonDir)))), "lib")
+
+	orig := rename
+	rename = func(oldpath, newpath string) error { return errInjectedRename }
+	t.Cleanup(func() { rename = orig })
+
+	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
+	if err != nil {
+		t.Fatalf("moveToLibraryPlexTV: %v", err)
+	}
+	base := "Beginner Course - s01e05 - Lesson Five"
+	if videoPath != filepath.Join(seasonDir, base+".mp4") {
+		t.Errorf("videoPath = %q, want %q", videoPath, filepath.Join(seasonDir, base+".mp4"))
+	}
+	for suffix, body := range plexFiles {
+		got, err := os.ReadFile(filepath.Join(seasonDir, base+suffix))
+		if err != nil {
+			t.Errorf("missing copied file %s: %v", base+suffix, err)
+			continue
+		}
+		if string(got) != body {
+			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+		}
+	}
+	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
+		t.Errorf("scratch lesson dir still present after copy fallback (stat err = %v), want removed", err)
+	}
+}
+
+// TestMoveToLibraryPlexTVSharedSeason proves two episodes moved into the SAME show
+// land flat in one shared "Season 01" folder, each under its own episode base, and
+// neither move clobbers the other's files.
+func TestMoveToLibraryPlexTVSharedSeason(t *testing.T) {
+	tmp := t.TempDir()
+	libraryDir := filepath.Join(tmp, "lib")
+	mkScratch := func(idx int, title string) string {
+		base := filepath.Base(filepathFor(idx, title))
+		dir := filepath.Join(tmp, "dl", base)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir scratch: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, base+".mp4"), []byte("v"+title), 0o644); err != nil {
+			t.Fatalf("write mp4: %v", err)
+		}
+		return dir
+	}
+
+	s1 := mkScratch(5, "Five")
+	if _, _, err := moveToLibraryPlexTV(libraryDir, "Show", 1, 5, "Five", s1); err != nil {
+		t.Fatalf("move e05: %v", err)
+	}
+	s2 := mkScratch(6, "Six")
+	season, _, err := moveToLibraryPlexTV(libraryDir, "Show", 1, 6, "Six", s2)
+	if err != nil {
+		t.Fatalf("move e06: %v", err)
+	}
+
+	// Both episodes coexist in the one season folder.
+	if _, err := os.Stat(filepath.Join(season, "Show - s01e05 - Five.mp4")); err != nil {
+		t.Errorf("e05 missing from shared season: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(season, "Show - s01e06 - Six.mp4")); err != nil {
+		t.Errorf("e06 missing from shared season: %v", err)
+	}
+}
+
+// filepathFor builds the scratch "NN - Sanitize(title)" base name a download would
+// produce, used to seed shared-season scratch dirs in the test above.
+func filepathFor(idx int, title string) string {
+	return lessonDir("", idx, title)
+}

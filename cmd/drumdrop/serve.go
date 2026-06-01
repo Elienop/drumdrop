@@ -71,6 +71,7 @@ func cmdServe(argv []string) error {
 		DownloadsDir:     cfg.DownloadsDir,
 		HostDownloadsDir: config.HostDownloadsDir(),
 		LibraryDir:       cfg.LibraryDir,
+		Layout:           cfg.Layout,
 	}
 	deps := server.Deps{
 		Planner:       planner,

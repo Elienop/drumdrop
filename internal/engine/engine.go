@@ -73,6 +73,9 @@ func Config(out, quality string, resourcesOnly bool) scheduler.Config {
 	// The library mirror is env-only (like DRUMDROP_HOST_DOWNLOADS_DIR), so all of
 	// sync/daemon/serve inherit it through this single wiring point. Empty = off.
 	cfg.LibraryDir = config.LibraryDir()
+	// Layout is env-only too (DRUMDROP_LAYOUT, lower-cased): "" = default,
+	// "plex-tv" = Plex TV-Shows naming for the library move.
+	cfg.Layout = config.Layout()
 	return cfg
 }
 

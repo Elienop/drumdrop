@@ -85,6 +85,11 @@ type Config struct {
 	// across filesystems. The downloads dir is then pure scratch. Empty disables
 	// the move: the lesson stays in DownloadsDir.
 	LibraryDir string
+	// Layout selects the library destination layout (lower-cased upstream). ""
+	// or "default" keeps today's per-lesson-subfolder layout; "plex-tv" emits
+	// Plex's TV-Shows naming when LibraryDir is set. It shapes ONLY the move
+	// target; the scratch download layout under DownloadsDir is unchanged.
+	Layout string
 	// Quality overrides each follow's saved quality when non-empty; empty means
 	// use the follow's own quality.
 	Quality string
