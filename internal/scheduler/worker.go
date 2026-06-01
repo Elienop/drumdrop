@@ -450,6 +450,16 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 						}
 					}
 					recorded = true
+					// Overwrite the moved <movie> nfo with an <episodedetails> nfo so a
+					// Plex TV-Shows library (which can't match Drumeo to TheTVDB) gets the
+					// real episode title/season/episode from local metadata. Same path the
+					// move renamed the download-time nfo to (plexEpisodeBase). Non-fatal:
+					// the .mp4 + move already landed, so a write error just logs and the job
+					// still succeeds — like the aux-artifact fetches.
+					nfoPath := filepath.Join(seasonDir, plexEpisodeBase(show, lesson.Title, 1, index)+".nfo")
+					if err := os.WriteFile(nfoPath, []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)), 0o644); err != nil {
+						fmt.Fprintf(w.log(), "  ⚠ episode nfo %d: %v\n", id, err)
+					}
 				}
 			} else if w.Cfg.LibraryDir != "" {
 				// Default layout: move the whole "NN - title" leaf into the library at

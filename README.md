@@ -228,7 +228,7 @@ Each course becomes one *show*, each lesson an *episode*:
 <library>/<Show>/Season 01/
     <Show> - s01e05 - Day 4 — Workout.mp4
     <Show> - s01e05 - Day 4 — Workout.en.vtt     ← sidecars share the episode base
-    <Show> - s01e05 - Day 4 — Workout.nfo
+    <Show> - s01e05 - Day 4 — Workout.nfo        ← Kodi/Plex <episodedetails> (title/aired/instructor)
     <Show> - s01e05 - Day 4 — Workout-poster.jpg
 ```
 
@@ -239,11 +239,18 @@ Each course becomes one *show*, each lesson an *episode*:
 - It shapes **only** the library move: downloads still happen in the usual scratch layout,
   and a move failure is non-fatal (the file stays in downloads). With no `DRUMDROP_LIBRARY_DIR`
   the setting does nothing.
+- The `.nfo` written here is a Kodi/Plex **`<episodedetails>`** doc (not the default
+  `<movie>`): it carries the episode `<title>`, `<showtitle>`, `<season>`/`<episode>`,
+  `<aired>` (publish date), the instructor `<actor>`, and the lesson plot/runtime. Writing
+  it is non-fatal — a write failure logs a warning and the download still succeeds.
 
 **On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
 enable the **Local Media Assets** agent for it (Settings → Agents → *TV Shows*, or mark the
-show as *personal media*). The show won't match TheTVDB, so Plex reads the episode number
-and title straight from the filenames — which is exactly what this layout encodes.
+show as *personal media*). The show won't match TheTVDB, so Plex reads the episode number,
+title, and summary from the local `<episodedetails>` nfo (and the filenames) — which is
+exactly what this layout encodes. The Local Media Assets agent (or, on older Plex/Kodi
+setups, the **XBMCnfoTVImporter** plugin) is required for Plex to read the episode titles
+from those nfos; without it Plex shows generic "Episode N".
 
 ### Standalone binary
 
