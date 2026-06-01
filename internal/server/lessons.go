@@ -21,7 +21,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 			writeStoreErr(w, err, "lessons not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, lessonDTOs(lessons))
+		writeJSON(w, http.StatusOK, s.viewLessons(lessons))
 		return
 	}
 
@@ -38,7 +38,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "lessons not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, lessonDTOs(lessons))
+	writeJSON(w, http.StatusOK, s.viewLessons(lessons))
 }
 
 // handleGetLesson serves GET /api/lessons/{id}: the single lesson keyed by its
@@ -53,7 +53,7 @@ func (s *Server) handleGetLesson(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, lessonDTO(l))
+	writeJSON(w, http.StatusOK, s.viewLesson(l))
 }
 
 // skipLessonRequest is the optional POST /api/lessons/{id}/skip body. reason is
@@ -129,7 +129,7 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, lessonDTO(l))
+	writeJSON(w, http.StatusOK, s.viewLesson(l))
 }
 
 // handleUnskipLesson serves POST /api/lessons/{id}/unskip: it resets a skipped
@@ -156,7 +156,7 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, lessonDTO(l))
+	writeJSON(w, http.StatusOK, s.viewLesson(l))
 }
 
 // queryInt parses an optional integer query param. An empty value is treated as

@@ -18,6 +18,10 @@ services:
       # - DRUMDROP_INTERVAL=12h
       # - DRUMDROP_QUALITY=1080
       # - DRUMDROP_CORS_ORIGIN=https://drumdrop.example.com
+      # Set this to the SAME host path you bind-mount to /downloads above, and the
+      # UI's "Copy path" yields a host path (paste-ready in your file manager)
+      # instead of the container's /downloads. Leave unset to keep container paths.
+      # - DRUMDROP_HOST_DOWNLOADS_DIR=/srv/drumdrop/downloads
     restart: unless-stopped
 
 volumes:

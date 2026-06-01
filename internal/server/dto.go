@@ -4,6 +4,8 @@ package server
 
 import (
 	"database/sql"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -152,6 +154,43 @@ func jobDTO(j database.Job) JobDTO {
 		StartedAt:     nullTime(j.StartedAt),
 		FinishedAt:    nullTime(j.FinishedAt),
 	}
+}
+
+// hostPath rewrites a stored container download path to its host equivalent when
+// a host downloads dir is configured (DRUMDROP_HOST_DOWNLOADS_DIR), so the UI's
+// "Copy path" yields a path that resolves on the host rather than the container's
+// internal /downloads. A nil pointer, an unset HostDownloadsDir/DownloadsDir, or
+// a path that is not under DownloadsDir is returned unchanged.
+func (s *Server) hostPath(p *string) *string {
+	if p == nil || s.cfg.HostDownloadsDir == "" || s.cfg.DownloadsDir == "" {
+		return p
+	}
+	rel, err := filepath.Rel(s.cfg.DownloadsDir, *p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p // not under the container downloads root: leave as-is
+	}
+	mapped := filepath.Join(s.cfg.HostDownloadsDir, rel)
+	return &mapped
+}
+
+// viewLesson maps a lesson to its wire shape with the on-disk paths rewritten to
+// the host (see hostPath). Handlers use this instead of the bare lessonDTO so the
+// output_dir/video_path the UI shows and copies resolve on the host.
+func (s *Server) viewLesson(l database.Lesson) LessonDTO {
+	d := lessonDTO(l)
+	d.OutputDir = s.hostPath(d.OutputDir)
+	d.VideoPath = s.hostPath(d.VideoPath)
+	return d
+}
+
+// viewLessons is viewLesson over a slice, returning a non-nil empty slice for
+// empty/nil input so the JSON array is [] rather than null.
+func (s *Server) viewLessons(ls []database.Lesson) []LessonDTO {
+	out := make([]LessonDTO, 0, len(ls))
+	for _, l := range ls {
+		out = append(out, s.viewLesson(l))
+	}
+	return out
 }
 
 // followDTOs maps a slice of follows to wire shapes, returning a non-nil empty

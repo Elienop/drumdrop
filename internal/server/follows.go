@@ -75,7 +75,7 @@ func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 	if status := r.URL.Query().Get("status"); status != "" {
 		lessons = filterLessonsByStatus(lessons, status)
 	}
-	writeJSON(w, http.StatusOK, lessonDTOs(lessons))
+	writeJSON(w, http.StatusOK, s.viewLessons(lessons))
 }
 
 // handleCreateFollow serves POST /api/follows. It mirrors the CLI follow path:
@@ -85,6 +85,19 @@ func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 // and 400s when the slug matches no instructor. An already-followed target is
 // idempotent: it returns 200 with the existing row rather than 409. A bad kind,
 // an id with no digits, or a missing slug is a 400.
+// allowedQualities is the set the Add-follow UI offers. The create handler
+// rejects anything else (400) so a malformed value can't be persisted and then
+// silently degrade to an uncapped download — FormatSelector falls back to best
+// on a non-numeric quality, so without this guard "1080p" would download full-res.
+var allowedQualities = map[string]struct{}{
+	"best": {}, "2160": {}, "1440": {}, "1080": {}, "720": {}, "480": {},
+}
+
+func validQuality(q string) bool {
+	_, ok := allowedQualities[q]
+	return ok
+}
+
 func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 	var req createFollowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -99,6 +112,10 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 	quality := req.Quality
 	if quality == "" {
 		quality = "best"
+	}
+	if !validQuality(quality) {
+		writeErr(w, http.StatusBadRequest, "quality must be one of: best, 2160, 1440, 1080, 720, 480")
+		return
 	}
 
 	switch req.Kind {

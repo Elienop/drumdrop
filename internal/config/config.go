@@ -32,6 +32,13 @@ func DownloadsDir() string {
 	return "./downloads"
 }
 
+// HostDownloadsDir is the host path that the container's DownloadsDir is
+// bind-mounted from, read at call time from DRUMDROP_HOST_DOWNLOADS_DIR. It is
+// used only to rewrite the stored (container) download paths in the API so the
+// UI's "Copy path" resolves on the host. Empty (the default) leaves paths as the
+// container sees them.
+func HostDownloadsDir() string { return os.Getenv("DRUMDROP_HOST_DOWNLOADS_DIR") }
+
 // ListenAddr is the host:port the HTTP API binds to. It is resolved at call
 // time via DRUMDROP_LISTEN; when unset it defaults to loopback 127.0.0.1:8080.
 func ListenAddr() string {
