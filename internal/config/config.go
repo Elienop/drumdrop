@@ -32,12 +32,12 @@ func DownloadsDir() string {
 	return "./downloads"
 }
 
-// LibraryDir is the root directory the daemon mirrors finished lessons into,
+// LibraryDir is the root directory the daemon MOVES finished lessons into,
 // read at call time from DRUMDROP_LIBRARY_DIR. Empty (the default) disables the
-// library mirror entirely — byte-for-byte the prior behavior, no library writes.
-// When set, each finished lesson folder is hardlinked (copy-fallback) into this
-// dir at the same path relative to DownloadsDir, so a Plex library can watch it
-// without ever seeing the in-progress partials in the downloads dir.
+// move entirely — byte-for-byte the prior behavior, lessons stay in the downloads
+// dir. When set, each finished lesson folder is moved into this dir (single
+// location) at the same path relative to DownloadsDir, so a Plex library owns the
+// file and never sees the in-progress partials in the downloads scratch dir.
 func LibraryDir() string { return os.Getenv("DRUMDROP_LIBRARY_DIR") }
 
 // HostDownloadsDir is the host path that the container's DownloadsDir is

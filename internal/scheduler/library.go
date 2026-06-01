@@ -9,136 +9,102 @@ import (
 	"strings"
 )
 
-// hardlink is the link primitive mirrorToLibrary uses, isolated behind a package
-// var so a test can record link order or force the copy fallback. It defaults to
-// os.Link (which exists on every release target, Windows included); the
-// copy-fallback on ANY link error means no Unix-only errno is ever referenced, so
-// the cross-platform builds stay green.
-var hardlink = os.Link
+// rename is the move primitive moveToLibrary uses, isolated behind a package var
+// so a test can force the cross-filesystem copy fallback. It defaults to
+// os.Rename (which exists on every release target, Windows included); the
+// copy-tree fallback on ANY rename error means no Unix-only errno is ever
+// referenced, so the cross-platform builds stay green.
+var rename = os.Rename
 
-// mirrorToLibrary hardlinks (with a byte-copy fallback) every regular file in
-// lessonDir into libraryDir at lessonDir's path relative to downloadsDir, linking
-// the video file(s) LAST so a Plex scan landing mid-mirror can never see the .mp4
-// before its sidecar metadata is already in place.
+// moveToLibrary moves lessonDir into libraryDir at lessonDir's path relative to
+// downloadsDir, returning the new (library) dir. It tries os.Rename first
+// (instant and atomic on the same filesystem); on a cross-filesystem rename
+// error it falls back to copying the tree then removing the source. The
+// downloads folder is gone after a successful move.
 //
-// It is best-effort and idempotent: a destination that is already the same inode
-// (os.SameFile) is skipped; a stale destination is removed and re-linked; on any
-// link error the file is copied instead (cross-filesystem dst, etc.). It returns
-// an error for the caller to LOG — the caller treats library mirroring as
-// non-fatal and must never fail the job on it. lessonDir must live under
-// downloadsDir; otherwise it returns an error and writes nothing.
-func mirrorToLibrary(downloadsDir, libraryDir, lessonDir string, log io.Writer) error {
-	if log == nil {
-		log = io.Discard
-	}
-
-	// Mirror at the same path relative to the downloads root. Reject a lessonDir
+// It rejects a lessonDir that is not under downloadsDir (rel ".", "..", an
+// absolute Rel result) before any write, so a stray path can never land outside
+// the library. The destination parent is created; an existing destination (a
+// re-download) is removed first so the move replaces it. It returns the new dir
+// and an error for the caller to LOG — the caller treats the move as non-fatal
+// and must never fail the job on it.
+func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, err error) {
+	// Move to the same path relative to the downloads root. Reject a lessonDir
 	// that escapes the root (".." prefix or an absolute Rel result) before any
 	// write, so a stray path can never land outside the library.
 	rel, err := filepath.Rel(downloadsDir, lessonDir)
 	if err != nil {
-		return fmt.Errorf("relativize %q under %q: %w", lessonDir, downloadsDir, err)
+		return "", fmt.Errorf("relativize %q under %q: %w", lessonDir, downloadsDir, err)
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("lesson dir %q is not under downloads dir %q", lessonDir, downloadsDir)
+		return "", fmt.Errorf("lesson dir %q is not under downloads dir %q", lessonDir, downloadsDir)
 	}
 	dstDir := filepath.Join(libraryDir, rel)
 
-	entries, err := os.ReadDir(lessonDir)
-	if err != nil {
-		return fmt.Errorf("read lesson dir %q: %w", lessonDir, err)
+	// Destination == source (e.g. libraryDir == downloadsDir): the lesson is
+	// already where it would be moved to. Return it as a no-op success — the file
+	// stays put. WITHOUT this guard the RemoveAll(dstDir) below would delete the
+	// source before the rename, then both the rename and the copy fall-back fail
+	// against a now-missing source and the lesson is permanently lost.
+	if filepath.Clean(dstDir) == filepath.Clean(lessonDir) {
+		return dstDir, nil
 	}
 
-	// Partition into sidecars (linked first) and videos (linked LAST). Skip
-	// subdirectories and any leftover partial-download artifacts defensively, so
-	// the library only ever gets finished files.
-	var sidecars, videos []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if isPartial(name) {
-			continue
-		}
-		if isVideo(name) {
-			videos = append(videos, name)
-		} else {
-			sidecars = append(sidecars, name)
-		}
+	// Create the destination's PARENT (not dstDir itself) so the rename moves the
+	// whole lesson folder in as the leaf. A pre-existing destination (re-download)
+	// is removed so the move replaces it rather than failing or nesting.
+	if err := os.MkdirAll(filepath.Dir(dstDir), 0o755); err != nil {
+		return "", fmt.Errorf("create library parent %q: %w", filepath.Dir(dstDir), err)
+	}
+	if err := os.RemoveAll(dstDir); err != nil {
+		return "", fmt.Errorf("remove existing library dir %q: %w", dstDir, err)
 	}
 
-	if err := os.MkdirAll(dstDir, 0o755); err != nil {
-		return fmt.Errorf("create library dir %q: %w", dstDir, err)
+	if rerr := rename(lessonDir, dstDir); rerr == nil {
+		return dstDir, nil
+	} else if cerr := copyTree(lessonDir, dstDir); cerr != nil {
+		// Cross-filesystem (or otherwise unrenamable): copy the tree, then drop the
+		// source. A copy failure leaves the source in place (download still there).
+		return "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
 	}
-
-	var linked, copied int
-	var firstErr error
-	mirror := func(name string) {
-		src := filepath.Join(lessonDir, name)
-		dst := filepath.Join(dstDir, name)
-		viaCopy, err := mirrorFile(src, dst)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			fmt.Fprintf(log, "  ⚠ mirror %s: %v\n", name, err)
-			return
-		}
-		if viaCopy {
-			copied++
-		} else {
-			linked++
-		}
+	if rerr := os.RemoveAll(lessonDir); rerr != nil {
+		// The library copy is complete; failing to drop the scratch source is a
+		// warn-worthy leftover, not a lost file.
+		return dstDir, fmt.Errorf("remove source after copy %q: %w", lessonDir, rerr)
 	}
-	// Sidecars first, then the video(s) — the metadata is always in place before
-	// the .mp4 appears in the library.
-	for _, name := range sidecars {
-		mirror(name)
-	}
-	for _, name := range videos {
-		mirror(name)
-	}
-
-	// Log the link-vs-copy outcome once per lesson so the operator can tell whether
-	// they are getting true hardlinks (same dataset) or a copy fallback.
-	fmt.Fprintf(log, "  → library %s: %d linked, %d copied\n", rel, linked, copied)
-	return firstErr
+	return dstDir, nil
 }
 
-// mirrorFile reflects one source file into dst. It reports whether the byte-copy
-// fallback was used (false = a true hardlink). If dst already exists and is the
-// same inode as src it is left untouched (idempotent); a stale dst is removed
-// first. os.Link is tried first; on ANY link error the bytes are copied instead.
-func mirrorFile(src, dst string) (viaCopy bool, err error) {
-	si, err := os.Stat(src)
-	if err != nil {
-		return false, fmt.Errorf("stat %q: %w", src, err)
-	}
-
-	if di, derr := os.Stat(dst); derr == nil {
-		if os.SameFile(si, di) {
-			return false, nil // already the same inode: idempotent skip
+// copyTree recursively copies the file tree at src into dst, recreating
+// directories and copying regular files with their mode. It is the
+// cross-filesystem fallback for moveToLibrary when os.Rename cannot move the
+// folder across devices. Non-regular entries (symlinks, devices) are skipped.
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
-		// A stale destination (re-downloaded lesson, or an old copy): drop it so
-		// the link/copy below refreshes the library.
-		if rerr := os.Remove(dst); rerr != nil {
-			return false, fmt.Errorf("remove stale %q: %w", dst, rerr)
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
 		}
-	}
-
-	if lerr := hardlink(src, dst); lerr == nil {
-		return false, nil
-	}
-	// Any link failure (cross-filesystem, unsupported, etc.) falls back to a copy.
-	if cerr := copyFile(src, dst, si.Mode()); cerr != nil {
-		return true, fmt.Errorf("copy %q -> %q: %w", src, dst, cerr)
-	}
-	return true, nil
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !info.Mode().IsRegular() {
+			return nil // skip symlinks/devices: drumdrop only produces regular files
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return copyFile(path, target, info.Mode())
+	})
 }
 
 // copyFile writes src's bytes into dst with the given mode, replacing dst if it
-// exists. It is the cross-filesystem fallback when a hardlink cannot be made.
+// exists. It is the per-file primitive copyTree uses for the cross-filesystem
+// move fallback.
 func copyFile(src, dst string, mode fs.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -156,24 +122,4 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 		return err
 	}
 	return out.Close()
-}
-
-// isVideo reports whether name is a video container drumdrop produces, so it can
-// be linked last (after the sidecar metadata). Matching is case-insensitive.
-func isVideo(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case ".mp4", ".mkv", ".webm", ".mov", ".m4v":
-		return true
-	}
-	return false
-}
-
-// isPartial reports whether name is a leftover yt-dlp partial-download artifact
-// (*.part, *.ytdl, per-format *.f* fragments) that must never reach the library.
-// It mirrors cleanupPartials' patterns so the two stay in agreement.
-func isPartial(name string) bool {
-	part, _ := filepath.Match("*.part", name)
-	ytdl, _ := filepath.Match("*.ytdl", name)
-	frag, _ := filepath.Match("*.f*", name)
-	return part || ytdl || frag
 }

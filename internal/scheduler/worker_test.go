@@ -1198,10 +1198,12 @@ func TestWorkerInstructorFollowGroupsByParentCourse(t *testing.T) {
 	}
 }
 
-// TestWorkerMirrorsToLibraryOnSuccess proves that with Cfg.LibraryDir set, a
-// successful download is mirrored into the library at the lesson's path relative
-// to DownloadsDir — the finished .mp4 appears under <library>/<...>/NN - title.
-func TestWorkerMirrorsToLibraryOnSuccess(t *testing.T) {
+// TestWorkerMovesToLibraryOnSuccess proves that with Cfg.LibraryDir set, a
+// successful download is MOVED into the library at the lesson's path relative to
+// DownloadsDir: the finished .mp4 lives under <library>/<...>/NN - title, the
+// scratch downloads lesson dir is gone, and output_dir/video_path record the
+// library location.
+func TestWorkerMovesToLibraryOnSuccess(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
 	store.follows[nodeFollow().ID] = nodeFollow()
@@ -1224,33 +1226,37 @@ func TestWorkerMirrorsToLibraryOnSuccess(t *testing.T) {
 		t.Fatalf("job status = %q, want done", got)
 	}
 
-	// The lesson folder is mirrored at the same relative path, with its .mp4.
-	wantVideo := filepath.Join(library, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4")
+	// The lesson folder is in the library at the same relative path, with its .mp4.
+	libDir := filepath.Join(library, "Beginner Course", "01 - Lesson A")
+	wantVideo := filepath.Join(libDir, "01 - Lesson A.mp4")
 	got, err := os.ReadFile(wantVideo)
 	if err != nil {
-		t.Fatalf("mirrored video missing: %v", err)
+		t.Fatalf("moved video missing: %v", err)
 	}
 	if string(got) != string(dl.writeMP4) {
-		t.Errorf("mirrored video content = %q, want %q", got, dl.writeMP4)
+		t.Errorf("moved video content = %q, want %q", got, dl.writeMP4)
 	}
-	// True hardlink to the source (same tmp filesystem).
-	srcInfo, err := os.Stat(filepath.Join(downloads, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4"))
-	if err != nil {
-		t.Fatalf("stat source video: %v", err)
+	// The scratch downloads lesson dir is gone (moved, not copied).
+	srcDir := filepath.Join(downloads, "Beginner Course", "01 - Lesson A")
+	if _, err := os.Stat(srcDir); !os.IsNotExist(err) {
+		t.Errorf("downloads scratch lesson dir still present (stat err = %v), want moved away", err)
 	}
-	dstInfo, err := os.Stat(wantVideo)
-	if err != nil {
-		t.Fatalf("stat mirrored video: %v", err)
+	// output_dir / video_path record the LIBRARY location.
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("markDownloaded calls = %d, want 1", len(store.markDownloaded))
 	}
-	if !os.SameFile(srcInfo, dstInfo) {
-		t.Errorf("mirrored video is not a hardlink to the source")
+	if got := store.markDownloaded[0].outputDir; got != libDir {
+		t.Errorf("outputDir = %q, want library path %q", got, libDir)
+	}
+	if got := store.markDownloaded[0].videoPath; got != wantVideo {
+		t.Errorf("videoPath = %q, want library path %q", got, wantVideo)
 	}
 }
 
-// TestWorkerNoLibraryDirNoMirror proves that with an empty Cfg.LibraryDir the
-// worker writes nothing to any library and behaves exactly as before (job done,
-// downloads dir populated).
-func TestWorkerNoLibraryDirNoMirror(t *testing.T) {
+// TestWorkerNoLibraryDirKeepsInDownloads proves that with an empty Cfg.LibraryDir
+// the worker writes nothing to any library and behaves exactly as before: job
+// done, the file stays in downloads, and output_dir is the downloads path.
+func TestWorkerNoLibraryDirKeepsInDownloads(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
 	store.follows[nodeFollow().ID] = nodeFollow()
@@ -1273,9 +1279,13 @@ func TestWorkerNoLibraryDirNoMirror(t *testing.T) {
 	if got := store.jobs[1].Status; got != database.JobDone {
 		t.Errorf("job status = %q, want done", got)
 	}
-	srcVideo := filepath.Join(downloads, "Beginner Course", "01 - Lesson A", "01 - Lesson A.mp4")
-	if _, err := os.Stat(srcVideo); err != nil {
+	srcDir := filepath.Join(downloads, "Beginner Course", "01 - Lesson A")
+	if _, err := os.Stat(filepath.Join(srcDir, "01 - Lesson A.mp4")); err != nil {
 		t.Errorf("download video missing: %v", err)
+	}
+	// output_dir is the downloads path (no move happened).
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != srcDir {
+		t.Errorf("outputDir = %+v, want downloads path %q", store.markDownloaded, srcDir)
 	}
 	// No sibling "lib" tree was created — only the downloads dir exists under tmp.
 	entries, err := os.ReadDir(tmp)
@@ -1286,6 +1296,50 @@ func TestWorkerNoLibraryDirNoMirror(t *testing.T) {
 		if e.Name() != "dl" {
 			t.Errorf("unexpected dir %q under tmp, want only the downloads dir (no library written)", e.Name())
 		}
+	}
+}
+
+// TestWorkerMoveToLibraryFailureNonFatal proves a move failure never fails the
+// job: when both the rename and the copy-tree fallback fail (the library parent
+// is occupied by a regular file, so MkdirAll of the parent fails), the job is
+// still Done and output_dir stays the downloads path (the file is still there).
+func TestWorkerMoveToLibraryFailureNonFatal(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	// Make the LibraryDir itself a regular file so MkdirAll of the destination
+	// parent under it always fails -> moveToLibrary errors (non-fatal path).
+	library := filepath.Join(tmp, "lib")
+	if err := os.WriteFile(library, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write library-as-file: %v", err)
+	}
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.LibraryDir = library
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	// Job still done despite the move failure (non-fatal).
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Errorf("job status = %q, want done (move failure must not fail the job)", got)
+	}
+	// The file stays in downloads, and output_dir records the downloads path.
+	srcDir := filepath.Join(downloads, "Beginner Course", "01 - Lesson A")
+	if _, err := os.Stat(filepath.Join(srcDir, "01 - Lesson A.mp4")); err != nil {
+		t.Errorf("download video missing after failed move: %v", err)
+	}
+	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != srcDir {
+		t.Errorf("outputDir = %+v, want downloads path %q (kept on move failure)", store.markDownloaded, srcDir)
 	}
 }
 

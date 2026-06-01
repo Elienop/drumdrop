@@ -6,14 +6,15 @@ services:
       - "3737:8080"
     volumes:
       - drumdrop-config:/config       # DB + AES-GCM secret + cookie
-      - ./downloads:/downloads        # your archive lands on the host disk
-      # For the optional library mirror (DRUMDROP_LIBRARY_DIR below), downloads and
-      # library MUST be one filesystem AS THE CONTAINER SEES IT for real hardlinks
-      # (zero extra disk). Bind a single parent and point both dirs inside it, e.g.:
+      - ./downloads:/downloads        # scratch for in-progress downloads (your
+                                      # archive lands here when no library is set)
+      # For the optional library (DRUMDROP_LIBRARY_DIR below), downloads and library
+      # MUST be one filesystem AS THE CONTAINER SEES IT for an instant, atomic move
+      # (a plain rename). Bind a single parent and point both dirs inside it, e.g.:
       #   - /mnt/pool/media:/media
       # then set DRUMDROP_DOWNLOADS_DIR=/media/downloads/drumdrop and
       # DRUMDROP_LIBRARY_DIR=/media/library. Two separate binds (as above) cross
-      # filesystems inside the container and silently fall back to a byte copy.
+      # filesystems inside the container and fall back to a copy-then-delete.
     environment:
       - PUID=1000
       - PGID=1000
@@ -25,10 +26,11 @@ services:
       # - DRUMDROP_INTERVAL=12h
       # - DRUMDROP_QUALITY=1080
       # - DRUMDROP_CORS_ORIGIN=https://drumdrop.example.com
-      # Optional Plex library mirror: when set, each finished lesson folder is
-      # hardlinked (copy-fallback) into this dir, so Plex watches a dir of ONLY
-      # finished files and never the in-progress partials in /downloads. See the
-      # single-parent bind-mount note above for true (zero-disk) hardlinks.
+      # Optional Plex library: when set, each finished lesson folder is MOVED into
+      # this dir (single copy), so Plex watches a dir of ONLY finished files and
+      # /downloads is pure scratch. Point Plex at the library; Plex owns the path
+      # (no host-path mapping). See the single-parent bind-mount note above for an
+      # instant, atomic move. A move failure is non-fatal (file stays in /downloads).
       # - DRUMDROP_LIBRARY_DIR=/media/library
       # Set this to the SAME host path you bind-mount to /downloads above, and the
       # UI's "Copy path" yields a host path (paste-ready in your file manager)
