@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/musora"
 )
 
 // errInjectedRename is the canned failure the cross-fs fallback test forces from
@@ -340,4 +342,17 @@ func TestMoveToLibraryPlexTVSharedSeason(t *testing.T) {
 // produce, used to seed shared-season scratch dirs in the test above.
 func filepathFor(idx int, title string) string {
 	return lessonDir("", idx, title)
+}
+
+// TestPlexEpisodeBase proves the shared episode-base helper produces the exact
+// name the move uses (and that the worker must reuse to locate the nfo), and that
+// the show/title components are sanitized.
+func TestPlexEpisodeBase(t *testing.T) {
+	if got, want := plexEpisodeBase("Beginner Course", "Lesson Five", 1, 5), "Beginner Course - s01e05 - Lesson Five"; got != want {
+		t.Errorf("plexEpisodeBase = %q, want %q", got, want)
+	}
+	// show and title are sanitized (path separators replaced); season/episode zero-padded.
+	if got, want := plexEpisodeBase("A/B", "C:D", 2, 13), musora.Sanitize("A/B")+" - s02e13 - "+musora.Sanitize("C:D"); got != want {
+		t.Errorf("plexEpisodeBase sanitized = %q, want %q", got, want)
+	}
 }

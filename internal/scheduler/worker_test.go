@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1420,6 +1421,66 @@ func TestWorkerPlexTvLayoutOnSuccess(t *testing.T) {
 	}
 	if got := store.markDownloaded[0].bytes; got != int64(len(dl.writeMP4)) {
 		t.Errorf("bytes = %d, want %d", got, len(dl.writeMP4))
+	}
+}
+
+// TestWorkerPlexTvWritesEpisodeNFO proves that in plex-tv layout, after the move,
+// the worker writes (overwrites) the episode nfo at the moved <episodeBase>.nfo
+// path: a Kodi/Plex <episodedetails> doc with the episode title, season, episode,
+// aired date, and instructor actor. The fakeDownloader writes only the .mp4 (no
+// pre-existing nfo), so the worker's write creates it fresh — which is the same
+// path the move would have renamed a download-time <movie> nfo to.
+func TestWorkerPlexTvWritesEpisodeNFO(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 5, Valid: true}}
+
+	// Enrich the resolver lesson so the nfo carries an aired date + actor.
+	rich := lesson(100, "Lesson A")
+	rich.PublishedOn = "2024-06-11T15:00:00.000000Z"
+	rich.Instructors = []musora.Instructor{{Name: "El Estepario Siberiano"}}
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: rich}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	library := filepath.Join(tmp, "lib")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.LibraryDir = library
+	w.Cfg.Layout = "plex-tv"
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Fatalf("job status = %q, want done", got)
+	}
+
+	seasonDir := filepath.Join(library, "Beginner Course", "Season 01")
+	nfoPath := filepath.Join(seasonDir, "Beginner Course - s01e05 - Lesson A.nfo")
+	got, err := os.ReadFile(nfoPath)
+	if err != nil {
+		t.Fatalf("episode nfo missing: %v", err)
+	}
+	xml := string(got)
+	for _, want := range []string{
+		"<episodedetails>",
+		"<title>Lesson A</title>",
+		"<showtitle>Beginner Course</showtitle>",
+		"<season>1</season>",
+		"<episode>5</episode>",
+		"<aired>2024-06-11</aired>",
+		`<actor><name>El Estepario Siberiano</name><role>Instructor</role></actor>`,
+	} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("episode nfo missing %q\n%s", want, xml)
+		}
+	}
+	if strings.Contains(xml, "<movie>") {
+		t.Errorf("episode nfo unexpectedly a <movie>\n%s", xml)
 	}
 }
 

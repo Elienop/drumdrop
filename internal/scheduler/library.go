@@ -82,6 +82,14 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 	return dstDir, nil
 }
 
+// plexEpisodeBase is the flat episode base name shared by the plex-tv move and the
+// worker's episode-nfo write: "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>". Both
+// sites MUST agree on it so the nfo the worker writes lands at the exact path the
+// move renamed the lesson's files to.
+func plexEpisodeBase(show, title string, season, episode int) string {
+	return fmt.Sprintf("%s - s%02de%02d - %s", musora.Sanitize(show), season, episode, musora.Sanitize(title))
+}
+
 // moveToLibraryPlexTV moves the finished lesson's files out of the scratch
 // lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each file
 // from its scratch "NN - Title" base to the episode base
@@ -106,7 +114,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 		return "", "", fmt.Errorf("malformed scratch lesson dir %q", lessonDir)
 	}
 
-	episodeBase := fmt.Sprintf("%s - s%02de%02d - %s", musora.Sanitize(show), season, episode, musora.Sanitize(title))
+	episodeBase := plexEpisodeBase(show, title, season, episode)
 	seasonDir = filepath.Join(libraryDir, musora.Sanitize(show), fmt.Sprintf("Season %02d", season))
 	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create season dir %q: %w", seasonDir, err)
