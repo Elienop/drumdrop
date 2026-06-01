@@ -37,6 +37,11 @@ type fakeWorkerStore struct {
 	markSkipped     []int // railcontent ids marked skipped
 	markDownloadng  []int // railcontent ids marked downloading
 
+	// ctx.Err() observed at each MarkSkipped/MarkJobCanceled call, so the
+	// shutdown-finalize test can assert those writes do NOT ride a cancelled ctx.
+	markSkippedCtxErr     []error
+	markJobCanceledCtxErr []error
+
 	// Optional fault injection.
 	claimErr     error
 	getFollowErr error
@@ -130,6 +135,7 @@ func (s *fakeWorkerStore) MarkJobFailed(ctx context.Context, id int64, errMsg st
 // see the same status semantics as production.
 func (s *fakeWorkerStore) MarkJobCanceled(ctx context.Context, id int64) error {
 	s.markJobCanceled = append(s.markJobCanceled, id)
+	s.markJobCanceledCtxErr = append(s.markJobCanceledCtxErr, ctx.Err())
 	j := s.jobs[id]
 	if j.Status == database.JobRunning {
 		j.Status = database.JobCanceled
@@ -161,6 +167,7 @@ func (s *fakeWorkerStore) MarkFailed(ctx context.Context, id int, errMsg string)
 
 func (s *fakeWorkerStore) MarkSkipped(ctx context.Context, id int, reason string) error {
 	s.markSkipped = append(s.markSkipped, id)
+	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
 	return nil
 }
 
@@ -202,6 +209,16 @@ func (r fakeResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
 		return nil, err
 	}
 	return r.lessons[id], nil // nil lesson + nil err = unresolvable
+}
+
+// cancelingResolver cancels the provided context (simulating a SIGINT/SIGTERM
+// landing during the network resolve) and then returns an error, so a test can
+// drive the resolve-failure branch with the outer ctx already dead.
+type cancelingResolver struct{ cancel context.CancelFunc }
+
+func (r cancelingResolver) Resolve(id int, permIDs string) (*musora.Lesson, error) {
+	r.cancel()
+	return nil, errors.New("resolve failed during shutdown")
 }
 
 // fakeDownloader fails the first failsBefore[id] attempts for each lesson, then
@@ -984,6 +1001,94 @@ func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 	// Partial file removed; the directory itself is left in place.
 	if _, err := os.Stat(partial); !os.IsNotExist(err) {
 		t.Errorf("partial file still present (stat err = %v), want removed", err)
+	}
+}
+
+// TestWorkerCancelDuringShutdownFinalizesWithLiveCtx simulates SIGINT/SIGTERM
+// arriving while a download is in flight: cancelling the OUTER ctx (not just the
+// per-job ctx) makes the download return context.Canceled and runs the cancel-
+// first branch with the outer ctx already dead. The finalization writes
+// (MarkSkipped + MarkJobCanceled) must NOT ride that cancelled ctx — they use
+// context.WithoutCancel so the real store's BeginTx still commits, otherwise the
+// job/lesson would be stranded 'running'/'downloading'. The fake records the
+// ctx.Err() it saw for each write; both must be nil.
+func TestWorkerCancelDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
+	dl := newBlockingDownloader()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.MaxAttempts = 5 // ensure the cancel path beats retries
+	w.Cfg.DownloadsDir = t.TempDir()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = w.RunOnce(ctx, 0)
+		close(done)
+	}()
+
+	// Once the download is in flight, cancel the OUTER ctx (shutdown). That cancels
+	// jobCtx too, so the download returns context.Canceled and the cancel branch
+	// runs while ctx itself is dead.
+	<-dl.started
+	cancel()
+	<-done
+
+	// The cancel branch ran: lesson skipped + job canceled.
+	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("markSkipped = %v, want %v", got, want)
+	}
+	if got, want := store.markJobCanceled, []int64{1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("markJobCanceled = %v, want %v", got, want)
+	}
+	// Crucially, neither finalization write saw a cancelled context.
+	for i, e := range store.markSkippedCtxErr {
+		if e != nil {
+			t.Errorf("MarkSkipped call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
+		}
+	}
+	for i, e := range store.markJobCanceledCtxErr {
+		if e != nil {
+			t.Errorf("MarkJobCanceled call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
+		}
+	}
+}
+
+// TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx is the resolve-branch
+// twin of the cancel-branch shutdown test: Resolve runs before the loop's
+// ctx.Err() guard, so a shutdown landing mid-resolve takes the resolve-failure
+// branch with the outer ctx already cancelled. MarkSkipped/MarkJobFailed must
+// still commit (WithoutCancel), else the job is stranded 'running' until the next
+// startup requeue.
+func TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	res := cancelingResolver{cancel: cancel}
+	dl := newFakeDownloader()
+
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+
+	// The lesson was skipped (resolve failed) and the download never ran.
+	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("markSkipped = %v, want %v", got, want)
+	}
+	if len(dl.calls) != 0 {
+		t.Errorf("download calls = %d, want 0 (resolve failed before any download)", len(dl.calls))
+	}
+	// The finalization write did NOT ride the cancelled ctx.
+	for i, e := range store.markSkippedCtxErr {
+		if e != nil {
+			t.Errorf("MarkSkipped call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
+		}
 	}
 }
 

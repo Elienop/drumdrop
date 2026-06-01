@@ -304,8 +304,13 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Err:           reason,
 			Time:          time.Now(),
 		})
-		_ = w.Store.MarkSkipped(ctx, id, reason)
-		_ = w.Store.MarkJobFailed(ctx, job.ID, reason)
+		// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
+		// landing mid-resolve reaches here with ctx already cancelled. Finalize via
+		// WithoutCancel (same reasoning as the cancel branch below) so the lesson is
+		// not stranded in its prior status with the job stuck 'running'.
+		finishCtx := context.WithoutCancel(ctx)
+		_ = w.Store.MarkSkipped(finishCtx, id, reason)
+		_ = w.Store.MarkJobFailed(finishCtx, job.ID, reason)
 		return
 	}
 
@@ -381,8 +386,16 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 
 		// Cancel-error-first: a CancelRunning kill (jobCtx cancelled) must never
 		// fall through to the success or failure branches. Clean the partials, mark
-		// the lesson skipped + the job canceled, and stop — no retry. The store
-		// writes use the outer ctx because jobCtx is already cancelled.
+		// the lesson skipped + the job canceled, and stop — no retry.
+		//
+		// The two finalization writes use context.WithoutCancel(ctx): on a user
+		// Cancel the outer ctx is still alive, but on SIGINT/SIGTERM shutdown the
+		// outer ctx is ALSO cancelled (it is what cancelled jobCtx), and a plain
+		// ctx here would make withTx's BeginTx fail immediately — stranding the job
+		// 'running' and the lesson 'downloading' until the next startup requeue.
+		// WithoutCancel keeps the deadline/values but drops cancellation so these
+		// short writes land; gracefulServe joins the daemon goroutine before
+		// closing the store, so the DB is still open when they run.
 		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
 			cleanupPartials(dir)
 			fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
@@ -395,8 +408,9 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 				Err:           "canceled",
 				Time:          time.Now(),
 			})
-			_ = w.Store.MarkSkipped(ctx, id, "canceled")
-			_ = w.Store.MarkJobCanceled(ctx, job.ID)
+			finishCtx := context.WithoutCancel(ctx)
+			_ = w.Store.MarkSkipped(finishCtx, id, "canceled")
+			_ = w.Store.MarkJobCanceled(finishCtx, job.ID)
 			return
 		}
 
@@ -445,8 +459,13 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	if lastErr != nil {
 		msg = lastErr.Error()
 	}
-	_ = w.Store.MarkFailed(ctx, id, msg)
-	_ = w.Store.MarkJobFailed(ctx, job.ID, msg)
+	// WithoutCancel for parity with the cancel/resolve branches: the per-attempt
+	// ctx.Err() guard makes a cancelled ctx here practically unreachable, but
+	// keeping all terminal writes uncancellable makes "shutdown never strands a
+	// job" a single, obvious invariant.
+	finishCtx := context.WithoutCancel(ctx)
+	_ = w.Store.MarkFailed(finishCtx, id, msg)
+	_ = w.Store.MarkJobFailed(finishCtx, job.ID, msg)
 }
 
 // outDir is the single source of truth for a job's output directory. An
