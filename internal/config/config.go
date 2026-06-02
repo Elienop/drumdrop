@@ -81,6 +81,27 @@ func Interval() string {
 // "use each follow's own quality" — unchanged behavior.
 func Quality() string { return os.Getenv("DRUMDROP_QUALITY") }
 
+// AudioLang is the preferred audio-track language for downloads, read at call
+// time from DRUMDROP_AUDIO_LANG and lower-cased/trimmed. It exists because
+// Musora lessons increasingly carry multiple audio renditions (English plus
+// Spanish/Portuguese dubs) and yt-dlp's default pick can land on a dub. Unset
+// (or empty) defaults to "en" so downloads prefer English out of the box; the
+// sentinels "any"/"all" return "" to opt out entirely (take whatever yt-dlp
+// would have picked — the historical behavior). Any other value is returned
+// verbatim (e.g. "es", "pt"); the format selector validates it as an ISO code
+// and silently ignores anything malformed.
+func AudioLang() string {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("DRUMDROP_AUDIO_LANG")))
+	switch v {
+	case "":
+		return "en"
+	case "any", "all":
+		return ""
+	default:
+		return v
+	}
+}
+
 // Layout selects the library destination layout, read at call time from
 // DRUMDROP_LAYOUT and lower-cased so "Plex-TV"/"PLEX-TV" all normalize. An empty
 // result (the default) or "default" keeps today's per-lesson-subfolder layout;

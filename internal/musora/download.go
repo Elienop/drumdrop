@@ -14,24 +14,65 @@ import (
 	"strings"
 )
 
-func FormatSelector(quality string) string {
+// reAudioLang accepts only an ISO 639-1/639-2 language code (2–3 letters), so a
+// stray DRUMDROP_AUDIO_LANG value can never inject `/`, `]`, or spaces into the
+// single-token -f format selector.
+var reAudioLang = regexp.MustCompile(`^[a-z]{2,3}$`)
+
+// audioLangFilter returns a yt-dlp format-filter fragment that restricts an
+// audio stream to the preferred language, e.g. "[language^=?en]". It returns ""
+// (no preference) for an empty or non-ISO value.
+//
+// The "^=" matches the language code as a prefix ("en" also matches "eng" and
+// "en-US"). The "?" immediately AFTER the operator (yt-dlp's none-inclusive
+// flag — it must precede the value, "language^=?en", not "language^=en?", which
+// yt-dlp rejects as an invalid filter) makes a track whose language tag is
+// absent (null) still pass. That is deliberate — Musora tags its dub renditions
+// explicitly (es/pt) while the original/default rendition is typically
+// English-tagged or untagged, so "<lang>-or-untagged" reliably keeps the
+// original and drops the dubs across both tagging schemes.
+func audioLangFilter(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if !reAudioLang.MatchString(lang) {
+		return ""
+	}
+	return "[language^=?" + lang + "]"
+}
+
+// FormatSelector builds the yt-dlp -f selector for the given quality cap and
+// preferred audio language. With no language preference it returns the exact
+// historical strings. With a language it prepends a language-preferring
+// alternative before each historical alternative, so when an audio track in
+// that language (or an untagged one) exists it is chosen at the best available
+// quality, and otherwise selection falls through to precisely the old behavior.
+func FormatSelector(quality, audioLang string) string {
+	af := audioLangFilter(audioLang)
 	if quality == "" || quality == "best" {
-		return "bv*+ba/b"
+		if af == "" {
+			return "bv*+ba/b"
+		}
+		return "bv*+ba" + af + "/bv*+ba/b"
 	}
 	if h, err := strconv.Atoi(quality); err == nil {
-		return fmt.Sprintf("bv*[height<=%d]+ba/b[height<=%d]/bv*+ba/b", h, h)
+		if af == "" {
+			return fmt.Sprintf("bv*[height<=%d]+ba/b[height<=%d]/bv*+ba/b", h, h)
+		}
+		return fmt.Sprintf("bv*[height<=%d]+ba%s/bv*[height<=%d]+ba/b[height<=%d]/bv*+ba%s/bv*+ba/b", h, af, h, h, af)
 	}
-	return "bv*+ba/b"
+	if af == "" {
+		return "bv*+ba/b"
+	}
+	return "bv*+ba" + af + "/bv*+ba/b"
 }
 
 // YtDlpArgs builds the yt-dlp argv for a lesson's HLS manifest. A literal
 // end-of-options token ("--") is inserted immediately before the URL so that
 // an HLS URL beginning with a dash cannot be parsed as a yt-dlp option.
-func YtDlpArgs(hls, quality, outTemplate string) []string {
+func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 	return []string{
 		"--user-agent", browserUA,
 		"--referer", "https://player.vimeo.com/",
-		"-f", FormatSelector(quality),
+		"-f", FormatSelector(quality, audioLang),
 		"--merge-output-format", "mp4",
 		"--write-subs", "--sub-langs", "all",
 		"--no-warnings", "--newline",
@@ -100,9 +141,13 @@ type DownloadProgress struct {
 }
 
 type DownloadOpts struct {
-	Dir           string
-	Index         int
-	Quality       string
+	Dir     string
+	Index   int
+	Quality string
+	// AudioLang is the preferred audio-track language (ISO code, e.g. "en"); ""
+	// means no preference. It feeds FormatSelector's language-preferring -f
+	// selector so multi-audio lessons download the chosen language, not a dub.
+	AudioLang     string
 	ResourcesOnly bool
 	// OnProgress, when non-nil, receives a DownloadProgress for each yt-dlp
 	// progress line. When nil, yt-dlp's stdout goes straight to os.Stdout and
@@ -258,7 +303,7 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 		if !strings.HasPrefix(hls, "http://") && !strings.HasPrefix(hls, "https://") {
 			return fmt.Errorf("refusing to invoke yt-dlp: HLS URL is not http(s): %q", hls)
 		}
-		args := YtDlpArgs(hls, o.Quality, filepath.Join(dir, base+".%(ext)s"))
+		args := YtDlpArgs(hls, o.Quality, o.AudioLang, filepath.Join(dir, base+".%(ext)s"))
 		if o.OnProgress != nil {
 			args = append(progressArgs(), args...)
 		}

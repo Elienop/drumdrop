@@ -16,18 +16,49 @@ import (
 )
 
 func TestFormatSelector(t *testing.T) {
-	if FormatSelector("") != "bv*+ba/b" || FormatSelector("best") != "bv*+ba/b" {
+	// No audio-language preference: byte-for-byte the historical strings, so the
+	// common single-track lesson downloads exactly as before.
+	if FormatSelector("", "") != "bv*+ba/b" || FormatSelector("best", "") != "bv*+ba/b" {
 		t.Fatal("default")
 	}
-	if FormatSelector("720") != "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b" {
+	if FormatSelector("720", "") != "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b" {
 		t.Fatal("cap")
 	}
 }
 
+// With an audio language, the selector PREFERS audio that is tagged with that
+// language or has no language tag at all (the "?" none-inclusive flag), so the
+// original/English rendition wins over explicitly-tagged dubs, while every
+// historical fallback alternative is preserved verbatim after it.
+func TestFormatSelectorAudioLang(t *testing.T) {
+	if got, want := FormatSelector("", "en"), "bv*+ba[language^=?en]/bv*+ba/b"; got != want {
+		t.Fatalf("best+en = %q, want %q", got, want)
+	}
+	if got, want := FormatSelector("best", "en"), "bv*+ba[language^=?en]/bv*+ba/b"; got != want {
+		t.Fatalf("best+en = %q, want %q", got, want)
+	}
+	want1080 := "bv*[height<=1080]+ba[language^=?en]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba[language^=?en]/bv*+ba/b"
+	if got := FormatSelector("1080", "en"); got != want1080 {
+		t.Fatalf("1080+en = %q, want %q", got, want1080)
+	}
+	// A non-default language is honoured.
+	if got, want := FormatSelector("720", "pt"), "bv*[height<=720]+ba[language^=?pt]/bv*[height<=720]+ba/b[height<=720]/bv*+ba[language^=?pt]/bv*+ba/b"; got != want {
+		t.Fatalf("720+pt = %q, want %q", got, want)
+	}
+	// Garbage / non-ISO values fall back to no language preference (never emit a
+	// broken filter), matching the no-pref strings exactly.
+	if got, want := FormatSelector("720", "english"), "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"; got != want {
+		t.Fatalf("720+garbage = %q, want %q", got, want)
+	}
+	if got, want := FormatSelector("720", ""), "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b"; got != want {
+		t.Fatalf("720+empty = %q, want %q", got, want)
+	}
+}
+
 func TestYtDlpArgs(t *testing.T) {
-	args := YtDlpArgs("https://m3u8", "720", "/out/%(ext)s")
+	args := YtDlpArgs("https://m3u8", "720", "en", "/out/%(ext)s")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--write-subs", "--referer https://player.vimeo.com/", "height<=720", "https://m3u8"} {
+	for _, want := range []string{"--write-subs", "--referer https://player.vimeo.com/", "height<=720", "language^=?en", "https://m3u8"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -38,7 +69,7 @@ func TestYtDlpArgs(t *testing.T) {
 // beginning with a dash cannot be parsed as a yt-dlp option.
 func TestYtDlpArgsEndOfOptionsBeforeURL(t *testing.T) {
 	const hls = "-evil://m3u8"
-	args := YtDlpArgs(hls, "720", "/out/%(ext)s")
+	args := YtDlpArgs(hls, "720", "en", "/out/%(ext)s")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
 	}

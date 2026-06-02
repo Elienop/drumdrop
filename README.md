@@ -36,6 +36,7 @@ the defaults give a working setup with no env at all.
 | `DRUMDROP_CORS_ORIGIN` | _(none)_ | Allowed CORS origin for the HTTP API. Empty disables cross-origin requests. |
 | `DRUMDROP_INTERVAL` | `12h` | Default `--interval` for `serve`/`daemon` auto-sync (a Go duration, e.g. `6h`, `30m`). |
 | `DRUMDROP_QUALITY` | _(none)_ | Default `--quality` for `serve`/`daemon`/`sync`. Empty means each follow keeps its own saved quality. |
+| `DRUMDROP_AUDIO_LANG` | `en` | Preferred audio-track language (ISO 639 code, e.g. `en`, `es`, `pt`). Musora lessons increasingly ship multiple audio renditions (English plus Spanish/Portuguese dubs) and yt-dlp's default pick can land on a dub (an English intro followed by a dubbed body). drumdrop makes yt-dlp prefer the audio **tagged with this language _or_ untagged** (the original/default rendition), falling back to its normal pick only when no such track exists — so single-track lessons are unaffected. Set `any` or `all` to disable the preference entirely. |
 | `DRUMDROP_PERMISSION_IDS` | `92` | Comma-separated permission ids substituted into the catalog/resolve GROQ queries; gates which content is resolvable. Malformed values fall back to the default. |
 | `MUSORA_EMAIL` | _(none)_ | Login email for non-interactive `login` (skips the prompt). |
 | `MUSORA_PASSWORD` | _(none)_ | Login password for non-interactive `login` (skips the prompt). |

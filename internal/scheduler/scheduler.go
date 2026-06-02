@@ -93,6 +93,11 @@ type Config struct {
 	// Quality overrides each follow's saved quality when non-empty; empty means
 	// use the follow's own quality.
 	Quality string
+	// AudioLang is the preferred audio-track language (ISO code, e.g. "en") passed
+	// to yt-dlp's format selector so multi-audio lessons download that language
+	// rather than a dub. Empty disables the preference (yt-dlp's default pick). It
+	// is global (env-only, DRUMDROP_AUDIO_LANG) — there is no per-follow override.
+	AudioLang string
 	// ResourcesOnly skips the video and fetches only attached resources.
 	ResourcesOnly bool
 	// MaxAttempts is the total number of download attempts per job (>=1).
