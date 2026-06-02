@@ -76,6 +76,10 @@ func Config(out, quality string, resourcesOnly bool) scheduler.Config {
 	// Layout is env-only too (DRUMDROP_LAYOUT, lower-cased): "" = default,
 	// "plex-tv" = Plex TV-Shows naming for the library move.
 	cfg.Layout = config.Layout()
+	// AudioLang is env-only (DRUMDROP_AUDIO_LANG): defaults to "en" so downloads
+	// prefer the English/original audio track over Musora's es/pt dubs; "any"/"all"
+	// opt out. It is global, with no per-follow override.
+	cfg.AudioLang = config.AudioLang()
 	return cfg
 }
 

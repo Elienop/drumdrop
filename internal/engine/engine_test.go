@@ -60,6 +60,14 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.MaxAttempts != 3 {
 		t.Errorf("MaxAttempts = %d, want 3 (from DefaultConfig)", cfg.MaxAttempts)
 	}
+	if cfg.AudioLang != "en" {
+		t.Errorf("AudioLang = %q, want en (DRUMDROP_AUDIO_LANG unset defaults to en)", cfg.AudioLang)
+	}
+
+	t.Setenv("DRUMDROP_AUDIO_LANG", "es")
+	if cfg := Config("", "", false); cfg.AudioLang != "es" {
+		t.Errorf("AudioLang = %q, want es (from DRUMDROP_AUDIO_LANG)", cfg.AudioLang)
+	}
 
 	cfg = Config("/explicit/out", "best", true)
 	if cfg.DownloadsDir != "/explicit/out" {

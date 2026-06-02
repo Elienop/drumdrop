@@ -392,6 +392,12 @@ func TestWorkerSuccessFirstTry(t *testing.T) {
 	if dl.calls[0].Index != 1 || dl.calls[0].Quality != "1080" || dl.calls[0].ResourcesOnly {
 		t.Errorf("download opts = %+v, want Index 1 Quality 1080 ResourcesOnly false", dl.calls[0])
 	}
+	// AudioLang opt-out passthrough: an unset Cfg.AudioLang (the value config
+	// produces for DRUMDROP_AUDIO_LANG=any/all) must reach the downloader as ""
+	// so FormatSelector keeps yt-dlp's historical no-preference pick.
+	if dl.calls[0].AudioLang != "" {
+		t.Errorf("AudioLang = %q, want \"\" (no preference flows through unchanged)", dl.calls[0].AudioLang)
+	}
 }
 
 func TestWorkerFailTwiceThenSucceed(t *testing.T) {
@@ -753,6 +759,7 @@ func TestWorkerQualityAndResourcesOnlyOverride(t *testing.T) {
 	w := newTestWorker(store, res, dl, func(time.Duration) {})
 	w.Cfg.Quality = "best"     // override wins over the follow's 1080
 	w.Cfg.ResourcesOnly = true // flows into DownloadOpts
+	w.Cfg.AudioLang = "en"     // flows into DownloadOpts
 
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -760,8 +767,8 @@ func TestWorkerQualityAndResourcesOnlyOverride(t *testing.T) {
 	if len(dl.calls) != 1 {
 		t.Fatalf("download calls = %d, want 1", len(dl.calls))
 	}
-	if dl.calls[0].Quality != "best" || !dl.calls[0].ResourcesOnly {
-		t.Errorf("download opts = %+v, want Quality best ResourcesOnly true", dl.calls[0])
+	if dl.calls[0].Quality != "best" || !dl.calls[0].ResourcesOnly || dl.calls[0].AudioLang != "en" {
+		t.Errorf("download opts = %+v, want Quality best ResourcesOnly true AudioLang en", dl.calls[0])
 	}
 	if got := store.markDownloaded[0].quality; got != "best" {
 		t.Errorf("MarkDownloaded quality = %q, want best", got)

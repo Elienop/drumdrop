@@ -380,6 +380,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Dir:           outDir,
 			Index:         index,
 			Quality:       quality,
+			AudioLang:     w.Cfg.AudioLang,
 			ResourcesOnly: w.Cfg.ResourcesOnly,
 			OnProgress:    w.progressCallback(job, lesson, attempt),
 		})

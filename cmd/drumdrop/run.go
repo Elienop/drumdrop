@@ -207,9 +207,13 @@ func cmdDownload(argv []string) error {
 		}
 		fmt.Printf("\n▼ [%02d] %s\n", r.index, r.lesson.Title)
 		err := musora.DownloadLesson(context.Background(), r.lesson, musora.DownloadOpts{
-			Dir:           outDir,
-			Index:         r.index,
+			Dir:   outDir,
+			Index: r.index,
+			// AudioLang is env-only (DRUMDROP_AUDIO_LANG, default "en") like the
+			// daemon/serve path, so the manual one-shot download prefers the same
+			// audio language rather than yt-dlp's default multi-track pick.
 			Quality:       *quality,
+			AudioLang:     config.AudioLang(),
 			ResourcesOnly: *resourcesOnly,
 		})
 		if err != nil {

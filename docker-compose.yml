@@ -26,6 +26,13 @@ services:
       # - DRUMDROP_INTERVAL=12h
       # - DRUMDROP_QUALITY=1080
       # - DRUMDROP_CORS_ORIGIN=https://drumdrop.example.com
+      # Preferred audio-track language (ISO 639 code). Musora lessons increasingly
+      # carry multiple audio renditions (English + Spanish/Portuguese dubs) and
+      # yt-dlp's default pick can land on a dub (English intro, then dubbed body).
+      # This makes yt-dlp prefer the audio tagged with this language OR untagged
+      # (the original), falling back to its default pick only when no such track
+      # exists. Defaults to "en"; set "any" (or "all") to disable the preference.
+      # - DRUMDROP_AUDIO_LANG=en
       # Optional Plex library: when set, each finished lesson folder is MOVED into
       # this dir (single copy), so Plex watches a dir of ONLY finished files and
       # /downloads is pure scratch. Point Plex at the library; Plex owns the path

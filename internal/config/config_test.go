@@ -49,6 +49,36 @@ func TestLibraryDir(t *testing.T) {
 	}
 }
 
+func TestAudioLang(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		env  string
+		want string
+	}{
+		{"unset defaults to en", false, "", "en"},
+		{"explicit en", true, "en", "en"},
+		{"uppercase normalized", true, "EN", "en"},
+		{"trimmed and lowered", true, "  PT  ", "pt"},
+		{"spanish", true, "es", "es"},
+		{"any disables preference", true, "any", ""},
+		{"all disables preference", true, "ALL", ""},
+		{"empty string defaults to en", true, "", "en"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("DRUMDROP_AUDIO_LANG", tt.env)
+			} else if err := os.Unsetenv("DRUMDROP_AUDIO_LANG"); err != nil {
+				t.Fatalf("unset DRUMDROP_AUDIO_LANG: %v", err)
+			}
+			if got := AudioLang(); got != tt.want {
+				t.Fatalf("AudioLang() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListenAddr(t *testing.T) {
 	tests := []struct {
 		name string
