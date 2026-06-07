@@ -262,18 +262,29 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 	}
 	sheetNo := 0
 	for _, a := range l.Assignments {
-		if a.SheetMusicImageURL == "" {
-			continue
-		}
-		sheetNo++
-		// Node: ext = url.split('?')[0].split('.').pop() (|| 'png'), .slice(0,4)
-		ext := sheetExt(a.SheetMusicImageURL)
 		title := a.Title
 		if title == "" {
 			title = "assignment"
 		}
-		name := fmt.Sprintf("%02d - %s.%s", sheetNo, Sanitize(title), ext)
-		record("sheet-music", a.SheetMusicImageURL, fetchToFile(a.SheetMusicImageURL, filepath.Join(dir, "sheet-music", name)))
+		// Songs carry multi-page sheet music (an array of page URLs); legacy
+		// lessons carry a single page (a one-element slice). sheetNo keeps counting
+		// across pages and assignments so every file is uniquely numbered, and a
+		// (pN) page suffix is added only for multi-page assignments — single-page
+		// names stay byte-for-byte identical to before.
+		pages := a.SheetMusicImageURLs
+		for pi, u := range pages {
+			if u == "" {
+				continue
+			}
+			sheetNo++
+			// Node: ext = url.split('?')[0].split('.').pop() (|| 'png'), .slice(0,4)
+			ext := sheetExt(u)
+			name := fmt.Sprintf("%02d - %s.%s", sheetNo, Sanitize(title), ext)
+			if len(pages) > 1 {
+				name = fmt.Sprintf("%02d - %s (p%d).%s", sheetNo, Sanitize(title), pi+1, ext)
+			}
+			record("sheet-music", u, fetchToFile(u, filepath.Join(dir, "sheet-music", name)))
+		}
 	}
 	return failures
 }
