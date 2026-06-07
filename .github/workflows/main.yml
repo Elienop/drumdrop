@@ -15,6 +15,14 @@ jobs:
     permissions:
       contents: write
       packages: write
+    env:
+      # mathieudutour/github-tag-action has no Node 24 release — v6.2 is the latest
+      # and even master still declares runs.using: node20. This opt-in flag runs
+      # that JS action on the Node 24 runtime so it keeps working after GitHub
+      # forces the switch (2026-06-16). The job's other actions are already Node
+      # 24-ready, so the flag is a no-op for them. Drop this once the action ships
+      # a release with runs.using: node24.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - uses: actions/checkout@v6
         with:
