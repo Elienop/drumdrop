@@ -435,9 +435,10 @@ func TestDownloadLessonLayout(t *testing.T) {
 			{Name: "", URL: srv.URL + "/dir/pack.zip"}, // empty name -> URL basename
 		},
 		Assignments: []Assignment{
-			{Title: "No Sheet Here", SheetMusicImageURL: ""}, // skipped, must not shift numbering
-			{Title: "Intro", SheetMusicImageURL: srv.URL + "/a.png?t=1"},
-			{Title: "", SheetMusicImageURL: srv.URL + "/b.jpeg"}, // empty title -> "assignment"
+			{Title: "No Sheet Here", SheetMusicImageURLs: nil},                                       // skipped, must not shift numbering
+			{Title: "Intro", SheetMusicImageURLs: []string{srv.URL + "/a.png?t=1"}},                  // single page -> no (pN) suffix
+			{Title: "", SheetMusicImageURLs: []string{srv.URL + "/b.jpeg"}},                          // empty title -> "assignment"
+			{Title: "Song", SheetMusicImageURLs: []string{srv.URL + "/p1.png", srv.URL + "/p2.png"}}, // multi-page song -> (p1)/(p2)
 		},
 		Mp3NoDrumsNoClick: srv.URL + "/m.mp3",
 	}
@@ -458,6 +459,8 @@ func TestDownloadLessonLayout(t *testing.T) {
 		filepath.Join(lessonDir, "play-along", "play-along (no drums, no click).mp3"),
 		filepath.Join(lessonDir, "sheet-music", "01 - Intro.png"),       // numbering starts at 01 despite leading sheet-less assignment; ext from URL
 		filepath.Join(lessonDir, "sheet-music", "02 - assignment.jpeg"), // empty title -> "assignment"
+		filepath.Join(lessonDir, "sheet-music", "03 - Song (p1).png"),   // multi-page: sheetNo keeps counting across pages, (pN) suffix
+		filepath.Join(lessonDir, "sheet-music", "04 - Song (p2).png"),
 	}
 	for _, p := range want {
 		if _, err := os.Stat(p); err != nil {
@@ -473,7 +476,7 @@ func TestDownloadLessonLayout(t *testing.T) {
 			t.Errorf("sheet-music file without extension: %s", p)
 		}
 	}
-	if len(got) != 2 {
-		t.Errorf("sheet-music files = %v, want 2", got)
+	if len(got) != 4 {
+		t.Errorf("sheet-music files = %v, want 4", got)
 	}
 }

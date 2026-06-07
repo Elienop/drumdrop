@@ -1,6 +1,83 @@
 package musora
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strconv"
+	"strings"
+)
+
+// flexSeconds decodes length_in_seconds into a whole-second int while tolerating
+// the fractional value the resolve_lesson GROQ can emit: the field is
+// coalesce(length_in_seconds, soundslice[0].soundslice_length_in_second), and
+// soundslice durations (songs/play-alongs) can be fractional (e.g. 212.5). A
+// plain int field would reject that and fail the entire lesson — the same failure
+// class as the sheet-music array. A quoted number and null/absent are tolerated;
+// the value is truncated to whole seconds (the NFO runtime is whole minutes).
+type flexSeconds int
+
+func (f *flexSeconds) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*f = 0
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		if s = strings.TrimSpace(s); s == "" {
+			*f = 0
+			return nil
+		}
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		*f = flexSeconds(int(v))
+		return nil
+	}
+	var v float64
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*f = flexSeconds(int(v))
+	return nil
+}
+
+// stringOrSlice decodes a JSON value that is either a single string or an array
+// of strings into a []string. The resolve_lesson GROQ projection makes an
+// assignment's sheet_music_image_url a scalar for legacy lessons
+// (assignment_sheet_music_image) but an ARRAY — one entry per sheet-music page —
+// for songs (the assignment_sheet_music_image_new[] projection). Decoding into a
+// plain string therefore fails the whole lesson with
+// "cannot unmarshal array into Go struct field ... of type string", which fails
+// the download job. A null or absent value decodes to a nil slice. Array entries
+// that are JSON null decode to "" (filtered by the downloader).
+type stringOrSlice []string
+
+func (s *stringOrSlice) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		*s = nil
+		return nil
+	}
+	if b[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(b, &arr); err != nil {
+			return err
+		}
+		*s = arr
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(b, &one); err != nil {
+		return err
+	}
+	*s = stringOrSlice{one}
+	return nil
+}
 
 type Video struct {
 	ExternalID     string `json:"external_id"`
@@ -15,8 +92,10 @@ type Resource struct {
 }
 
 type Assignment struct {
-	Title              string `json:"title"`
-	SheetMusicImageURL string `json:"sheet_music_image_url"`
+	Title string `json:"title"`
+	// SheetMusicImageURLs is one URL per sheet-music page. Musora sends a scalar
+	// string for legacy lessons and an array for songs; stringOrSlice accepts both.
+	SheetMusicImageURLs stringOrSlice `json:"sheet_music_image_url"`
 }
 
 type Instructor struct {
@@ -30,7 +109,7 @@ type Lesson struct {
 	DifficultyString string       `json:"difficulty_string"`
 	Brand            string       `json:"brand"`
 	PublishedOn      string       `json:"published_on"`
-	LengthInSeconds  int          `json:"length_in_seconds"`
+	LengthInSeconds  flexSeconds  `json:"length_in_seconds"`
 	Thumbnail        string       `json:"thumbnail"`
 	Video            Video        `json:"video"`
 	Instructors      []Instructor `json:"instructor"`
