@@ -17,16 +17,38 @@ COPY --from=web-builder /app/web/dist ./web/dist
 RUN CGO_ENABLED=0 go build -tags webui -ldflags "-s -w -X main.version=${VERSION}" \
     -o drumdrop ./cmd/drumdrop
 
-# 3. final — alpine + yt-dlp + ffmpeg, non-root
-FROM alpine:3.22
-# yt-dlp and ffmpeg both come from alpine's community repo (enabled by default).
-# We install yt-dlp from apk rather than the upstream "static" yt-dlp_linux binary
-# because that upstream binary is glibc-linked (interpreter /lib64/ld-linux-x86-64.so.2,
-# bundled libpython needs glibc fortify/posix_fallocate64 symbols) and therefore does
-# NOT run on a musl alpine base — even with gcompat. The apk build is musl-native.
-RUN apk add --no-cache ca-certificates tzdata su-exec shadow ffmpeg yt-dlp \
-    && addgroup -g 911 drumdrop && adduser -u 911 -G drumdrop -D drumdrop \
-    && yt-dlp --version
+# 3. final — glibc (debian-slim) + yt-dlp + deno + ffmpeg, non-root.
+#
+# Songs play a YouTube video referenced inside their soundslice score, and YouTube
+# now requires solving a JS "nsig" challenge to fetch the media (otherwise the data
+# request 403s). yt-dlp solves it with a JS runtime, and the only reliable provider
+# is deno (node reports "unavailable") — which ships NO musl build. The old alpine
+# image also pinned yt-dlp to apk's stale 2025.x, which 403s on YouTube regardless
+# (it lacks the challenge framework entirely). A glibc base lets us run deno AND a
+# current upstream yt-dlp; Vimeo lessons never needed any of this, which is why only
+# songs failed. (musl alpine could not run either even with gcompat — see git log.)
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates tzdata gosu wget passwd \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 911 drumdrop \
+    && useradd -u 911 -g drumdrop -d /app -s /usr/sbin/nologin drumdrop
+
+# deno: yt-dlp's JS-challenge solver for YouTube (the only working provider). The
+# bin image is a scratch image holding just the static glibc binary.
+COPY --from=denoland/deno:bin-2.1.4 /deno /usr/local/bin/deno
+# ffmpeg/ffprobe: static build (yt-dlp merges the separate video+audio streams to mp4).
+COPY --from=mwader/static-ffmpeg:7.1 /ffmpeg /ffprobe /usr/local/bin/
+
+# yt-dlp: the upstream static binary, re-fetched on every release (the VERSION arg
+# busts this layer's cache) so YouTube extraction stays current — the production
+# failure was a 7-month-stale yt-dlp. The "&& yt-dlp ... && deno ... && ffmpeg ..."
+# smoke test fails the build if any runtime is broken.
+ARG VERSION=dev
+RUN echo "drumdrop ${VERSION}" \
+    && wget -qO /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+    && chmod +x /usr/local/bin/yt-dlp \
+    && yt-dlp --version && deno --version | head -1 && ffmpeg -version | head -1
 WORKDIR /app
 COPY --from=go-builder /app/drumdrop .
 COPY entrypoint.sh /entrypoint.sh
