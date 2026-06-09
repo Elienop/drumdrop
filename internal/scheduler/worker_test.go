@@ -309,6 +309,74 @@ func newTestWorker(store Store, res Resolver, dl Downloader, sleep func(time.Dur
 // TestNewWorkerClampsMaxAttempts verifies a non-positive MaxAttempts is clamped
 // to 1, so a zero-value Config still makes one real download attempt instead of
 // skipping the attempt loop entirely and marking every job failed without trying.
+// producedVideo must find a song's bracket-tagged version files when no plain
+// "<base>.mp4" exists: it returns the FIRST (sorted) version path and the SUM
+// of every "<base>...mp4" file's bytes, so MarkDownloaded records real metadata
+// for a multi-version song download.
+func TestProducedVideoSongVersions(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp) // producedVideo derives base from lessonDir's own name
+	// Two version files (no plain <base>.mp4), distinct sizes, plus a sidecar.
+	files := map[string][]byte{
+		base + " [Original].mp4": []byte("aaaa"),   // 4 bytes
+		base + " [Drumless].mp4": []byte("bbbbbb"), // 6 bytes
+		base + ".nfo":            []byte("<nfo/>"), // not a video, ignored
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gotPath, gotBytes := w.producedVideo(tmp)
+	wantPath := filepath.Join(tmp, base+" [Drumless].mp4") // sorted-first ('D' < 'O')
+	if gotPath != wantPath {
+		t.Errorf("videoPath = %q, want %q (first sorted version file)", gotPath, wantPath)
+	}
+	if gotBytes != 10 {
+		t.Errorf("bytes = %d, want 10 (sum of both versions)", gotBytes)
+	}
+}
+
+// producedVideo still returns the plain "<base>.mp4" for a regular lesson, and
+// sums it in too when version files happen to coexist.
+func TestProducedVideoRegularLesson(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, base+".mp4"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotPath, gotBytes := w.producedVideo(tmp)
+	if gotPath != filepath.Join(tmp, base+".mp4") || gotBytes != 5 {
+		t.Errorf("producedVideo = %q/%d, want plain mp4 / 5", gotPath, gotBytes)
+	}
+}
+
+// No video of any shape -> "" / 0 (e.g. a video-less song or ResourcesOnly).
+func TestProducedVideoNone(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, base+".nfo"), []byte("<nfo/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, b := w.producedVideo(tmp); p != "" || b != 0 {
+		t.Errorf("producedVideo = %q/%d, want empty/0 when no mp4", p, b)
+	}
+
+	// ResourcesOnly short-circuits even if an mp4 somehow exists.
+	wRO := &Worker{}
+	wRO.Cfg.ResourcesOnly = true
+	if err := os.WriteFile(filepath.Join(tmp, base+".mp4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, b := wRO.producedVideo(tmp); p != "" || b != 0 {
+		t.Errorf("producedVideo (ResourcesOnly) = %q/%d, want empty/0", p, b)
+	}
+}
+
 func TestNewWorkerClampsMaxAttempts(t *testing.T) {
 	for _, in := range []int{0, -3} {
 		w := NewWorker(nil, nil, nil, Config{MaxAttempts: in}, "", nil)

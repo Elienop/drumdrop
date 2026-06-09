@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -618,23 +620,51 @@ func cleanupPartials(dir string) {
 	}
 }
 
-// producedVideo returns the path and size of the mp4 DownloadLesson writes for a
-// successfully downloaded lesson. The video lives at lessonDir/<base>.mp4 where
-// <base> is lessonDir's own "NN - Sanitized title" base name (DownloadLesson
-// uses base for both the folder and the file). On ResourcesOnly (no video is
-// produced) or any os.Stat error (e.g. a different container extension) it
-// returns "" and 0 so MarkDownloaded records no video metadata rather than a
-// path that does not exist.
+// producedVideo returns the path and total size of the mp4(s) DownloadLesson
+// writes for a successfully downloaded lesson. A regular lesson produces a
+// single "<base>.mp4"; a song produces one bracket-tagged version file per
+// recording ("<base> [Original].mp4", "<base> [Drumless].mp4"). Both share the
+// lessonDir's own "NN - Sanitized title" base name (DownloadLesson uses base for
+// the folder and every file), so producedVideo collects every regular file
+// named "<base>...mp4" and returns the FIRST in sorted order as videoPath (for
+// deterministic metadata) and the SUM of all their sizes as bytes.
+//
+// On ResourcesOnly (no video is produced) or when no matching mp4 exists (a
+// video-less song, or a different container extension) it returns "" and 0 so
+// MarkDownloaded records no video metadata rather than a path that does not
+// exist. ReadDir + string prefix/suffix matching is used (not filepath.Glob) so
+// glob metacharacters surviving Sanitize in the base can never break the match.
 func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64) {
 	if w.Cfg.ResourcesOnly {
 		return "", 0
 	}
-	p := filepath.Join(lessonDir, filepath.Base(lessonDir)+".mp4")
-	info, err := os.Stat(p)
+	base := filepath.Base(lessonDir)
+	entries, err := os.ReadDir(lessonDir)
 	if err != nil {
 		return "", 0
 	}
-	return p, info.Size()
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Matches both "<base>.mp4" (regular lesson) and "<base> [Tag].mp4" (song
+		// version files), but not an unrelated mp4 with a different base.
+		if strings.HasPrefix(name, base) && strings.HasSuffix(name, ".mp4") {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "", 0
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if info, err := os.Stat(filepath.Join(lessonDir, name)); err == nil {
+			bytes += info.Size()
+		}
+	}
+	return filepath.Join(lessonDir, names[0]), bytes
 }
 
 // lessonParentTitle returns the first parent content title of a lesson, used as

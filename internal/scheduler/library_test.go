@@ -338,6 +338,73 @@ func TestMoveToLibraryPlexTVSharedSeason(t *testing.T) {
 	}
 }
 
+// TestMoveToLibraryPlexTVSongVersions proves a song's two bracket-tagged video
+// files share the same episode base (so Plex merges them as one episode with two
+// versions) and that a subdirectory (resources/) survives the move, renamed with
+// the episode-base prefix, instead of being deleted with the scratch dir.
+func TestMoveToLibraryPlexTVSongVersions(t *testing.T) {
+	tmp := t.TempDir()
+	libraryDir := filepath.Join(tmp, "lib")
+	scratchBase := "01 - Even Flow"
+	lessonDir := filepath.Join(tmp, "dl", scratchBase)
+	if err := os.MkdirAll(filepath.Join(lessonDir, "resources"), 0o755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	files := map[string]string{
+		scratchBase + " [Original].mp4": "orig-video",
+		scratchBase + " [Drumless].mp4": "drumless-video",
+		scratchBase + ".nfo":            "<episodedetails/>",
+		scratchBase + "-poster.jpg":     "poster",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(lessonDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(lessonDir, "resources", "song.pdf"), []byte("pdf-bytes"), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+
+	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Songs", 1, 1, "Even Flow", lessonDir)
+	if err != nil {
+		t.Fatalf("moveToLibraryPlexTV: %v", err)
+	}
+
+	episodeBase := "Songs - s01e01 - Even Flow"
+	// Both version files moved, sharing the episode base; content intact.
+	for tag, body := range map[string]string{" [Original].mp4": "orig-video", " [Drumless].mp4": "drumless-video"} {
+		p := filepath.Join(seasonDir, episodeBase+tag)
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("missing moved version file %s: %v", episodeBase+tag, err)
+			continue
+		}
+		if string(got) != body {
+			t.Errorf("%s content = %q, want %q", episodeBase+tag, got, body)
+		}
+	}
+	// videoPath must be a real moved .mp4 (one of the two versions).
+	if videoPath != filepath.Join(seasonDir, episodeBase+" [Drumless].mp4") &&
+		videoPath != filepath.Join(seasonDir, episodeBase+" [Original].mp4") {
+		t.Errorf("videoPath = %q, want one of the version files", videoPath)
+	}
+	if _, err := os.Stat(videoPath); err != nil {
+		t.Errorf("returned videoPath does not exist: %v", err)
+	}
+	// The PDF survives in a renamed subdir, not deleted with the scratch dir.
+	pdf := filepath.Join(seasonDir, episodeBase+" resources", "song.pdf")
+	got, err := os.ReadFile(pdf)
+	if err != nil {
+		t.Errorf("PDF lost (subdir not preserved): %v", err)
+	} else if string(got) != "pdf-bytes" {
+		t.Errorf("PDF content = %q, want %q", got, "pdf-bytes")
+	}
+	// The scratch lesson dir is gone.
+	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
+		t.Errorf("scratch lesson dir still present (stat err = %v), want removed", err)
+	}
+}
+
 // filepathFor builds the scratch "NN - Sanitize(title)" base name a download would
 // produce, used to seed shared-season scratch dirs in the test above.
 func filepathFor(idx int, title string) string {

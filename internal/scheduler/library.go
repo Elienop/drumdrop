@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/elienop/drumdrop/internal/musora"
@@ -91,21 +92,33 @@ func plexEpisodeBase(show, title string, season, episode int) string {
 }
 
 // moveToLibraryPlexTV moves the finished lesson's files out of the scratch
-// lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each file
+// lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
 // from its scratch "NN - Title" base to the episode base
 // "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>" while preserving the suffix
 // (".mp4", ".en.vtt", ".nfo", "-poster.jpg", …). Files end up FLAT in the season
 // folder, which is shared across the show's episodes. It returns the season dir
-// and the moved episode .mp4 path (empty if no .mp4 was present, e.g.
-// ResourcesOnly). The emptied scratch lessonDir is removed after.
+// and a moved episode .mp4 path (empty if no .mp4 was present, e.g.
+// ResourcesOnly).
+//
+// A song produces two bracket-tagged video files ("<base> [Original].mp4" /
+// "<base> [Drumless].mp4"); both keep the same episode base after renaming
+// ("<episodeBase> [Original].mp4" …) so Plex merges them as ONE episode with two
+// versions. Entries are processed in sorted name order so videoPath
+// (the FIRST moved .mp4) is deterministic.
+//
+// Subdirectories are PRESERVED: each is moved into the season folder renamed
+// "<episodeBase> <dirname>" (e.g. "<episodeBase> resources" for a song's PDF),
+// so the resource folders survive into the library instead of being deleted with
+// the scratch dir.
 //
 // Move semantics mirror moveToLibrary: try the rename seam first, fall back to a
-// per-file copyFile + remove-source on ANY rename error (cross-filesystem). Unlike
-// moveToLibrary it composes the destination from show/season directly rather than
-// from a downloads-relative path, but it still guards the scratch lessonDir: a
-// "." / ".." / ".."-prefixed / absolute Base would be a malformed scratch path, so
-// it refuses before any write. The error is for the caller to LOG; the move is
-// non-fatal and must never fail the job.
+// copy (copyFile for files, copyTree for directories) + remove-source on ANY
+// rename error (cross-filesystem). Unlike moveToLibrary it composes the
+// destination from show/season directly rather than from a downloads-relative
+// path, but it still guards the scratch lessonDir: a "." / ".." / ".."-prefixed /
+// absolute Base would be a malformed scratch path, so it refuses before any
+// write. The error is for the caller to LOG; the move is non-fatal and must
+// never fail the job.
 func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string) (seasonDir, videoPath string, err error) {
 	scratchBase := filepath.Base(lessonDir)
 	// A malformed scratch base (root, escape, absolute) would make the per-file
@@ -124,23 +137,42 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	if err != nil {
 		return "", "", fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
 	}
+	// Sort by name so the chosen videoPath (the first moved .mp4) is deterministic
+	// across filesystems and across a song's multiple version files.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
 	for _, e := range entries {
+		name := e.Name()
+		src := filepath.Join(lessonDir, name)
+
 		if e.IsDir() {
-			continue // drumdrop produces a flat lesson dir; ignore any nested dir
+			// Preserve the subdir (e.g. resources/ holding a song's PDF), renamed
+			// "<episodeBase> <dirname>" so it survives into the library.
+			dst := filepath.Join(seasonDir, episodeBase+" "+name)
+			if rerr := rename(src, dst); rerr != nil {
+				// Cross-filesystem (or otherwise unrenamable): copy the tree then drop
+				// the source. A copy failure leaves the source in place.
+				if cerr := copyTree(src, dst); cerr != nil {
+					return "", "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", src, dst, rerr, cerr)
+				}
+				if rmerr := os.RemoveAll(src); rmerr != nil {
+					return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
+				}
+			}
+			continue
 		}
+
 		info, ierr := e.Info()
 		if ierr != nil {
-			return "", "", fmt.Errorf("stat scratch file %q: %w", e.Name(), ierr)
+			return "", "", fmt.Errorf("stat scratch file %q: %w", name, ierr)
 		}
 		if !info.Mode().IsRegular() {
 			continue // skip symlinks/devices: drumdrop only produces regular files
 		}
-		name := e.Name()
 		// Reuse the scratch base, swapping it for the episode base so the suffix
-		// (and thus the sidecar's role: .nfo/.vtt/-poster.jpg) is preserved.
+		// (and thus the sidecar's role: .nfo/.vtt/-poster.jpg, or a song's
+		// " [Original].mp4" version tag) is preserved.
 		newName := episodeBase + strings.TrimPrefix(name, scratchBase)
-		src := filepath.Join(lessonDir, name)
 		dst := filepath.Join(seasonDir, newName)
 
 		if rerr := rename(src, dst); rerr != nil {
@@ -153,7 +185,9 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 				return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
 			}
 		}
-		if name == scratchBase+".mp4" {
+		// Any moved .mp4 (regular "<base>.mp4" or a song's "<base> [Tag].mp4") is a
+		// candidate episode video; keep the FIRST in sorted order.
+		if videoPath == "" && strings.HasPrefix(name, scratchBase) && strings.HasSuffix(newName, ".mp4") {
 			videoPath = dst
 		}
 	}
