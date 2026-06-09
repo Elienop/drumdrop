@@ -65,6 +65,30 @@ func TestYtDlpArgs(t *testing.T) {
 	}
 }
 
+// YtDlpArgsYouTube is the soundslice-song variant: it must keep the format
+// selector, mp4 merge, and the "--" end-of-options token before the URL, but it
+// must NOT send the Vimeo referer (wrong origin for YouTube) and must NOT fetch
+// subtitles (YouTube auto-subs would spew dozens of sidecar files).
+func TestYtDlpArgsYouTube(t *testing.T) {
+	const url = "https://www.youtube.com/watch?v=MIdvUCCh8sA"
+	args := YtDlpArgsYouTube(url, "720", "en", "/out/%(ext)s")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--merge-output-format mp4", "height<=720", "language^=?en", url} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args missing %q: %v", want, args)
+		}
+	}
+	for _, unwanted := range []string{"player.vimeo.com", "--write-subs", "--sub-langs"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("YouTube args must not contain %q: %v", unwanted, args)
+		}
+	}
+	// "--" must be the penultimate arg, immediately before the URL.
+	if args[len(args)-1] != url || args[len(args)-2] != "--" {
+		t.Fatalf("expected %q immediately before URL %q, got tail %v", "--", url, args[len(args)-2:])
+	}
+}
+
 // The end-of-options token "--" must appear immediately before the URL so a URL
 // beginning with a dash cannot be parsed as a yt-dlp option.
 func TestYtDlpArgsEndOfOptionsBeforeURL(t *testing.T) {
@@ -478,5 +502,124 @@ func TestDownloadLessonLayout(t *testing.T) {
 	}
 	if len(got) != 4 {
 		t.Errorf("sheet-music files = %v, want 4", got)
+	}
+}
+
+// writeFakeYtDlp installs a POSIX fake yt-dlp on PATH that creates the output
+// file from its "-o" template (replacing %(ext)s with mp4), so a song download
+// can be exercised without the real binary. It returns immediately on Windows
+// via the same skip guard the other yt-dlp integration tests use.
+func writeFakeYtDlp(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake yt-dlp shell script is POSIX-only")
+	}
+	binDir := t.TempDir()
+	// Parse the -o template out of argv, swap %(ext)s -> mp4, and touch the file
+	// so DownloadLesson's caller can observe a produced video.
+	script := "#!/bin/sh\n" +
+		"out=\"\"\n" +
+		"while [ $# -gt 0 ]; do\n" +
+		"  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n" +
+		"  shift\n" +
+		"done\n" +
+		"out=$(printf '%s' \"$out\" | sed 's/%(ext)s/mp4/')\n" +
+		": > \"$out\"\n"
+	fake := filepath.Join(binDir, "yt-dlp")
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A song (no HLS, but a soundslice slug) must resolve its recordings and
+// download EACH as a bracket-tagged version file: "NN - Title [Original].mp4"
+// and "NN - Title [Drumless].mp4". The aux artifacts and nfo are still written.
+func TestDownloadLessonSongVersions(t *testing.T) {
+	writeFakeYtDlp(t)
+
+	// scoredata stub: two recordings (Original + Drumless).
+	ss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"Even Flow","r":[
+		  {"id":1,"name":"Original","sd":"MIdvUCCh8sA"},
+		  {"id":2,"name":"Drumless","sd":"J_CFgiS4C3U"}
+		]}`))
+	}))
+	defer ss.Close()
+	defer SetSoundsliceBase(ss.URL)()
+
+	l := &Lesson{
+		ID:         169230,
+		Title:      "Even Flow",
+		Soundslice: []SoundsliceRef{{Slug: "169230"}},
+		// No Video.HLSManifestURL -> the soundslice path is taken.
+	}
+
+	dir := t.TempDir()
+	if err := DownloadLesson(context.Background(), l, DownloadOpts{Dir: dir, Index: 1, Quality: "720"}); err != nil {
+		t.Fatalf("DownloadLesson (song): %v", err)
+	}
+
+	base := "01 - Even Flow"
+	lessonDir := filepath.Join(dir, base)
+	for _, p := range []string{
+		filepath.Join(lessonDir, base+" [Original].mp4"),
+		filepath.Join(lessonDir, base+" [Drumless].mp4"),
+		filepath.Join(lessonDir, base+".nfo"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected song file missing: %s (%v)", p, err)
+		}
+	}
+	// The plain (non-versioned) lesson video must NOT exist for a song.
+	if _, err := os.Stat(filepath.Join(lessonDir, base+".mp4")); err == nil {
+		t.Errorf("unexpected plain %s.mp4 for a song (should be version-tagged only)", base)
+	}
+}
+
+// A song whose soundslice score has ZERO recordings produces NO video and is
+// NOT an error: the song is honestly video-less, and the nfo/aux still land.
+func TestDownloadLessonSongNoRecordings(t *testing.T) {
+	writeFakeYtDlp(t)
+
+	ss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"Empty","r":[]}`))
+	}))
+	defer ss.Close()
+	defer SetSoundsliceBase(ss.URL)()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+
+	l := &Lesson{
+		ID:         1,
+		Title:      "No Video Song",
+		Soundslice: []SoundsliceRef{{Slug: "1"}},
+		Resources:  []Resource{{Name: "Chart", URL: srv.URL + "/chart.pdf"}},
+	}
+
+	dir := t.TempDir()
+	if err := DownloadLesson(context.Background(), l, DownloadOpts{Dir: dir, Index: 2}); err != nil {
+		t.Fatalf("zero-recording song must not error: %v", err)
+	}
+
+	base := "02 - No Video Song"
+	lessonDir := filepath.Join(dir, base)
+	// No video of any shape.
+	vids, _ := filepath.Glob(filepath.Join(lessonDir, "*.mp4"))
+	if len(vids) != 0 {
+		t.Errorf("expected no video files, got %v", vids)
+	}
+	// nfo + the PDF resource still written.
+	for _, p := range []string{
+		filepath.Join(lessonDir, base+".nfo"),
+		filepath.Join(lessonDir, "resources", "Chart"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected aux file missing: %s (%v)", p, err)
+		}
 	}
 }
