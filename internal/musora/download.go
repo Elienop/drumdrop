@@ -68,6 +68,10 @@ func FormatSelector(quality, audioLang string) string {
 // YtDlpArgs builds the yt-dlp argv for a lesson's HLS manifest. A literal
 // end-of-options token ("--") is inserted immediately before the URL so that
 // an HLS URL beginning with a dash cannot be parsed as a yt-dlp option.
+//
+// --force-overwrites makes a retry/re-download always produce a fresh, complete
+// file: without it yt-dlp skips an output that already exists, so a truncated
+// .mp4 left by a cancelled/partial prior attempt could be recorded as a success.
 func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 	return []string{
 		"--user-agent", browserUA,
@@ -76,9 +80,31 @@ func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 		"--merge-output-format", "mp4",
 		"--write-subs", "--sub-langs", "all",
 		"--no-warnings", "--newline",
+		"--force-overwrites",
 		"-o", outTemplate,
 		"--",
 		hls,
+	}
+}
+
+// YtDlpArgsYouTube builds the yt-dlp argv for a YouTube watch URL (a soundslice
+// song recording). It mirrors YtDlpArgs — same format selector, mp4 merge, and
+// the "--" end-of-options token before the URL — but deliberately drops two
+// things: the Vimeo referer (wrong origin for YouTube) and subtitle fetching
+// (YouTube auto-captions would spew a sidecar file per language).
+//
+// --force-overwrites is kept (as in YtDlpArgs): a retry/re-download must never
+// reuse a partial file left by a cancelled prior attempt.
+func YtDlpArgsYouTube(videoURL, quality, audioLang, outTemplate string) []string {
+	return []string{
+		"--user-agent", browserUA,
+		"-f", FormatSelector(quality, audioLang),
+		"--merge-output-format", "mp4",
+		"--no-warnings", "--newline",
+		"--force-overwrites",
+		"-o", outTemplate,
+		"--",
+		videoURL,
 	}
 }
 
@@ -309,46 +335,88 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if !o.ResourcesOnly && l.Video.HLSManifestURL != "" {
-		hls := l.Video.HLSManifestURL
-		if !strings.HasPrefix(hls, "http://") && !strings.HasPrefix(hls, "https://") {
-			return fmt.Errorf("refusing to invoke yt-dlp: HLS URL is not http(s): %q", hls)
-		}
-		args := YtDlpArgs(hls, o.Quality, o.AudioLang, filepath.Join(dir, base+".%(ext)s"))
-		if o.OnProgress != nil {
-			args = append(progressArgs(), args...)
-		}
-		cmd := exec.CommandContext(ctx, "yt-dlp", args...)
-		// On context cancel, kill yt-dlp AND its ffmpeg child. The mechanism is
-		// platform-specific (process-group SIGKILL on Unix; the os/exec default on
-		// Windows) — see configureCancelKill in proc_kill_{unix,windows}.go.
-		configureCancelKill(cmd)
-		cmd.Stderr = os.Stderr
-		if o.OnProgress != nil {
-			// Capture stdout so progress lines can be parsed; scanProgress still
-			// mirrors every line to os.Stdout, so the CLI output is preserved.
-			stdout, err := cmd.StdoutPipe()
+	if !o.ResourcesOnly {
+		if l.Video.HLSManifestURL != "" {
+			// A lesson with its own Musora/Vimeo HLS: download it as the single
+			// "<base>.mp4" video.
+			hls := l.Video.HLSManifestURL
+			if !strings.HasPrefix(hls, "http://") && !strings.HasPrefix(hls, "https://") {
+				return fmt.Errorf("refusing to invoke yt-dlp: HLS URL is not http(s): %q", hls)
+			}
+			args := YtDlpArgs(hls, o.Quality, o.AudioLang, filepath.Join(dir, base+".%(ext)s"))
+			if o.OnProgress != nil {
+				args = append(progressArgs(), args...)
+			}
+			if err := runYtDlp(ctx, args, o.OnProgress); err != nil {
+				return err
+			}
+		} else if slug := l.SoundsliceSlug(); slug != "" {
+			// A song has no Musora/Vimeo video of its own; its playable videos are
+			// the YouTube-backed recordings referenced inside its soundslice score.
+			// Download EACH recording (e.g. Original + Drumless) as a bracket-tagged
+			// version file: "<base> [Original].mp4" / "<base> [Drumless].mp4".
+			recs, err := ResolveSoundsliceRecordings(slug)
 			if err != nil {
-				return err
+				// Fatal so the job retries a transient soundslice failure rather than
+				// silently marking the song downloaded with no video.
+				return fmt.Errorf("resolve soundslice %s: %w", slug, err)
 			}
-			if err := cmd.Start(); err != nil {
-				return err
+			for i, rec := range recs {
+				label := Sanitize(rec.Name)
+				if label == "" {
+					label = fmt.Sprintf("recording %d", i+1)
+				}
+				out := filepath.Join(dir, fmt.Sprintf("%s [%s].%%(ext)s", base, label))
+				args := YtDlpArgsYouTube("https://www.youtube.com/watch?v="+rec.YouTubeID, o.Quality, o.AudioLang, out)
+				if o.OnProgress != nil {
+					args = append(progressArgs(), args...)
+				}
+				if err := runYtDlp(ctx, args, o.OnProgress); err != nil {
+					return fmt.Errorf("download recording %q (%s): %w", rec.Name, rec.YouTubeID, err)
+				}
 			}
-			scanProgress(stdout, o.OnProgress)
-			if err := cmd.Wait(); err != nil {
-				return err
-			}
-		} else {
-			cmd.Stdout = os.Stdout
-			if err := cmd.Run(); err != nil {
-				return err
-			}
+			// recs empty -> the song honestly has no video; not an error.
 		}
 	}
 	for _, f := range fetchAuxArtifacts(l, dir, base) {
 		fmt.Fprintf(os.Stderr, "drumdrop: lesson %d: failed to fetch %s %s: %v\n", l.ID, f.Artifact, f.URL, f.Err)
 	}
 	return os.WriteFile(filepath.Join(dir, base+".nfo"), []byte(BuildNFO(l)), 0o644)
+}
+
+// runYtDlp executes one yt-dlp invocation with the given argv and returns its
+// error (nil on success). It is shared byte-for-byte by the HLS and the
+// soundslice-song download paths so both honour the same cancellation and
+// progress semantics:
+//
+//   - ctx cancels the run: the command runs under exec.CommandContext and is
+//     killed by process group (configureCancelKill) so yt-dlp and its ffmpeg
+//     child both die.
+//   - when onProgress is non-nil, stdout is captured and scanned for DRUMDROP
+//     progress lines (still mirrored to os.Stdout); when nil, stdout goes
+//     straight to os.Stdout — the exact pre-callback behaviour.
+func runYtDlp(ctx context.Context, args []string, onProgress func(DownloadProgress)) error {
+	cmd := exec.CommandContext(ctx, "yt-dlp", args...)
+	// On context cancel, kill yt-dlp AND its ffmpeg child. The mechanism is
+	// platform-specific (process-group SIGKILL on Unix; the os/exec default on
+	// Windows) — see configureCancelKill in proc_kill_{unix,windows}.go.
+	configureCancelKill(cmd)
+	cmd.Stderr = os.Stderr
+	if onProgress != nil {
+		// Capture stdout so progress lines can be parsed; scanProgress still
+		// mirrors every line to os.Stdout, so the CLI output is preserved.
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		scanProgress(stdout, onProgress)
+		return cmd.Wait()
+	}
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
 }
 
 func firstNonEmpty(vals ...string) string {

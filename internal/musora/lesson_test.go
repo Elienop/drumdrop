@@ -55,6 +55,49 @@ func TestAssignmentSheetMusicShapes(t *testing.T) {
 	}
 }
 
+// A song doc carries a soundslice[] array (the play-along scores); the Lesson
+// must decode it into Soundslice and SoundsliceSlug() must return the first
+// non-empty score slug — the id used to resolve the song's YouTube recordings.
+// soundslice_length_in_second can be fractional, so it rides the flexSeconds
+// decoder rather than failing the lesson.
+func TestLessonSoundsliceDecode(t *testing.T) {
+	const sample = `[{"id":169230,"title":"Even Flow","brand":"drumeo","soundslice":[
+	  {"soundslice_slug":"169230","soundslice_title":"Even Flow","soundslice_length_in_second":315.5},
+	  {"soundslice_slug":"999999","soundslice_title":"Alt"}
+	]}]`
+	var res []Lesson
+	if err := json.Unmarshal([]byte(sample), &res); err != nil {
+		t.Fatalf("song unmarshal failed: %v", err)
+	}
+	l := res[0]
+	if len(l.Soundslice) != 2 {
+		t.Fatalf("Soundslice = %d entries, want 2", len(l.Soundslice))
+	}
+	if l.Soundslice[0].Slug != "169230" || l.Soundslice[0].Title != "Even Flow" {
+		t.Fatalf("Soundslice[0] = %+v, want slug 169230 / title Even Flow", l.Soundslice[0])
+	}
+	if got := int(l.Soundslice[0].Length); got != 315 {
+		t.Fatalf("Soundslice[0].Length = %d, want 315 (truncated fractional)", got)
+	}
+	if got := l.SoundsliceSlug(); got != "169230" {
+		t.Fatalf("SoundsliceSlug() = %q, want %q", got, "169230")
+	}
+}
+
+// SoundsliceSlug skips empty slugs and returns "" when there is no play-along,
+// so a video-less, soundslice-less lesson is handled honestly by the caller.
+func TestLessonSoundsliceSlugFallback(t *testing.T) {
+	// First entry has an empty slug -> the second non-empty slug wins.
+	withGap := &Lesson{Soundslice: []SoundsliceRef{{Slug: ""}, {Slug: "225924"}}}
+	if got := withGap.SoundsliceSlug(); got != "225924" {
+		t.Fatalf("SoundsliceSlug() with leading empty = %q, want %q", got, "225924")
+	}
+	// No soundslice at all -> "".
+	if got := (&Lesson{}).SoundsliceSlug(); got != "" {
+		t.Fatalf("SoundsliceSlug() with no soundslice = %q, want empty", got)
+	}
+}
+
 // length_in_seconds is coalesce(length_in_seconds, soundslice[0].soundslice_length_in_second)
 // in resolve_lesson.groq; soundslice-backed content (songs/play-alongs) can yield
 // a FRACTIONAL duration, which a plain int field rejects — failing the whole

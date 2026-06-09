@@ -102,6 +102,17 @@ type Instructor struct {
 	Name string `json:"name"`
 }
 
+// SoundsliceRef is one entry of a song's soundslice[] array — a play-along
+// score attached to the lesson. Slug is the soundslice SCORE id (e.g. "169230")
+// used to fetch the score's YouTube-backed recordings. Length rides flexSeconds
+// because soundslice durations are fractional, the same schema landmine that the
+// coalesced length_in_seconds field guards against.
+type SoundsliceRef struct {
+	Slug   string      `json:"soundslice_slug"`
+	Title  string      `json:"soundslice_title"`
+	Length flexSeconds `json:"soundslice_length_in_second"`
+}
+
 type Lesson struct {
 	ID               int          `json:"id"`
 	Title            string       `json:"title"`
@@ -125,6 +136,21 @@ type Lesson struct {
 	ParentContentData   []struct {
 		Title string `json:"title"`
 	} `json:"parent_content_data"`
+	Soundslice []SoundsliceRef `json:"soundslice"`
+}
+
+// SoundsliceSlug returns the first non-empty soundslice score slug for the
+// lesson, or "" if the lesson has no soundslice play-along. A song's playable
+// video is a YouTube recording referenced inside its soundslice score, so this
+// slug is the entry point to resolving that video when the lesson carries no
+// Musora/Vimeo HLS of its own.
+func (l *Lesson) SoundsliceSlug() string {
+	for _, s := range l.Soundslice {
+		if s.Slug != "" {
+			return s.Slug
+		}
+	}
+	return ""
 }
 
 func ResolveLesson(id int, permIDs string) (*Lesson, error) {

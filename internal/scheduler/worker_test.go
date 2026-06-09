@@ -267,6 +267,25 @@ func (d *fakeDownloader) Download(_ context.Context, l *musora.Lesson, o musora.
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
+		// A song (soundslice slug, no HLS) produces TWO bracket-tagged version
+		// files plus an nfo and a resources/ PDF — exactly the layout the real
+		// DownloadLesson writes for the soundslice path — instead of the single
+		// "<base>.mp4" a regular lesson produces.
+		if l.SoundsliceSlug() != "" && l.Video.HLSManifestURL == "" {
+			for _, tag := range []string{"Original", "Drumless"} {
+				p := filepath.Join(dir, fmt.Sprintf("%s [%s].mp4", base, tag))
+				if err := os.WriteFile(p, d.writeMP4, 0o644); err != nil {
+					return err
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, base+".nfo"), []byte("<movie/>"), 0o644); err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "resources"), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, "resources", "song.pdf"), []byte("pdf-bytes"), 0o644)
+		}
 		if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
 			return err
 		}
@@ -309,6 +328,101 @@ func newTestWorker(store Store, res Resolver, dl Downloader, sleep func(time.Dur
 // TestNewWorkerClampsMaxAttempts verifies a non-positive MaxAttempts is clamped
 // to 1, so a zero-value Config still makes one real download attempt instead of
 // skipping the attempt loop entirely and marking every job failed without trying.
+// producedVideo must find a song's bracket-tagged version files when no plain
+// "<base>.mp4" exists: it returns the FIRST (sorted) version path and the SUM
+// of every "<base>...mp4" file's bytes, so MarkDownloaded records real metadata
+// for a multi-version song download.
+func TestProducedVideoSongVersions(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp) // producedVideo derives base from lessonDir's own name
+	// Two version files (no plain <base>.mp4), distinct sizes, plus a sidecar.
+	files := map[string][]byte{
+		base + " [Original].mp4": []byte("aaaa"),   // 4 bytes
+		base + " [Drumless].mp4": []byte("bbbbbb"), // 6 bytes
+		base + ".nfo":            []byte("<nfo/>"), // not a video, ignored
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gotPath, gotBytes := w.producedVideo(tmp)
+	wantPath := filepath.Join(tmp, base+" [Drumless].mp4") // sorted-first ('D' < 'O')
+	if gotPath != wantPath {
+		t.Errorf("videoPath = %q, want %q (first sorted version file)", gotPath, wantPath)
+	}
+	if gotBytes != 10 {
+		t.Errorf("bytes = %d, want 10 (sum of both versions)", gotBytes)
+	}
+}
+
+// producedVideo still returns the plain "<base>.mp4" for a regular lesson, and
+// sums it in too when version files happen to coexist.
+func TestProducedVideoRegularLesson(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, base+".mp4"), []byte("12345"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotPath, gotBytes := w.producedVideo(tmp)
+	if gotPath != filepath.Join(tmp, base+".mp4") || gotBytes != 5 {
+		t.Errorf("producedVideo = %q/%d, want plain mp4 / 5", gotPath, gotBytes)
+	}
+}
+
+// producedVideo must reject yt-dlp fragment files ("<base> [Tag].fNNN.mp4") and
+// unrelated strays ("<base> X.mp4") so neither inflates the recorded byte count
+// nor is mistaken for the episode video — only the real "<base> [Tag].mp4" (or
+// "<base>.mp4") counts.
+func TestProducedVideoRejectsStrayFiles(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp)
+	files := map[string][]byte{
+		base + " Extra.mp4":           []byte("stray-not-a-version"), // unrelated stray
+		base + " [Original].f137.mp4": []byte("fragment-file-bytes"), // yt-dlp fragment
+		base + " [Original].mp4":      []byte("real77"),              // the real version (6 bytes)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(tmp, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gotPath, gotBytes := w.producedVideo(tmp)
+	if gotPath != filepath.Join(tmp, base+" [Original].mp4") {
+		t.Errorf("videoPath = %q, want the real [Original].mp4 (strays/fragments excluded)", gotPath)
+	}
+	if gotBytes != 6 {
+		t.Errorf("bytes = %d, want 6 (only the real version, not strays/fragments)", gotBytes)
+	}
+}
+
+// No video of any shape -> "" / 0 (e.g. a video-less song or ResourcesOnly).
+func TestProducedVideoNone(t *testing.T) {
+	w := &Worker{}
+	tmp := t.TempDir()
+	base := filepath.Base(tmp)
+	if err := os.WriteFile(filepath.Join(tmp, base+".nfo"), []byte("<nfo/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, b := w.producedVideo(tmp); p != "" || b != 0 {
+		t.Errorf("producedVideo = %q/%d, want empty/0 when no mp4", p, b)
+	}
+
+	// ResourcesOnly short-circuits even if an mp4 somehow exists.
+	wRO := &Worker{}
+	wRO.Cfg.ResourcesOnly = true
+	if err := os.WriteFile(filepath.Join(tmp, base+".mp4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, b := wRO.producedVideo(tmp); p != "" || b != 0 {
+		t.Errorf("producedVideo (ResourcesOnly) = %q/%d, want empty/0", p, b)
+	}
+}
+
 func TestNewWorkerClampsMaxAttempts(t *testing.T) {
 	for _, in := range []int{0, -3} {
 		w := NewWorker(nil, nil, nil, Config{MaxAttempts: in}, "", nil)
@@ -1428,6 +1542,75 @@ func TestWorkerPlexTvLayoutOnSuccess(t *testing.T) {
 	}
 	if got := store.markDownloaded[0].bytes; got != int64(len(dl.writeMP4)) {
 		t.Errorf("bytes = %d, want %d", got, len(dl.writeMP4))
+	}
+}
+
+// TestWorkerPlexTvLayoutOnSuccessSong proves the end-to-end plex-tv flow for a
+// SONG: both bracket-tagged version files land flat in the season dir sharing
+// the episode base (so Plex merges them as one episode with two versions), the
+// song's resources/ PDF survives into the library renamed with the episode-base
+// prefix, and MarkDownloaded records a videoPath that exists on disk.
+func TestWorkerPlexTvLayoutOnSuccessSong(t *testing.T) {
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 5, Valid: true}}
+
+	// A song: soundslice slug, no HLS -> the fake writes the two version files.
+	song := &musora.Lesson{ID: 100, Title: "Even Flow", Soundslice: []musora.SoundsliceRef{{Slug: "169230"}}}
+	res := fakeResolver{lessons: map[int]*musora.Lesson{100: song}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	downloads := filepath.Join(tmp, "dl")
+	library := filepath.Join(tmp, "lib")
+	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = downloads
+	w.Cfg.LibraryDir = library
+	w.Cfg.Layout = "plex-tv"
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Fatalf("job status = %q, want done", got)
+	}
+
+	seasonDir := filepath.Join(library, "Beginner Course", "Season 01")
+	episodeBase := "Beginner Course - s01e05 - Even Flow"
+	// Both version files landed flat in the season dir under the shared base.
+	for _, tag := range []string{" [Original].mp4", " [Drumless].mp4"} {
+		p := filepath.Join(seasonDir, episodeBase+tag)
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("missing song version file %s: %v", episodeBase+tag, err)
+			continue
+		}
+		if string(got) != string(dl.writeMP4) {
+			t.Errorf("%s content = %q, want %q", episodeBase+tag, got, dl.writeMP4)
+		}
+	}
+	// The song's resources/ PDF survived into the library, renamed with prefix.
+	pdf := filepath.Join(seasonDir, episodeBase+" resources", "song.pdf")
+	if _, err := os.Stat(pdf); err != nil {
+		t.Errorf("song PDF lost in plex-tv move: %v", err)
+	}
+	// The scratch downloads lesson dir is gone.
+	srcDir := filepath.Join(downloads, "Beginner Course", "05 - Even Flow")
+	if _, err := os.Stat(srcDir); !os.IsNotExist(err) {
+		t.Errorf("downloads scratch lesson dir still present (stat err = %v), want moved away", err)
+	}
+	// MarkDownloaded recorded a videoPath that exists on disk (one of the versions).
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("markDownloaded calls = %d, want 1", len(store.markDownloaded))
+	}
+	vp := store.markDownloaded[0].videoPath
+	if vp == "" {
+		t.Fatal("videoPath is empty, want one of the moved version files")
+	}
+	if _, err := os.Stat(vp); err != nil {
+		t.Errorf("recorded videoPath does not exist on disk: %q (%v)", vp, err)
 	}
 }
 
