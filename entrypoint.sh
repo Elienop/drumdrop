@@ -17,4 +17,4 @@ for dir in /config /downloads; do
   fi
 done
 
-exec su-exec drumdrop "$@"
+exec gosu drumdrop "$@"
