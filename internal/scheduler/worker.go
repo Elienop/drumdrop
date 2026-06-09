@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -649,9 +648,10 @@ func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64)
 			continue
 		}
 		name := e.Name()
-		// Matches both "<base>.mp4" (regular lesson) and "<base> [Tag].mp4" (song
-		// version files), but not an unrelated mp4 with a different base.
-		if strings.HasPrefix(name, base) && strings.HasSuffix(name, ".mp4") {
+		// Matches "<base>.mp4" (regular lesson) and "<base> [Tag].mp4" (song version
+		// files), while rejecting yt-dlp fragments ("<base> [..].fNNN.mp4") and
+		// unrelated "<base> X.mp4" strays.
+		if isLessonVideoName(name, base) {
 			names = append(names, name)
 		}
 	}

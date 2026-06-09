@@ -91,6 +91,18 @@ func plexEpisodeBase(show, title string, season, episode int) string {
 	return fmt.Sprintf("%s - s%02de%02d - %s", musora.Sanitize(show), season, episode, musora.Sanitize(title))
 }
 
+// isLessonVideoName reports whether name is a video file DownloadLesson produces
+// for the lesson whose folder/file base is base: exactly "<base>.mp4" (regular
+// lesson) or "<base> [Label].mp4" (a song version file). It deliberately rejects
+// yt-dlp fragment files ("<base> [..].fNNN.mp4") and any unrelated "<base> X.mp4".
+func isLessonVideoName(name, base string) bool {
+	rem := strings.TrimPrefix(name, base)
+	if rem == name {
+		return false // base wasn't a prefix
+	}
+	return rem == ".mp4" || (strings.HasPrefix(rem, " [") && strings.HasSuffix(rem, "].mp4"))
+}
+
 // moveToLibraryPlexTV moves the finished lesson's files out of the scratch
 // lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
 // from its scratch "NN - Title" base to the episode base
@@ -185,9 +197,10 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 				return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
 			}
 		}
-		// Any moved .mp4 (regular "<base>.mp4" or a song's "<base> [Tag].mp4") is a
-		// candidate episode video; keep the FIRST in sorted order.
-		if videoPath == "" && strings.HasPrefix(name, scratchBase) && strings.HasSuffix(newName, ".mp4") {
+		// A real episode video (regular "<base>.mp4" or a song's "<base> [Tag].mp4")
+		// is a candidate; fragments/strays are rejected. Keep the FIRST in sorted
+		// order. The matcher runs on the SCRATCH name (against scratchBase).
+		if videoPath == "" && isLessonVideoName(name, scratchBase) {
 			videoPath = dst
 		}
 	}

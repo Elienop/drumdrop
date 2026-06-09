@@ -68,6 +68,10 @@ func FormatSelector(quality, audioLang string) string {
 // YtDlpArgs builds the yt-dlp argv for a lesson's HLS manifest. A literal
 // end-of-options token ("--") is inserted immediately before the URL so that
 // an HLS URL beginning with a dash cannot be parsed as a yt-dlp option.
+//
+// --force-overwrites makes a retry/re-download always produce a fresh, complete
+// file: without it yt-dlp skips an output that already exists, so a truncated
+// .mp4 left by a cancelled/partial prior attempt could be recorded as a success.
 func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 	return []string{
 		"--user-agent", browserUA,
@@ -76,6 +80,7 @@ func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 		"--merge-output-format", "mp4",
 		"--write-subs", "--sub-langs", "all",
 		"--no-warnings", "--newline",
+		"--force-overwrites",
 		"-o", outTemplate,
 		"--",
 		hls,
@@ -87,12 +92,16 @@ func YtDlpArgs(hls, quality, audioLang, outTemplate string) []string {
 // the "--" end-of-options token before the URL — but deliberately drops two
 // things: the Vimeo referer (wrong origin for YouTube) and subtitle fetching
 // (YouTube auto-captions would spew a sidecar file per language).
+//
+// --force-overwrites is kept (as in YtDlpArgs): a retry/re-download must never
+// reuse a partial file left by a cancelled prior attempt.
 func YtDlpArgsYouTube(videoURL, quality, audioLang, outTemplate string) []string {
 	return []string{
 		"--user-agent", browserUA,
 		"-f", FormatSelector(quality, audioLang),
 		"--merge-output-format", "mp4",
 		"--no-warnings", "--newline",
+		"--force-overwrites",
 		"-o", outTemplate,
 		"--",
 		videoURL,

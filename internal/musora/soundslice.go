@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // soundsliceBase is the soundslice origin. It is a var (not const) so tests can
@@ -43,15 +44,18 @@ type SoundsliceRecording struct {
 // retried forever. A network/HTTP/JSON failure IS returned as an error so the
 // caller can retry a transient soundslice outage.
 func ResolveSoundsliceRecordings(slug string) ([]SoundsliceRecording, error) {
-	url := soundsliceBase + "/scores/" + slug + "/embed/scoredata/"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	// PathEscape the slug as defense-in-depth: slugs are numeric today, but this
+	// keeps a stray value from breaking out of the /scores/<slug>/ path segment.
+	esc := url.PathEscape(slug)
+	endpoint := soundsliceBase + "/scores/" + esc + "/embed/scoredata/"
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", browserUA)
 	// The embed Referer is the ONLY requirement to read scoredata; the eu query
 	// param the embed page sometimes carries is irrelevant and is omitted.
-	req.Header.Set("Referer", soundsliceBase+"/scores/"+slug+"/embed/?api=1")
+	req.Header.Set("Referer", soundsliceBase+"/scores/"+esc+"/embed/?api=1")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := httpClient.Do(req)

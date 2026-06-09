@@ -58,7 +58,7 @@ func TestFormatSelectorAudioLang(t *testing.T) {
 func TestYtDlpArgs(t *testing.T) {
 	args := YtDlpArgs("https://m3u8", "720", "en", "/out/%(ext)s")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--write-subs", "--referer https://player.vimeo.com/", "height<=720", "language^=?en", "https://m3u8"} {
+	for _, want := range []string{"--write-subs", "--referer https://player.vimeo.com/", "--force-overwrites", "height<=720", "language^=?en", "https://m3u8"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -73,7 +73,7 @@ func TestYtDlpArgsYouTube(t *testing.T) {
 	const url = "https://www.youtube.com/watch?v=MIdvUCCh8sA"
 	args := YtDlpArgsYouTube(url, "720", "en", "/out/%(ext)s")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"--merge-output-format mp4", "height<=720", "language^=?en", url} {
+	for _, want := range []string{"--merge-output-format mp4", "--force-overwrites", "height<=720", "language^=?en", url} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -621,5 +621,41 @@ func TestDownloadLessonSongNoRecordings(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected aux file missing: %s (%v)", p, err)
 		}
+	}
+}
+
+// A soundslice resolve failure (transient HTTP error) is FATAL: DownloadLesson
+// must surface it so the job retries, and must NOT have written any video, so a
+// half-downloaded song is never recorded as complete. The error must name the
+// stage ("resolve soundslice") and the slug for diagnosis.
+func TestDownloadLessonSongResolveFails(t *testing.T) {
+	writeFakeYtDlp(t)
+
+	ss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ss.Close()
+	defer SetSoundsliceBase(ss.URL)()
+
+	l := &Lesson{
+		ID:         225924,
+		Title:      "Africa",
+		Soundslice: []SoundsliceRef{{Slug: "225924"}},
+	}
+
+	dir := t.TempDir()
+	err := DownloadLesson(context.Background(), l, DownloadOpts{Dir: dir, Index: 1})
+	if err == nil {
+		t.Fatal("DownloadLesson with a failing soundslice resolve returned nil, want a fatal error")
+	}
+	if !strings.Contains(err.Error(), "resolve soundslice") || !strings.Contains(err.Error(), "225924") {
+		t.Errorf("error should name the stage and slug: %v", err)
+	}
+
+	// No video was written (the resolve failed before any yt-dlp run).
+	base := "01 - Africa"
+	vids, _ := filepath.Glob(filepath.Join(dir, base, "*.mp4"))
+	if len(vids) != 0 {
+		t.Errorf("expected no video files after a resolve failure, got %v", vids)
 	}
 }
