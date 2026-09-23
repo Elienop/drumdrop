@@ -31,3 +31,5 @@ session.cookie
 # symlink into the owner's Obsidian vault (the project rules note). Kept local on
 # purpose, like docs/superpowers/ above: none of it belongs in the repo's history.
 .claude/
+# Per-machine MCP server config for Claude Code; local, like .claude/.
+.mcp.json
