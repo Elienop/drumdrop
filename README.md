@@ -246,7 +246,11 @@ Each course becomes one *show*, each lesson an *episode*:
 - **Show** — the course for a node follow; the lesson's parent course for an instructor
   follow (falling back to the instructor name for course-less lessons); else `content-<id>`.
 - **Season** is always `01`; the **episode number** is the lesson's position in the course
-  (the same `NN` used in the default layout). Files are flat in the season folder.
+  (the same `NN` used in the default layout). Files are flat in the season folder; a
+  lesson's `resources/`, `play-along/` and `sheet-music/` folders move in as
+  `<episode> resources` and so on.
+- **Deleting** a lesson removes every file and folder of that episode (both versions of a
+  song included) and nothing of any other episode; the season folder stays.
 - It shapes **only** the library move: downloads still happen in the usual scratch layout,
   and a move failure is non-fatal (the file stays in downloads). With no `DRUMDROP_LIBRARY_DIR`
   the setting does nothing.

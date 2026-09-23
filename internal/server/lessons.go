@@ -186,7 +186,7 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	// Best-effort file removal before clearing the paths; a failure must not block
 	// the tombstone (the row would otherwise keep claiming a path we tried to drop).
 	if l.OutputDir.Valid {
-		_ = removeLessonFiles(s.cfg.Layout, s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
+		_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
 	}
 
 	if err := s.store.UpdateLessonDeleted(r.Context(), id); err != nil {

@@ -32,11 +32,6 @@ type Config struct {
 	// lessons stay in downloads and output_dir is the downloads path. There is no
 	// host-path mapping for the library — Plex owns the path.
 	LibraryDir string
-	// Layout mirrors scheduler.Config.Layout (lower-cased): "" = default,
-	// "plex-tv" = Plex TV-Shows naming. The delete-files path needs it to decide
-	// whether output_dir is a per-lesson folder (RemoveAll) or a shared season
-	// folder (remove only the target episode's files).
-	Layout string
 }
 
 // Deps bundles the engine handles the write/sync handlers need beyond the

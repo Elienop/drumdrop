@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/elienop/drumdrop/internal/musora"
@@ -88,7 +89,115 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 // sites MUST agree on it so the nfo the worker writes lands at the exact path the
 // move renamed the lesson's files to.
 func plexEpisodeBase(show, title string, season, episode int) string {
-	return fmt.Sprintf("%s - s%02de%02d - %s", musora.Sanitize(show), season, episode, musora.Sanitize(title))
+	return fmt.Sprintf("%s%02d - %s", plexEpisodePrefix(musora.Sanitize(show), season), episode, musora.Sanitize(title))
+}
+
+// plexEpisodePrefix is the part of every episode base that names the show and
+// season: "<showFolder> - s0Ne". PlexEpisodeMatcher checks a recorded video
+// against it, so it is the one place that format lives.
+func plexEpisodePrefix(showFolder string, season int) string {
+	return fmt.Sprintf("%s - s%02de", showFolder, season)
+}
+
+// plexSeasonName is the season folder the plex-tv move files a show's episodes
+// under ("Season 01").
+func plexSeasonName(season int) string {
+	return fmt.Sprintf("Season %02d", season)
+}
+
+// plexSeasonNumber parses a season folder name back into its number. It accepts
+// only a name plexSeasonName itself produces (checked by formatting the number
+// back), so a default-layout lesson folder ("NN - Title") never parses.
+func plexSeasonNumber(name string) (season int, ok bool) {
+	digits, found := strings.CutPrefix(name, "Season ")
+	if !found {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 0 || plexSeasonName(n) != name {
+		return 0, false
+	}
+	return n, true
+}
+
+// IsPlexSeasonDir reports whether dir is a plex-tv season folder, the folder the
+// plex-tv move shares between every episode of a show. The delete uses it to tell
+// a shared season folder (remove one episode's entries) from a lesson's own
+// folder (remove the folder), whatever DRUMDROP_LAYOUT says today.
+func IsPlexSeasonDir(dir string) bool {
+	_, ok := plexSeasonNumber(filepath.Base(dir))
+	return ok
+}
+
+// PlexEpisodeMatcher returns a predicate recognising, among the entries of the
+// season folder that holds videoPath, every entry the plex-tv move placed for
+// that episode: each version file, each sidecar and each subfolder. ok is false
+// when videoPath is not an episode video of that folder's show and season, so a
+// caller never sweeps on a guessed prefix.
+//
+// The move checks every name it is about to create against this same predicate,
+// built from the video it is about to record, and refuses to place anything the
+// predicate would miss. That is what keeps a delete in step with the move.
+func PlexEpisodeMatcher(videoPath string) (match func(name string, isDir bool) bool, ok bool) {
+	seasonDir := filepath.Dir(videoPath)
+	season, ok := plexSeasonNumber(filepath.Base(seasonDir))
+	if !ok {
+		return nil, false
+	}
+	base := plexEpisodeBaseOfVideo(filepath.Base(videoPath))
+	if base == "" || !strings.HasPrefix(base, plexEpisodePrefix(filepath.Base(filepath.Dir(seasonDir)), season)) {
+		return nil, false
+	}
+	return func(name string, isDir bool) bool { return isPlexEpisodeEntry(base, name, isDir) }, true
+}
+
+// plexEpisodeBaseOfVideo recovers the episode base from a moved video's file
+// name: "<base>.mp4" for a lesson, "<base> [Label].mp4" for each of a song's
+// versions, which share the untagged base. "" if the name is not an .mp4.
+//
+// A lesson whose own title ends in "[...]" yields a base one tag shorter than
+// its real one. That is harmless: the real base plus its suffix still parses as
+// a tag followed by a suffix (isPlexEpisodeSuffix), so every file still matches.
+func plexEpisodeBaseOfVideo(videoName string) string {
+	stem, ok := strings.CutSuffix(videoName, ".mp4")
+	if !ok || stem == "" {
+		return ""
+	}
+	if i := strings.LastIndex(stem, " ["); i > 0 && strings.HasSuffix(stem, "]") {
+		return stem[:i]
+	}
+	return stem
+}
+
+// isPlexEpisodeEntry reports whether name is "<base><suffix>" with a suffix the
+// plex-tv move produces (isPlexEpisodeSuffix).
+func isPlexEpisodeEntry(base, name string, isDir bool) bool {
+	rest, ok := strings.CutPrefix(name, base)
+	return ok && isPlexEpisodeSuffix(rest, isDir)
+}
+
+// isPlexEpisodeSuffix is the grammar of what follows the episode base in a name
+// the plex-tv move gives an entry:
+//   - a file: a sidecar or extension starting with '.' or '-' (".mp4", ".nfo",
+//     "-poster.jpg", ".en.vtt");
+//   - a folder: one space, then the scratch folder's name, with no further
+//     space (" resources", " play-along");
+//   - either, after a bracketed tag (" [Drumless].mp4", or " [Live] resources"
+//     when the tag is part of the title).
+//
+// A space is not a boundary on its own, so a sibling whose title merely extends
+// this one ("… Five Bonus.mp4", "… Five Bonus resources") never matches, and
+// neither does another episode number ("s01e05" is not a prefix of "s01e50 -").
+func isPlexEpisodeSuffix(rest string, isDir bool) bool {
+	if tagged, ok := strings.CutPrefix(rest, " ["); ok {
+		i := strings.LastIndex(tagged, "]")
+		return i >= 0 && isPlexEpisodeSuffix(tagged[i+1:], isDir)
+	}
+	if isDir {
+		folder, ok := strings.CutPrefix(rest, " ")
+		return ok && folder != "" && !strings.Contains(folder, " ")
+	}
+	return rest != "" && (rest[0] == '.' || rest[0] == '-')
 }
 
 // isLessonVideoName reports whether name is a video file DownloadLesson produces
@@ -131,6 +240,11 @@ func isLessonVideoName(name, base string) bool {
 // absolute Base would be a malformed scratch path, so it refuses before any
 // write. The error is for the caller to LOG; the move is non-fatal and must
 // never fail the job.
+//
+// Every name is worked out before anything is written, and the move refuses
+// (writing nothing) if a name would not be recognised by PlexEpisodeMatcher for
+// the video it is about to record. So a delete, which uses that matcher, always
+// finds everything a move placed.
 func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string) (seasonDir, videoPath string, err error) {
 	scratchBase := filepath.Base(lessonDir)
 	// A malformed scratch base (root, escape, absolute) would make the per-file
@@ -140,68 +254,34 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	}
 
 	episodeBase := plexEpisodeBase(show, title, season, episode)
-	seasonDir = filepath.Join(libraryDir, musora.Sanitize(show), fmt.Sprintf("Season %02d", season))
+	seasonDir = filepath.Join(libraryDir, musora.Sanitize(show), plexSeasonName(season))
+	steps, videoPath, err := planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase)
+	if err != nil {
+		return "", "", err
+	}
 	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create season dir %q: %w", seasonDir, err)
 	}
 
-	entries, err := os.ReadDir(lessonDir)
-	if err != nil {
-		return "", "", fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
-	}
-	// Sort by name so the chosen videoPath (the first moved .mp4) is deterministic
-	// across filesystems and across a song's multiple version files.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-
-	for _, e := range entries {
-		name := e.Name()
-		src := filepath.Join(lessonDir, name)
-
-		if e.IsDir() {
-			// Preserve the subdir (e.g. resources/ holding a song's PDF), renamed
-			// "<episodeBase> <dirname>" so it survives into the library.
-			dst := filepath.Join(seasonDir, episodeBase+" "+name)
-			if rerr := rename(src, dst); rerr != nil {
-				// Cross-filesystem (or otherwise unrenamable): copy the tree then drop
-				// the source. A copy failure leaves the source in place.
-				if cerr := copyTree(src, dst); cerr != nil {
-					return "", "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", src, dst, rerr, cerr)
+	for _, st := range steps {
+		if rerr := rename(st.src, st.dst); rerr != nil {
+			// Cross-filesystem (or otherwise unrenamable): copy then drop the
+			// source. A copy failure leaves the source in place.
+			if st.dir {
+				if cerr := copyTree(st.src, st.dst); cerr != nil {
+					return "", "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
 				}
-				if rmerr := os.RemoveAll(src); rmerr != nil {
-					return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
+				if rmerr := os.RemoveAll(st.src); rmerr != nil {
+					return "", "", fmt.Errorf("remove source after copy %q: %w", st.src, rmerr)
 				}
+				continue
 			}
-			continue
-		}
-
-		info, ierr := e.Info()
-		if ierr != nil {
-			return "", "", fmt.Errorf("stat scratch file %q: %w", name, ierr)
-		}
-		if !info.Mode().IsRegular() {
-			continue // skip symlinks/devices: drumdrop only produces regular files
-		}
-		// Reuse the scratch base, swapping it for the episode base so the suffix
-		// (and thus the sidecar's role: .nfo/.vtt/-poster.jpg, or a song's
-		// " [Original].mp4" version tag) is preserved.
-		newName := episodeBase + strings.TrimPrefix(name, scratchBase)
-		dst := filepath.Join(seasonDir, newName)
-
-		if rerr := rename(src, dst); rerr != nil {
-			// Cross-filesystem (or otherwise unrenamable): copy the single file then
-			// drop the source. A copy failure leaves the source in place.
-			if cerr := copyFile(src, dst, info.Mode()); cerr != nil {
-				return "", "", fmt.Errorf("copy %q -> %q (rename failed: %v): %w", src, dst, rerr, cerr)
+			if cerr := copyFile(st.src, st.dst, st.mode); cerr != nil {
+				return "", "", fmt.Errorf("copy %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
 			}
-			if rmerr := os.Remove(src); rmerr != nil {
-				return "", "", fmt.Errorf("remove source after copy %q: %w", src, rmerr)
+			if rmerr := os.Remove(st.src); rmerr != nil {
+				return "", "", fmt.Errorf("remove source after copy %q: %w", st.src, rmerr)
 			}
-		}
-		// A real episode video (regular "<base>.mp4" or a song's "<base> [Tag].mp4")
-		// is a candidate; fragments/strays are rejected. Keep the FIRST in sorted
-		// order. The matcher runs on the SCRATCH name (against scratchBase).
-		if videoPath == "" && isLessonVideoName(name, scratchBase) {
-			videoPath = dst
 		}
 	}
 
@@ -212,6 +292,80 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 		return seasonDir, videoPath, fmt.Errorf("remove emptied scratch dir %q: %w", lessonDir, rmerr)
 	}
 	return seasonDir, videoPath, nil
+}
+
+// plexMoveStep is one entry of a scratch lesson folder and where the plex-tv
+// move puts it.
+type plexMoveStep struct {
+	src, dst string
+	dir      bool
+	mode     fs.FileMode
+}
+
+// planPlexTVMove lists the scratch lesson folder in name order and names each
+// entry's destination in the season folder, without writing anything:
+//   - a file keeps its suffix, with the scratch base swapped for the episode
+//     base (".nfo", "-poster.jpg", a song's " [Original].mp4");
+//   - a folder becomes "<episodeBase> <folder>" (e.g. "<episodeBase> resources").
+//
+// Non-regular files are left out (drumdrop only produces regular files; they go
+// with the scratch folder). videoPath is the destination of the first real
+// lesson video in name order (isLessonVideoName), which for a song is its
+// [Drumless] version.
+//
+// It fails if the delete would not recognise a destination name. That check is
+// what keeps the move and the delete in step: rename a sidecar here, or add a
+// folder whose name has a space, and the move refuses instead of leaving files
+// a delete can never reach.
+func planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase string) (steps []plexMoveStep, videoPath string, err error) {
+	entries, err := os.ReadDir(lessonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+	}
+	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
+	// across filesystems and across a song's multiple version files.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	for _, e := range entries {
+		name := e.Name()
+		st := plexMoveStep{src: filepath.Join(lessonDir, name), dir: e.IsDir()}
+		if st.dir {
+			st.dst = filepath.Join(seasonDir, episodeBase+" "+name)
+		} else {
+			info, ierr := e.Info()
+			if ierr != nil {
+				return nil, "", fmt.Errorf("stat scratch file %q: %w", name, ierr)
+			}
+			if !info.Mode().IsRegular() {
+				continue // skip symlinks/devices: drumdrop only produces regular files
+			}
+			st.mode = info.Mode()
+			st.dst = filepath.Join(seasonDir, episodeBase+strings.TrimPrefix(name, scratchBase))
+			// The matcher runs on the SCRATCH name (against scratchBase), so
+			// yt-dlp fragments and strays are never chosen as the video.
+			if videoPath == "" && isLessonVideoName(name, scratchBase) {
+				videoPath = st.dst
+			}
+		}
+		steps = append(steps, st)
+	}
+
+	// Check every destination against what a delete will use: the matcher for
+	// the recorded video, or (no video) the episode base itself.
+	belongs := func(name string, isDir bool) bool { return isPlexEpisodeEntry(episodeBase, name, isDir) }
+	if videoPath != "" {
+		m, ok := PlexEpisodeMatcher(videoPath)
+		if !ok {
+			return nil, "", fmt.Errorf("refusing to move: a delete would not recognise the episode video %q", videoPath)
+		}
+		belongs = m
+	}
+	for _, st := range steps {
+		if !belongs(filepath.Base(st.dst), st.dir) {
+			return nil, "", fmt.Errorf("refusing to move: a delete would not recognise %q as part of episode %q", filepath.Base(st.dst), episodeBase)
+		}
+	}
+	return steps, videoPath, nil
 }
 
 // copyTree recursively copies the file tree at src into dst, recreating

@@ -1,22 +1,24 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
-// layoutPlexTV is the DRUMDROP_LAYOUT value (lower-cased) selecting Plex's
-// TV-Shows layout, mirroring scheduler.LayoutPlexTV. It is duplicated here rather
-// than imported to keep the server package free of a scheduler dependency.
-const layoutPlexTV = "plex-tv"
-
-// removeLessonFiles deletes a downloaded lesson's on-disk files. In the default
-// layout outputDir is the single per-lesson location (a downloads or, post-move,
-// a library folder) and the whole folder is removed. In the plex-tv layout
-// outputDir is a SHARED season folder, so only the target episode's files are
-// removed — the folder and any sibling episodes stay — keyed off videoPath's base.
+// removeLessonFiles deletes a downloaded lesson's on-disk files. What it removes
+// depends on where the lesson was recorded, not on today's DRUMDROP_LAYOUT, so
+// switching layouts can never turn a one-episode delete into a season wipe:
+//   - a plex-tv season folder (scheduler.IsPlexSeasonDir), shared by every
+//     episode of the show: only the entries the plex-tv move placed for this
+//     episode are removed, and the folder stays (removePlexEpisodeFiles);
+//   - anything else is the lesson's own folder (the default layout, or a
+//     plex-tv lesson whose move failed and which stayed in downloads): the whole
+//     folder is removed.
 //
 // It refuses to touch anything that does not sit safely under downloadsDir OR
 // libraryDir: it relativizes the path it would remove against each configured root
@@ -24,9 +26,9 @@ const layoutPlexTV = "plex-tv"
 // would mean the path is the root itself or escapes it). It errors only if NEITHER
 // root accepts the path, guarding a catastrophic delete outside or at the top of
 // either tree. A missing path (already gone) is tolerated.
-func removeLessonFiles(layout, downloadsDir, libraryDir, outputDir, videoPath string) error {
-	if layout == layoutPlexTV {
-		return removeLessonFilesPlexTV(downloadsDir, libraryDir, videoPath)
+func removeLessonFiles(downloadsDir, libraryDir, outputDir, videoPath string) error {
+	if scheduler.IsPlexSeasonDir(outputDir) || (videoPath != "" && scheduler.IsPlexSeasonDir(filepath.Dir(videoPath))) {
+		return removePlexEpisodeFiles(downloadsDir, libraryDir, videoPath)
 	}
 	if outputDir == "" {
 		return nil
@@ -50,14 +52,19 @@ func removeLessonFiles(layout, downloadsDir, libraryDir, outputDir, videoPath st
 	return nil
 }
 
-// removeLessonFilesPlexTV removes ONLY the target episode's files from a shared
-// Plex season folder: every file in filepath.Dir(videoPath) whose name starts with
-// the episode base (videoPath's filename minus ".mp4") AND whose next rune is '.'
-// or '-' — so "…s01e05" never matches a sibling "…s01e50" or "…s01e051". It NEVER
-// removes the folder (other episodes live there). The season folder must be safely
-// under downloadsDir or libraryDir (same guard as the default path); an empty
-// videoPath (undownloaded / ResourcesOnly lesson) is a no-op.
-func removeLessonFilesPlexTV(downloadsDir, libraryDir, videoPath string) error {
+// removePlexEpisodeFiles removes, from the shared season folder holding
+// videoPath, every entry the plex-tv move placed for that episode (all version
+// files, sidecars and subfolders), as recognised by scheduler.PlexEpisodeMatcher,
+// the same predicate the move checks its own names against. A sibling episode's
+// entries never match: "…s01e05" is not a prefix of "…s01e50", and a title that
+// merely extends this one ("… Five Bonus") is not a suffix the move produces. It
+// NEVER removes the season folder itself (other episodes live there).
+//
+// The season folder must be safely under downloadsDir or libraryDir (same guard
+// as the default path). An empty videoPath (undownloaded / ResourcesOnly lesson)
+// is a no-op: without the video there is no episode name to match on. A removal
+// failure does not stop the rest; every failed path is reported.
+func removePlexEpisodeFiles(downloadsDir, libraryDir, videoPath string) error {
 	if videoPath == "" {
 		return nil
 	}
@@ -69,11 +76,11 @@ func removeLessonFilesPlexTV(downloadsDir, libraryDir, videoPath string) error {
 		return fmt.Errorf("episode dir %q is not safely under downloads dir %q or library dir %q", seasonDir, downloadsDir, libraryDir)
 	}
 
-	base := strings.TrimSuffix(filepath.Base(videoPath), ".mp4")
-	if base == "" || base == "." {
-		// A degenerate videoPath with no real episode base: matching on an empty
-		// prefix would sweep unrelated files. Refuse to guess; do nothing.
-		return nil
+	belongs, ok := scheduler.PlexEpisodeMatcher(videoPath)
+	if !ok {
+		// Not an episode of this show and season: matching on a guessed prefix
+		// could sweep a sibling's files, so do nothing.
+		return fmt.Errorf("video %q is not a plex-tv episode of its season folder; refusing to guess its files", videoPath)
 	}
 	entries, err := os.ReadDir(seasonDir)
 	if err != nil {
@@ -82,25 +89,19 @@ func removeLessonFilesPlexTV(downloadsDir, libraryDir, videoPath string) error {
 		}
 		return fmt.Errorf("read season dir %q: %w", seasonDir, err)
 	}
+	var errs []error
 	for _, e := range entries {
-		if e.IsDir() {
+		if !belongs(e.Name(), e.IsDir()) {
 			continue
 		}
-		name := e.Name()
-		if !strings.HasPrefix(name, base) {
-			continue
-		}
-		// The rune right after the base must be a sidecar/extension boundary ('.' or
-		// '-') so e05 never matches e50/e051 or any longer episode-number sibling.
-		rest := name[len(base):]
-		if rest != "" && rest[0] != '.' && rest[0] != '-' {
-			continue
-		}
-		if err := os.Remove(filepath.Join(seasonDir, name)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove episode file %q: %w", name, err)
+		// RemoveAll removes a folder with its contents, a file, or a symlink itself
+		// (never its target), and treats an already-missing entry as success.
+		p := filepath.Join(seasonDir, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, fmt.Errorf("remove episode entry %q: %w", p, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // underRoot reports whether path is a safe subpath strictly inside root: a

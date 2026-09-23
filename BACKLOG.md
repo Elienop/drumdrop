@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D55 on 2026-09-23 (*moves*; re-check the
+the highest ID on this page: the next new ID is D57 on 2026-09-23 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -31,32 +31,9 @@ D52 into *Next up*._
 
 ## Next up
 
-*Order:* D51 and D52 lead because they leave the owner's files wrong on disk. This order is
-the 2026-09-23 onboarding session's proposal, not an owner ruling; the owner may reorder.
-
-- **D51 · Deleting a song in the plex-tv layout leaves most of its files behind.**
-  - *What:* in the plex-tv layout, delete removes the files in the season folder whose name
-    is the recorded video's name (minus `.mp4`) followed by `.` or `-`
-    (`removeLessonFilesPlexTV` in `internal/server/lessonfiles.go`). A song records its
-    `[Drumless]` video, because it sorts before `[Original]`, so only
-    `<episode> [Drumless].mp4` matches. The `[Original]` video, the `.nfo`, the poster and the
-    song's subfolders all stay. Delete also skips folders entirely, so any plex-tv lesson with
-    `resources/` or `play-along/` files (moved into the season folder as
-    `<episode> resources` and so on since #18) keeps those folders after a delete, songs and
-    ordinary lessons alike.
-  - *Why:* drumdrop records the lesson as deleted while most of it is still on disk, using
-    space and showing in Plex (now with only its Original version). #18 (`11d1fb4`) taught the
-    move about version files and subfolders. The delete was last changed in #13 and never
-    caught up. No test covers a song delete or a subfolder.
-  - *What the fix must guarantee:* a delete removes everything the move put in the season
-    folder for that episode (every version, sidecar and subfolder) and nothing that belongs to
-    a sibling episode. Episode 5 must still never match episode 50.
-  - *Evidence:* `grep -n 'IsDir\|TrimSuffix' internal/server/lessonfiles.go` ·
-    `grep -n 'Drumless\|Original\|resources' internal/server/lessonfiles_test.go` (no match) ·
-    `git log --format='%h %s' -- internal/server/lessonfiles.go` (last change: #13)
-  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 1). Reproduced on 2026-09-23 by
-    running the function, copied unchanged, against a song-shaped folder in a scratch
-    directory.
+*Order:* D52 leads because it leaves the owner's files wrong on disk (D51, its partner, has
+shipped on this branch). This order is the 2026-09-23 onboarding session's proposal, not an
+owner ruling; the owner may reorder.
 
 - **D52 · A library move that fails part-way leaves an untracked copy.**
   - *What:* this only happens on the copy fallback. That fallback runs when downloads and
@@ -159,6 +136,23 @@ the 2026-09-23 onboarding session's proposal, not an owner ruling; the owner may
 ## Open bugs & hardening
 
 D53 waits on an owner decision.
+
+- **D55 · A plex-tv lesson with no video can't be deleted from the library.**
+  - *What:* in a plex-tv season folder, the delete finds an episode's entries from its
+    recorded video's name. A lesson recorded without one (`--resources-only`, or a song
+    whose soundslice score has no recordings) has an empty `video_path`, so the delete is a
+    no-op and its nfo, poster and folders stay in the library, untracked.
+  - *Why:* the same leftovers D51 fixed, for the lessons that have no video. It needs the
+    episode name recorded some other way (e.g. a column), which is a schema decision.
+  - *Evidence:* `grep -n 'videoPath == ""' internal/server/lessonfiles.go` ·
+    `grep -n 'ResourcesOnly' internal/scheduler/worker.go`
+- **D56 · Deleting a lesson's files discards every error.**
+  - *What:* both delete paths call `_ = removeLessonFiles(...)` (`handleDeleteLesson`, and
+    `?files=true` on follow delete). A refusal or a file that can't be removed is neither
+    logged nor returned, so the lesson reads as deleted while its files stay.
+  - *Why:* invisible leftovers, the same symptom as D51. The server has no logger today, so
+    the fix is to pick where these go (stderr like the worker, or the response).
+  - *Evidence:* `grep -n '_ = removeLessonFiles' internal/server/*.go`
 
 - **D54 · Every API route accepts the token in the URL, not only the live-progress stream.**
   - *What:* `requestToken` in `internal/server/auth.go` reads the `Authorization: Bearer`
@@ -627,6 +621,24 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
 
 ## Recently shipped
 
+- **D51 · A plex-tv delete left most of a song, and every lesson's folders, behind.** This
+  branch (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the delete matched the recorded video's name minus `.mp4` followed by `.` or `-`.
+    A song records its `[Drumless]` version, so its `[Original]` video, `.nfo`, poster and
+    folders stayed; any lesson's `<episode> resources` / `play-along` folders stayed too.
+    Separately, the delete chose its method from today's `DRUMDROP_LAYOUT`, so switching the
+    layout back to default and deleting one plex-tv lesson would have removed its whole
+    shared season folder.
+  - *Now:* the delete removes every entry the move placed for the episode, through
+    `scheduler.PlexEpisodeMatcher`, and the move refuses (writing nothing) to place any name
+    that matcher would not recognise, so the two cannot drift apart again. The delete picks
+    its method from where the lesson was recorded (`scheduler.IsPlexSeasonDir`), not from the
+    layout setting: a season folder loses one episode's entries, any other folder is removed
+    whole. Episode 5 still never matches episode 50, nor a title that extends its own.
+  - *Evidence:* `go test -count=1 -run 'RemoveLessonFiles|PlexEpisode|PlexSeason|RefusesAName'
+    ./internal/server/ ./internal/scheduler/`
+  - *Left open:* D55 (a plex-tv lesson with no video can't be deleted), D56 (delete errors
+    are discarded).
 - **D49 · Board and repo hygiene.** PR #20 (branch `chore/vault-onboarding`) adds this
   BACKLOG.md. It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's
   vault, and `.mcp.json` (per-machine Claude Code config). It also tracks `sonar-project.properties` with its
