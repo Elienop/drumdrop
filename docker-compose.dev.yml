@@ -26,8 +26,14 @@ services:
       # Optional Plex TV layout (requires DRUMDROP_LIBRARY_DIR): the library copy uses
       # Plex's TV-Shows naming — <library>/<Show>/Season 01/<Show> - s01e05 - Title.mp4
       # (sidecars share the episode base) — instead of the default Course/NN - Lesson
-      # folders. On Plex: a *TV Shows* library + the *Local Media Assets* agent so
-      # episode titles come from the filenames. Empty/"default" keeps today's layout.
+      # folders. In this layout the .nfo is a Kodi/Plex <episodedetails> doc (not
+      # <movie>), carrying the episode title/showtitle/season/episode/aired/instructor.
+      # On the PLEX side: create a *TV Shows* library pointing at DRUMDROP_LIBRARY_DIR
+      # and switch its agent to one that reads .nfo files (the XBMCnfoTVImporter
+      # plugin is what the working setup uses), then Refresh Metadata. The show will
+      # not match TheTVDB, so episode titles must come from the local <episodedetails>
+      # nfos; Local Media Assets alone was not enough in testing (Plex kept showing
+      # "Episode N"). Empty/unset (or "default") keeps today's layout.
       # - DRUMDROP_LAYOUT=plex-tv
       # Set to the ABSOLUTE host path of ./downloads so the UI's "Copy path" gives
       # a host path you can paste into a file manager (else it shows /downloads).

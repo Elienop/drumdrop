@@ -21,8 +21,12 @@ proven end-to-end on real content. Releases ship as standalone binaries and a Do
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and `ffmpeg` on `PATH`
 - For **songs** only: [`deno`](https://deno.com) on `PATH` and a **current** yt-dlp. A song's
   video is a YouTube recording, and YouTube makes yt-dlp solve a JavaScript challenge first —
-  yt-dlp uses deno for that, and an outdated yt-dlp fails with HTTP 403. The Docker image
-  bundles all three.
+  yt-dlp uses deno for that, and an outdated yt-dlp fails with HTTP 403. Use the official
+  release binary from [yt-dlp's releases page](https://github.com/yt-dlp/yt-dlp/releases)
+  (it's what the Docker image installs) and keep it updated. The Docker image bundles all
+  three, but its yt-dlp is only as fresh as the image: it is downloaded when the image is
+  built, at each drumdrop release, so an image that hasn't been rebuilt in a while can fail
+  on songs (tracked as D3 in [BACKLOG.md](BACKLOG.md)).
 
 ## Environment
 
@@ -252,8 +256,12 @@ Each course becomes one *show*, each lesson an *episode*:
   it is non-fatal — a write failure logs a warning and the download still succeeds.
 
 **On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
-switch its agent to one that reads `.nfo` files — the **XBMCnfoTVImporter** plugin is what
-the working setup uses — then *Refresh Metadata*. The show won't match TheTVDB, so the
+switch its agent to one that reads `.nfo` files — the
+[**XBMCnfoTVImporter**](https://github.com/gboudreau/XBMCnfoTVImporter.bundle) plugin is what
+the working setup uses — then *Refresh Metadata*. XBMCnfoTVImporter is a third-party plugin,
+not part of Plex, and its last commit is from 2019: it only appears in the agent list once
+it has been installed into Plex Media Server's `Plug-ins` folder and Plex has been restarted
+(its README has the steps). The show won't match TheTVDB, so the
 episode number, title, and summary have to come from the local `<episodedetails>` nfo (and
 the filenames) — which is exactly what this layout encodes. Enabling **Local Media Assets**
 alone was not enough in testing: Plex kept showing generic "Episode N" until the library
@@ -291,5 +299,6 @@ Both use the same rule: `type(scope)!: description` with types `feat fix chore d
 3. **Download** — `yt-dlp` pulls the manifest (best quality + subtitles); resources,
    play-along stems, sheet music, and a poster are fetched alongside; an `.nfo` is
    written for media servers. A **song** has no Musora video of its own: its videos are the
-   YouTube recordings in its soundslice play-along score, so each one (`[Original]` and
-   `[Drumless]`) is downloaded through yt-dlp as its own file (`internal/musora/soundslice.go`).
+   YouTube recordings in its soundslice play-along score. drumdrop finds them in the score
+   (`internal/musora/soundslice.go`), then downloads each one (`[Original]` and `[Drumless]`)
+   through yt-dlp as its own file (`DownloadLesson` in `internal/musora/download.go`).
