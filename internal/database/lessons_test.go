@@ -278,9 +278,7 @@ func TestUpsertLessonDoesNotResetStatus(t *testing.T) {
 	if err := s.UpsertLesson(ctx, 409875, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := s.MarkDownloaded(ctx, 409875, "best", "/out/dir", "/out/dir/video.mp4", 12345); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	recordDownloaded(t, s, 409875, DownloadRecord{Quality: "best", OutputDir: "/out/dir", VideoPath: "/out/dir/video.mp4", Bytes: 12345})
 
 	// A re-sync upserts the same lesson again.
 	if err := s.UpsertLesson(ctx, 409875, "Lesson (renamed)", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
@@ -331,13 +329,11 @@ func TestIsDownloaded(t *testing.T) {
 		t.Error("IsDownloaded = true for a pending lesson, want false")
 	}
 
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
 	if ok, err := s.IsDownloaded(ctx, 1); err != nil {
 		t.Fatalf("IsDownloaded: %v", err)
 	} else if !ok {
-		t.Error("IsDownloaded = false after MarkDownloaded, want true")
+		t.Error("IsDownloaded = false after FinishDownload, want true")
 	}
 
 	// An id that was never seen is, by definition, not downloaded (no error).
@@ -345,68 +341,6 @@ func TestIsDownloaded(t *testing.T) {
 		t.Fatalf("IsDownloaded for unknown id: %v", err)
 	} else if ok {
 		t.Error("IsDownloaded = true for an unknown id, want false")
-	}
-}
-
-func TestStatusTransitions(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-
-	// pending -> downloading
-	if err := s.MarkDownloading(ctx, 1); err != nil {
-		t.Fatalf("MarkDownloading: %v", err)
-	}
-	if got := statusOf(t, s, 1); got != StatusDownloading {
-		t.Errorf("after MarkDownloading status = %q, want %q", got, StatusDownloading)
-	}
-
-	// downloading -> failed (sets error)
-	if err := s.MarkFailed(ctx, 1, "boom"); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
-	}
-	failed, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if failed.Status != StatusFailed {
-		t.Errorf("status = %q, want %q", failed.Status, StatusFailed)
-	}
-	if !failed.Error.Valid || failed.Error.String != "boom" {
-		t.Errorf("Error = %+v, want %q", failed.Error, "boom")
-	}
-
-	// failed -> downloaded clears the error and records paths + downloaded_at.
-	if err := s.MarkDownloaded(ctx, 1, "best", "/out", "/out/v.mp4", 999); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
-	done, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if done.Status != StatusDownloaded {
-		t.Errorf("status = %q, want %q", done.Status, StatusDownloaded)
-	}
-	if done.Error.Valid {
-		t.Errorf("Error = %+v, want cleared after MarkDownloaded", done.Error)
-	}
-	if !done.Quality.Valid || done.Quality.String != "best" {
-		t.Errorf("Quality = %+v, want %q", done.Quality, "best")
-	}
-	if !done.OutputDir.Valid || done.OutputDir.String != "/out" {
-		t.Errorf("OutputDir = %+v, want %q", done.OutputDir, "/out")
-	}
-	if !done.VideoPath.Valid || done.VideoPath.String != "/out/v.mp4" {
-		t.Errorf("VideoPath = %+v, want %q", done.VideoPath, "/out/v.mp4")
-	}
-	if !done.Bytes.Valid || done.Bytes.Int64 != 999 {
-		t.Errorf("Bytes = %+v, want 999", done.Bytes)
-	}
-	if !done.DownloadedAt.Valid {
-		t.Error("DownloadedAt is NULL after MarkDownloaded, want set")
 	}
 }
 
@@ -483,21 +417,12 @@ func TestUnskipLessonOnlySkipped(t *testing.T) {
 	}
 }
 
-// TestMarkTransitionMissing asserts the mark helpers report an error when no
-// lesson row matches, rather than silently succeeding on zero rows.
-func TestMarkTransitionMissing(t *testing.T) {
+// TestMarkSkippedMissing asserts MarkSkipped reports an error when no lesson
+// row matches, rather than silently succeeding on zero rows.
+func TestMarkSkippedMissing(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.MarkDownloading(ctx, 404); err == nil {
-		t.Error("MarkDownloading on a missing id returned nil error, want error")
-	}
-	if err := s.MarkDownloaded(ctx, 404, "best", "/d", "/d/v.mp4", 0); err == nil {
-		t.Error("MarkDownloaded on a missing id returned nil error, want error")
-	}
-	if err := s.MarkFailed(ctx, 404, "x"); err == nil {
-		t.Error("MarkFailed on a missing id returned nil error, want error")
-	}
 	if err := s.MarkSkipped(ctx, 404, "x"); err == nil {
 		t.Error("MarkSkipped on a missing id returned nil error, want error")
 	}
@@ -537,15 +462,9 @@ func TestListByStatus(t *testing.T) {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded 1: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 2, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded 2: %v", err)
-	}
-	if err := s.MarkFailed(ctx, 3, "boom"); err != nil {
-		t.Fatalf("MarkFailed 3: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
+	recordDownloaded(t, s, 2, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
+	recordFailed(t, s, 3, "boom")
 	// id 4 stays pending.
 
 	downloaded, err := s.ListByStatus(ctx, StatusDownloaded)
@@ -714,16 +633,6 @@ func TestListLessonsDefaultLimit(t *testing.T) {
 	}
 }
 
-// statusOf reads the status column of a lesson directly for assertions.
-func statusOf(t *testing.T, s *Store, id int) string {
-	t.Helper()
-	var st string
-	if err := s.rawDB().QueryRow("SELECT status FROM lessons WHERE railcontent_id = ?", id).Scan(&st); err != nil {
-		t.Fatalf("read status of lesson %d: %v", id, err)
-	}
-	return st
-}
-
 // idForStatus maps a status string to a distinct railcontent_id so the
 // valid-status loop in TestUpsertLessonRejectsBadStatus does not collide on the
 // primary key.
@@ -757,15 +666,9 @@ func TestCountLessonsByStatus(t *testing.T) {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 1); err != nil {
-		t.Fatalf("MarkDownloaded 1: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 2, "best", "/d", "/d/v.mp4", 1); err != nil {
-		t.Fatalf("MarkDownloaded 2: %v", err)
-	}
-	if err := s.MarkFailed(ctx, 3, "boom"); err != nil {
-		t.Fatalf("MarkFailed 3: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4", Bytes: 1})
+	recordDownloaded(t, s, 2, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4", Bytes: 1})
+	recordFailed(t, s, 3, "boom")
 
 	counts, err := s.CountLessonsByStatus(ctx)
 	if err != nil {
@@ -787,56 +690,6 @@ func TestCountLessonsByStatus(t *testing.T) {
 	}
 	if _, ok := counts[StatusDownloading]; ok {
 		t.Errorf("count includes %q with no rows, want it omitted", StatusDownloading)
-	}
-}
-
-// TestUpdateLessonDeleted asserts a downloaded lesson is tombstone-skipped:
-// status→skipped, error→'deleted', and the download metadata (output_dir/
-// video_path/bytes) cleared so the row no longer claims a path that's gone.
-func TestUpdateLessonDeleted(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 5001, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 5001, "1080", "/dl/5001", "/dl/5001/v.mp4", 123); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
-
-	if err := s.UpdateLessonDeleted(ctx, 5001); err != nil {
-		t.Fatalf("UpdateLessonDeleted: %v", err)
-	}
-
-	got, err := s.GetLesson(ctx, 5001)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if got.Status != StatusSkipped {
-		t.Errorf("Status = %q, want %q", got.Status, StatusSkipped)
-	}
-	if !got.Error.Valid || got.Error.String != "deleted" {
-		t.Errorf("Error = %v, want 'deleted'", got.Error)
-	}
-	if got.OutputDir.Valid {
-		t.Errorf("OutputDir = %v, want NULL after delete", got.OutputDir)
-	}
-	if got.VideoPath.Valid {
-		t.Errorf("VideoPath = %v, want NULL after delete", got.VideoPath)
-	}
-	if got.Bytes.Valid {
-		t.Errorf("Bytes = %v, want NULL after delete", got.Bytes)
-	}
-}
-
-// TestUpdateLessonDeletedUnknownIsNoOp asserts an unknown id is a benign no-op
-// (no error), matching UnskipLesson — the API handler reads the lesson first
-// for the 404.
-func TestUpdateLessonDeletedUnknownIsNoOp(t *testing.T) {
-	s := newTestStore(t)
-
-	if err := s.UpdateLessonDeleted(context.Background(), 999999); err != nil {
-		t.Errorf("UpdateLessonDeleted on unknown id = %v, want nil (benign no-op)", err)
 	}
 }
 

@@ -85,8 +85,8 @@ func TestUpdateFollowNotFound(t *testing.T) {
 	}
 }
 
-// seedDownloadedLesson upserts a lesson attributed to followID and marks it
-// downloaded with real on-disk files at its single stored location: the library
+// seedDownloadedLesson upserts a lesson attributed to followID and records it
+// downloaded, through a finished job of its own, with real on-disk files at its single stored location: the library
 // path (rel under library) when library is non-empty — mirroring the worker's
 // move — otherwise the downloads path. It returns that stored output dir.
 func seedDownloadedLesson(t *testing.T, store *database.Store, downloads, library string, rcID int, followID int64, rel string) string {
@@ -108,9 +108,7 @@ func seedDownloadedLesson(t *testing.T, store *database.Store, downloads, librar
 	if err := os.WriteFile(video, []byte("video"), 0o644); err != nil {
 		t.Fatalf("WriteFile %q: %v", video, err)
 	}
-	if err := store.MarkDownloaded(ctx, rcID, "1080", outDir, video, 5); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	finishWithNewJob(t, store, followID, rcID, database.DownloadRecord{Quality: "1080", OutputDir: outDir, VideoPath: video, Bytes: 5})
 	return outDir
 }
 

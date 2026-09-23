@@ -616,7 +616,7 @@ func cleanupPartials(dir string) {
 //
 // On ResourcesOnly (no video is produced) or when no matching mp4 exists (a
 // video-less song, or a different container extension) it returns "" and 0 so
-// MarkDownloaded records no video metadata rather than a path that does not
+// FinishDownload records no video metadata rather than a path that does not
 // exist. ReadDir + string prefix/suffix matching is used (not filepath.Glob) so
 // glob metacharacters surviving Sanitize in the base can never break the match.
 func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64) {

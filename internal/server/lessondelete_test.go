@@ -147,9 +147,7 @@ func TestDeleteFollowFilesPlexTvRemovesOnlyItsLessonsEntries(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 3, "Three", sql.NullInt64{}, "drumeo", sql.NullInt64{Int64: 3, Valid: true}, sql.NullInt64{Int64: mine, Valid: true}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := store.MarkDownloaded(ctx, 3, "1080", season, filepath.Join(season, song[0]), 5); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	finishWithNewJob(t, store, mine, 3, database.DownloadRecord{Quality: "1080", OutputDir: season, VideoPath: filepath.Join(season, song[0]), Bytes: 5})
 	before2 := mustLesson(t, store, 2)
 	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: library}, "test")
 
@@ -261,9 +259,7 @@ func TestDeleteLessonStopsItsDownloadForGood(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := store.MarkDownloaded(ctx, 1, "1080", dir, filepath.Join(dir, "v.mp4"), 5); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	finishWithNewJob(t, store, f, 1, database.DownloadRecord{Quality: "1080", OutputDir: dir, VideoPath: filepath.Join(dir, "v.mp4"), Bytes: 5})
 	jobID, _, err := store.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 1)
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)

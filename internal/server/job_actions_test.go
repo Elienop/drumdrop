@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 func TestCancelJobQueued(t *testing.T) {
@@ -51,8 +53,8 @@ func TestCancelJobTerminalConflict(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	claimJob(t, store, id)
-	if err := store.MarkJobDone(ctx, id); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
+	if err := store.FinishDownload(ctx, id, 6002, database.DownloadRecord{}); err != nil {
+		t.Fatalf("FinishDownload: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 
@@ -100,8 +102,8 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	claimJob(t, store, id)
-	if err := store.MarkJobFailed(ctx, id, "boom"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
+	if err := store.FailDownload(ctx, id, 6003, "boom"); err != nil {
+		t.Fatalf("FailDownload: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

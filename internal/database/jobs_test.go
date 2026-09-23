@@ -153,85 +153,22 @@ func forceRunning(t *testing.T, s *Store, id int64) {
 	}
 }
 
-func TestMarkJobDone(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
-	if err != nil {
-		t.Fatalf("EnqueueJob: %v", err)
-	}
-	forceRunning(t, s, id)
-	if err := s.MarkJobDone(ctx, id); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
-
-	done, err := s.GetJob(ctx, id)
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if done.Status != JobDone {
-		t.Errorf("status = %q, want %q", done.Status, JobDone)
-	}
-	if !done.FinishedAt.Valid {
-		t.Error("finished_at is NULL after MarkJobDone, want set")
-	}
-	if done.Error.Valid {
-		t.Errorf("error = %+v after MarkJobDone, want NULL", done.Error)
-	}
-
-	// A done job is no longer queued.
-	queued, err := s.ListQueued(ctx)
-	if err != nil {
-		t.Fatalf("ListQueued: %v", err)
-	}
-	if len(queued) != 0 {
-		t.Errorf("ListQueued returned %d jobs after MarkJobDone, want 0", len(queued))
-	}
+// endJob moves job id straight to a terminal status, with error errMsg (NULL
+// for "") and finished_at stamped: a fixture for tests about jobs alone. The
+// worker ends a job only through the guarded writers (FinishDownload,
+// FailDownload, SkipDownload, CancelDownload), which need its lesson row.
+func endJob(t *testing.T, s *Store, id int64, status, errMsg string) {
+	t.Helper()
+	mustExec(t, s, `UPDATE jobs SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		status, sql.NullString{String: errMsg, Valid: errMsg != ""}, id)
 }
 
-func TestMarkJobFailed(t *testing.T) {
+// TestMarkJobRunningMissing asserts MarkJobRunning reports an error when no
+// job row matches, rather than silently succeeding on zero rows.
+func TestMarkJobRunningMissing(t *testing.T) {
 	s := newTestStore(t)
-	ctx := context.Background()
-
-	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
-	if err != nil {
-		t.Fatalf("EnqueueJob: %v", err)
-	}
-	forceRunning(t, s, id)
-	if err := s.MarkJobFailed(ctx, id, "yt-dlp exited 1"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
-	}
-
-	failed, err := s.GetJob(ctx, id)
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if failed.Status != JobFailed {
-		t.Errorf("status = %q, want %q", failed.Status, JobFailed)
-	}
-	if !failed.Error.Valid || failed.Error.String != "yt-dlp exited 1" {
-		t.Errorf("error = %+v, want %q", failed.Error, "yt-dlp exited 1")
-	}
-	if !failed.FinishedAt.Valid {
-		t.Error("finished_at is NULL after MarkJobFailed, want set")
-	}
-}
-
-// TestMarkJobMissing asserts the mark helpers report an error when no job row
-// matches, rather than silently succeeding on zero rows.
-func TestMarkJobMissing(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.MarkJobRunning(ctx, 404); err == nil {
+	if err := s.MarkJobRunning(context.Background(), 404); err == nil {
 		t.Error("MarkJobRunning on a missing id returned nil error, want error")
-	}
-	if err := s.MarkJobDone(ctx, 404); err == nil {
-		t.Error("MarkJobDone on a missing id returned nil error, want error")
-	}
-	if err := s.MarkJobFailed(ctx, 404, "x"); err == nil {
-		t.Error("MarkJobFailed on a missing id returned nil error, want error")
 	}
 }
 
@@ -464,13 +401,11 @@ func TestActiveJobExists(t *testing.T) {
 	}
 
 	// Done: inactive.
-	if err := s.MarkJobDone(ctx, id); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
+	endJob(t, s, id, JobDone, "")
 	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
 		t.Fatalf("ActiveJobExists (done): %v", err)
 	} else if active {
-		t.Error("ActiveJobExists = true after MarkJobDone, want false")
+		t.Error("ActiveJobExists = true for a done job, want false")
 	}
 
 	// Failed: inactive (so the planner can re-enqueue next cycle).
@@ -478,13 +413,11 @@ func TestActiveJobExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob (for failed): %v", err)
 	}
-	if err := s.MarkJobFailed(ctx, failID, "boom"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
-	}
+	endJob(t, s, failID, JobFailed, "boom")
 	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
 		t.Fatalf("ActiveJobExists (failed): %v", err)
 	} else if active {
-		t.Error("ActiveJobExists = true after MarkJobFailed, want false")
+		t.Error("ActiveJobExists = true for a failed job, want false")
 	}
 }
 
@@ -647,10 +580,7 @@ func TestCancelJobTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	forceRunning(t, s, id)
-	if err := s.MarkJobDone(ctx, id); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
+	endJob(t, s, id, JobDone, "")
 
 	if err := s.CancelJob(ctx, id); !errors.Is(err, ErrJobNotActive) {
 		t.Fatalf("CancelJob on a done job err = %v, want ErrJobNotActive", err)
@@ -676,83 +606,6 @@ func TestCancelJobMissing(t *testing.T) {
 	}
 }
 
-// TestMarkJobCanceledRunning asserts the worker-side guarded cancel transitions
-// a running job to canceled, stamps finished_at, and returns nil.
-func TestMarkJobCanceledRunning(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
-	if err != nil {
-		t.Fatalf("EnqueueJob: %v", err)
-	}
-	forceRunning(t, s, id)
-
-	if err := s.MarkJobCanceled(ctx, id); err != nil {
-		t.Fatalf("MarkJobCanceled on a running job: %v", err)
-	}
-
-	got, err := s.GetJob(ctx, id)
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if got.Status != JobCanceled {
-		t.Errorf("status = %q, want %q", got.Status, JobCanceled)
-	}
-	if !got.FinishedAt.Valid {
-		t.Error("finished_at is NULL after MarkJobCanceled, want set")
-	}
-}
-
-// TestMarkJobCanceledNonRunningNoOp asserts MarkJobCanceled is a silent no-op
-// (0 rows, returns nil — NOT an error) when the job is queued or already in a
-// terminal status, so the server-then-worker double-cancel race is safe.
-func TestMarkJobCanceledNonRunningNoOp(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	// Queued: not running, so the guard touches zero rows.
-	queuedID, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1)
-	if err != nil {
-		t.Fatalf("EnqueueJob (queued): %v", err)
-	}
-	if err := s.MarkJobCanceled(ctx, queuedID); err != nil {
-		t.Fatalf("MarkJobCanceled on a queued job err = %v, want nil (no-op)", err)
-	}
-	got, err := s.GetJob(ctx, queuedID)
-	if err != nil {
-		t.Fatalf("GetJob (queued): %v", err)
-	}
-	if got.Status != JobQueued {
-		t.Errorf("queued job status = %q after no-op cancel, want unchanged %q", got.Status, JobQueued)
-	}
-
-	// Terminal (done): also a silent no-op.
-	doneID, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 2)
-	if err != nil {
-		t.Fatalf("EnqueueJob (done): %v", err)
-	}
-	forceRunning(t, s, doneID)
-	if err := s.MarkJobDone(ctx, doneID); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
-	if err := s.MarkJobCanceled(ctx, doneID); err != nil {
-		t.Fatalf("MarkJobCanceled on a done job err = %v, want nil (no-op)", err)
-	}
-	got, err = s.GetJob(ctx, doneID)
-	if err != nil {
-		t.Fatalf("GetJob (done): %v", err)
-	}
-	if got.Status != JobDone {
-		t.Errorf("done job status = %q after no-op cancel, want unchanged %q", got.Status, JobDone)
-	}
-
-	// Unknown id: still a benign no-op (0 rows), returns nil.
-	if err := s.MarkJobCanceled(ctx, 404); err != nil {
-		t.Fatalf("MarkJobCanceled on a missing id err = %v, want nil (no-op)", err)
-	}
-}
-
 // TestRetryJobFailed asserts retrying a failed job resets the job back to
 // queued (clearing attempts/timestamps/error) AND resets its lesson back to
 // pending (clearing the lesson error) so the worker re-downloads it.
@@ -770,11 +623,8 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	forceRunning(t, s, id)
-	if err := s.MarkJobFailed(ctx, id, "yt-dlp exited 1"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
-	}
-	if err := s.MarkFailed(ctx, lesson, "yt-dlp exited 1"); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
+	if err := s.FailDownload(ctx, id, lesson, "yt-dlp exited 1"); err != nil {
+		t.Fatalf("FailDownload: %v", err)
 	}
 
 	if err := s.RetryJob(ctx, id); err != nil {
@@ -940,12 +790,8 @@ func TestCountJobsByState(t *testing.T) {
 		}
 		ids = append(ids, id)
 	}
-	if err := s.MarkJobDone(ctx, ids[0]); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
-	if err := s.MarkJobFailed(ctx, ids[1], "boom"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
-	}
+	endJob(t, s, ids[0], JobDone, "")
+	endJob(t, s, ids[1], JobFailed, "boom")
 
 	counts, err := s.CountJobsByState(ctx)
 	if err != nil {
@@ -1051,9 +897,7 @@ func TestEnqueueJobAfterTerminalEnqueuesFresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob first: %v", err)
 	}
-	if err := s.MarkJobDone(ctx, first); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
-	}
+	endJob(t, s, first, JobDone, "")
 
 	second, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 808)
 	if err != nil {

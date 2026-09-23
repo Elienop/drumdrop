@@ -176,50 +176,6 @@ func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	return n > 0, nil
 }
 
-// MarkDownloading transitions a lesson to status='downloading'. It returns an
-// error if no lesson row matched so the caller learns the id was unknown.
-func (s *Store) MarkDownloading(ctx context.Context, id int) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusDownloading, id,
-	)
-}
-
-// MarkDownloaded records a successful download: it sets status='downloaded',
-// stores the quality/paths/byte count, stamps downloaded_at, and clears any
-// prior error. It records no library entries (library_entries = NULL). It
-// returns an error if no lesson row matched. The worker does not use it: it
-// records through FinishDownload, which only lands while its job still exists.
-func (s *Store) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?,
-		        quality = ?,
-		        output_dir = ?,
-		        video_path = ?,
-		        bytes = ?,
-		        library_entries = NULL,
-		        error = NULL,
-		        downloaded_at = CURRENT_TIMESTAMP,
-		        updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusDownloaded, quality, outputDir, videoPath, bytes, id,
-	)
-}
-
-// MarkFailed records a failed download attempt: status='failed' with the error
-// message. It returns an error if no lesson row matched.
-func (s *Store) MarkFailed(ctx context.Context, id int, errMsg string) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusFailed, errMsg, id,
-	)
-}
-
 // MarkSkipped records that a lesson was intentionally skipped (e.g. locked or
 // missing content): status='skipped' with the reason recorded in error. It
 // returns an error if no lesson row matched.
@@ -234,8 +190,7 @@ func (s *Store) MarkSkipped(ctx context.Context, id int, reason string) error {
 
 // UnskipLesson is the inverse of MarkSkipped: a guarded UPDATE that resets a
 // skipped lesson back to pending and clears its error, ONLY while it is still
-// skipped. Like MarkJobCanceled it tolerates zero rows as a benign no-op and
-// returns nil — an already-pending/terminal lesson (or an unknown id) is left
+// skipped. It tolerates zero rows as a benign no-op and returns nil — an already-pending/terminal lesson (or an unknown id) is left
 // untouched rather than erroring. It executes directly rather than through
 // updateStatus (which treats 0 rows as "no such lesson").
 func (s *Store) UnskipLesson(ctx context.Context, id int) error {
@@ -251,38 +206,6 @@ func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 		}
 		// Zero rows affected (not skipped, or unknown id) is intentional: only a
 		// skipped lesson is reset here, and any other state is a no-op.
-		return nil
-	})
-}
-
-// UpdateLessonDeleted tombstone-skips a lesson whose files have just been
-// removed: it sets status='skipped', error='deleted', and clears the now-stale
-// download metadata (output_dir/video_path/bytes/library_entries) so the row no longer claims a
-// path that's gone. It is a tombstone, not a row delete, because the follow is
-// still active and the next sync would otherwise re-discover and re-download the
-// lesson — ShouldSkipEnqueue already skips 'skipped', and UnskipLesson can bring
-// it back later. Like UnskipLesson it executes directly (not via updateStatus)
-// and tolerates zero rows as a benign no-op, so an unknown id is not an error
-// (the API handler reads the lesson first for the 404).
-func (s *Store) UpdateLessonDeleted(ctx context.Context, id int) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`UPDATE lessons
-			    SET status = ?,
-			        error = 'deleted',
-			        output_dir = NULL,
-			        video_path = NULL,
-			        bytes = NULL,
-			        library_entries = NULL,
-			        updated_at = CURRENT_TIMESTAMP
-			  WHERE railcontent_id = ?`,
-			StatusSkipped, id,
-		)
-		if err != nil {
-			return fmt.Errorf("mark lesson %d deleted: %w", id, err)
-		}
-		// Zero rows (unknown id) is intentional: the handler reads the lesson
-		// first, so a miss here is a benign no-op rather than an error.
 		return nil
 	})
 }

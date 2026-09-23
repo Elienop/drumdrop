@@ -114,21 +114,14 @@ func seedJob(t *testing.T, s *Store, id int, follow sql.NullInt64) int64 {
 	return jobID
 }
 
-func jobStatus(t *testing.T, s *Store, id int64) string {
-	t.Helper()
-	j, err := s.GetJob(context.Background(), id)
-	if err != nil {
-		t.Fatalf("GetJob %d: %v", id, err)
-	}
-	return j.Status
-}
-
 // TestFinishDownloadRecordsAndClosesTheJob proves the worker's final write sets
-// the lesson downloaded with its library record and the job done, together.
+// the lesson downloaded with its library record (clearing an earlier attempt's
+// error and stamping downloaded_at) and the job done, together.
 func TestFinishDownloadRecordsAndClosesTheJob(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	jobID := seedJob(t, s, 1, sql.NullInt64{})
+	mustExec(t, s, `UPDATE lessons SET status = ?, error = 'boom' WHERE railcontent_id = 1`, StatusFailed)
 	if _, _, err := s.ClaimNextJob(ctx); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -147,14 +140,15 @@ func TestFinishDownloadRecordsAndClosesTheJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLesson: %v", err)
 	}
-	if l.Status != StatusDownloaded || l.OutputDir.String != rec.OutputDir || l.VideoPath.String != rec.VideoPath || l.Bytes.Int64 != 9 {
-		t.Errorf("lesson = %+v, want downloaded with %+v", l, rec)
+	if l.Status != StatusDownloaded || l.Quality.String != "1080" || l.OutputDir.String != rec.OutputDir ||
+		l.VideoPath.String != rec.VideoPath || l.Bytes.Int64 != 9 || l.Error.Valid || !l.DownloadedAt.Valid {
+		t.Errorf("lesson = %+v, want downloaded with %+v, no error, downloaded_at set", l, rec)
 	}
 	if got, recorded, err := l.PlacedEntries(); !recorded || err != nil || !reflect.DeepEqual(got, entries) {
 		t.Errorf("PlacedEntries = (%v, %v, %v), want %v", got, recorded, err, entries)
 	}
-	if st := jobStatus(t, s, jobID); st != JobDone {
-		t.Errorf("job status = %q, want done", st)
+	if j := mustJob(t, s, jobID); j.Status != JobDone || !j.FinishedAt.Valid || j.Error.Valid {
+		t.Errorf("job = %s finished=%v error=%+v, want done, finished, no error", j.Status, j.FinishedAt.Valid, j.Error)
 	}
 
 	// A default-layout record (nil entries) stores NULL, not "[]".
@@ -187,6 +181,24 @@ func claimed(t *testing.T, s *Store, id int, follow sql.NullInt64) int64 {
 	jobID := seedJob(t, s, id, follow)
 	forceRunning(t, s, jobID)
 	return jobID
+}
+
+// recordDownloaded records lesson id as downloaded the way the worker does:
+// a claimed job, then FinishDownload.
+func recordDownloaded(t *testing.T, s *Store, id int, rec DownloadRecord) {
+	t.Helper()
+	if err := s.FinishDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, rec); err != nil {
+		t.Fatalf("FinishDownload %d: %v", id, err)
+	}
+}
+
+// recordFailed records lesson id as failed with msg the way the worker does:
+// a claimed job, then FailDownload.
+func recordFailed(t *testing.T, s *Store, id int, msg string) {
+	t.Helper()
+	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg); err != nil {
+		t.Fatalf("FailDownload %d: %v", id, err)
+	}
 }
 
 // guardedWrites are the worker's writes about a job, each for lesson id.

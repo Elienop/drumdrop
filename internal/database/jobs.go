@@ -396,28 +396,6 @@ func (s *Store) MarkJobRunning(ctx context.Context, id int64) error {
 	})
 }
 
-// MarkJobDone transitions a job to status='done' and stamps finished_at. It
-// returns an error if no job row matched.
-func (s *Store) MarkJobDone(ctx context.Context, id int64) error {
-	return s.updateJob(ctx,
-		`UPDATE jobs
-		    SET status = ?, finished_at = CURRENT_TIMESTAMP
-		  WHERE id = ?`,
-		JobDone, id,
-	)
-}
-
-// MarkJobFailed transitions a job to status='failed', records the error
-// message, and stamps finished_at. It returns an error if no job row matched.
-func (s *Store) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
-	return s.updateJob(ctx,
-		`UPDATE jobs
-		    SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP
-		  WHERE id = ?`,
-		JobFailed, errMsg, id,
-	)
-}
-
 // CancelJob moves a queued or running job to status='canceled' and stamps
 // finished_at. It distinguishes the two failure modes the API needs to surface
 // differently: an unknown id yields a wrapped sql.ErrNoRows (404), while a job
@@ -452,30 +430,6 @@ func (s *Store) CancelJob(ctx context.Context, id int64) error {
 			// so it is in a terminal status: report 409, not 404.
 			return fmt.Errorf("cancel job %d (status %q): %w", id, j.Status, ErrJobNotActive)
 		}
-		return nil
-	})
-}
-
-// MarkJobCanceled is the worker-side cancel: a guarded UPDATE that moves a job
-// to status='canceled' and stamps finished_at ONLY while it is still running.
-// Unlike CancelJob (the API path, which distinguishes 404/409), this tolerates
-// zero rows as a benign no-op and returns nil — the server may already have
-// canceled the job (queued/running -> canceled) before the worker reaches its
-// cancel branch, and the worker must not error on that lost race. It executes
-// directly rather than through updateJob (which treats 0 rows as an error).
-func (s *Store) MarkJobCanceled(ctx context.Context, id int64) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`UPDATE jobs
-			    SET status = ?, finished_at = CURRENT_TIMESTAMP
-			  WHERE id = ? AND status = ?`,
-			JobCanceled, id, JobRunning,
-		)
-		if err != nil {
-			return fmt.Errorf("mark job %d canceled: %w", id, err)
-		}
-		// Zero rows affected (queued, terminal, or unknown id) is intentional:
-		// only a running job is canceled here, and any other state is a no-op.
 		return nil
 	})
 }
@@ -533,26 +487,6 @@ func (s *Store) RetryJob(ctx context.Context, id int64) error {
 			StatusPending, j.RailcontentID,
 		); err != nil {
 			return fmt.Errorf("reset lesson %d for retry: %w", j.RailcontentID, err)
-		}
-		return nil
-	})
-}
-
-// updateJob runs a status-mutating UPDATE through withTx and fails if it
-// touched zero rows (the job id was unknown). All Mark* helpers funnel through
-// here so the "no such job" behavior is defined in exactly one place.
-func (s *Store) updateJob(ctx context.Context, query string, args ...any) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("update job status: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected updating job status: %w", err)
-		}
-		if n == 0 {
-			return fmt.Errorf("no job matched the status update")
 		}
 		return nil
 	})

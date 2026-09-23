@@ -131,18 +131,6 @@ D53 waits on an owner decision.
     open*.)
   - *Why:* Plex may index a truncated file until its next scan.
   - *Evidence:* `grep -n 'func copyTree\|func copyFile' internal/scheduler/plexmove.go`
-- **D64 · The store still exports the unguarded download writers.**
-  - *What:* the worker now records through the job-guarded writers (`StartDownload`,
-    `FinishDownload`, `FailDownload`, `SkipDownload`, `CancelDownload`), and a delete
-    through `BeginLessonDelete` / `TombstoneLesson`. The old writers (`MarkDownloaded`,
-    `MarkDownloading`, `MarkFailed`, `MarkJobDone`, `MarkJobFailed`, `MarkJobCanceled`,
-    `UpdateLessonDeleted`) have no production caller left, only tests that use them as
-    fixtures.
-  - *Why:* a new caller of one of them would bypass the guard that stops an earlier
-    download from recording after a delete. Remove them, moving the tests onto the guarded
-    writers or a test-only seed helper.
-  - *Evidence:* `grep -rn '\.MarkDownloaded(\|\.MarkJobDone(\|\.UpdateLessonDeleted(' --include=*.go . | grep -v _test.go`
-    (prints nothing).
 - **D66 · What a stopped download wrote is known by its folder, not exactly.**
   - *What:* a download writes into the lesson's scratch folder (`<downloads>/<Course>/NN -
     Title`), shared with whatever is already there: an earlier download of the same lesson,
@@ -795,6 +783,20 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     predicate, whatever the status); the UI half (offering Delete for any lesson with files)
     shipped in `ce12d81` and moves onto `has_files`.
   - *Evidence:* `go test -count=1 -run 'GuardedFailSkipCancel|DownloadingLessonWithFiles|KeepLessonFiles|HasFiles' ./internal/database/ ./internal/server/`
+- **D64 · The store exported download writers no job guarded.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* `MarkDownloaded`, `MarkDownloading`, `MarkFailed`, `MarkJobDone`,
+    `MarkJobFailed`, `MarkJobCanceled` and `UpdateLessonDeleted` wrote a lesson or a job by
+    id, whatever had happened to it since. No production code called them any more, but a
+    new caller would have let an earlier download record after a delete.
+  - *Now:* they are gone. The worker records only through the job-guarded writers
+    (`StartDownload`, `ConfirmDownload`, `FinishDownload`, `FailDownload`, `SkipDownload`,
+    `CancelDownload`) and a delete through `BeginLessonDelete` / `TombstoneLesson` /
+    `KeepLessonFiles`. Tests seed through those same writers, or, for a test about jobs
+    alone, through a raw test-only `endJob`. `MarkSkipped` stays: it is the API's own
+    *Skip* action, not a download's write.
+  - *Evidence:* `grep -rnE '\.(MarkDownloaded|MarkDownloading|MarkFailed|MarkJobDone|MarkJobFailed|MarkJobCanceled|UpdateLessonDeleted)\(' --include=*.go .`
+    (prints nothing).
 - **D49 · Board and repo hygiene.** PR #20 (branch `chore/vault-onboarding`) adds this
   BACKLOG.md. It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's
   vault, and `.mcp.json` (per-machine Claude Code config). It also tracks `sonar-project.properties` with its
