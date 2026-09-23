@@ -1018,32 +1018,42 @@ it("an instructor input nothing can normalise shows the server's sentence inline
   expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })
 
-it("a coach link typed into the Node tab shows the server's sentence inline", async () => {
-  // msgNoContentID, verbatim from internal/server/messages.go: what the server
-  // answers a link with no number in it, such as a coach page without its id.
-  const NO_ID =
-    "No content id was found in “URL or id”: it needs the number of a lesson or course. Enter the id, or a link that contains it, then Preview again."
+// A coach page is refused as a node whether or not its link carries the
+// coach's id: the server checks for the /<brand>/coaches/ path before it
+// looks for a number (musora.IsCoachLink in handlePreview), so the id is
+// never taken for a lesson's. The link goes to the server as typed, and its
+// sentence shows inline.
+it.each([
+  ["with its id", "https://www.musora.com/drumeo/coaches/jared-falk/31880"],
+  ["without its id", "https://www.musora.com/drumeo/coaches/jared-falk"],
+])("a coach link %s typed into the Node tab shows the server's sentence inline", async (_, link) => {
+  // msgCoachLinkAsNode, verbatim from internal/server/messages.go.
+  const COACH =
+    "That's a coach page, not a lesson or course, so it can't be followed as a node. Choose Instructor, paste the link there, then Preview again."
   const sent: (string | null)[] = []
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, ({ request }) => {
       sent.push(new URL(request.url).searchParams.get("id"))
-      return HttpResponse.json({ error: NO_ID }, { status: 400 })
+      return HttpResponse.json({ error: COACH }, { status: 400 })
     }),
   )
   const user = renderAdd()
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
   const dialog = await screen.findByRole("dialog")
-  const link = "https://www.musora.com/drumeo/coaches/jared-falk"
   await user.type(within(dialog).getByLabelText(/url or id/i), `${link}{Enter}`)
 
-  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(NO_ID))
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(COACH))
   expect(sent).toEqual([link])
+  expect(within(dialog).queryByText(/lessons/)).not.toBeInTheDocument()
   expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })
 
 it("a failed preview's message clears as soon as the input is edited", async () => {
-  const NOPE = "No content id was found in “URL or id”. Enter the id, then Preview again."
+  // msgNoContentID, verbatim from internal/server/messages.go: the server's
+  // answer to "abc", which has no number in it.
+  const NOPE =
+    "No content id was found in “URL or id”: it needs the number of a lesson or course. Enter the id, or a link that contains it, then Preview again."
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: NOPE }, { status: 400 })),
