@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -198,6 +199,34 @@ func TestPlexTVMoveReplacesThePreviousDownloadByRecord(t *testing.T) {
 	}
 	if len(res.placed) != 5 || len(res.kept) != 0 {
 		t.Errorf("placed %v kept %v, want the 5 new entries only", res.placed, res.kept)
+	}
+}
+
+// TestPlexTVMoveRecordOutranksALegacyNameMatch proves a re-download replaces
+// an entry its own record names even when a legacy row's name grammar would
+// also give that entry to another lesson: a record is proof, a legacy match a
+// guess, exactly as in the delete (PlanLessonEntries).
+func TestPlexTVMoveRecordOutranksALegacyNameMatch(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "lib")
+	season := filepath.Join(lib, "Songs", "Season 01")
+	mine := "Songs - s01e05 - Even Flow [Original].mp4"
+	seedSeason(t, season, mine)
+	// A legacy "Even Flow" at the same episode reads mine as its own
+	// [Original] version (no "Even Flow [Original].nfo" says otherwise).
+	legacy := legacyRow(2, "Even Flow", 5, season, "Songs - s01e05 - Even Flow [Drumless].mp4")
+	lessonDir, _, _ := seedSongScratch(t, tmp)
+
+	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir,
+		plexLibrary{self: recordedRow(1, season, mine), others: []database.Lesson{legacy}})
+	if err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(season, mine)); !strings.Contains(string(got), "05 - Even Flow") {
+		t.Errorf("%s = %q, want the new download's copy", mine, got)
+	}
+	if !slices.Contains(res.placed, filepath.Join(season, mine)) {
+		t.Errorf("placed %v, want it to include %q", res.placed, mine)
 	}
 }
 

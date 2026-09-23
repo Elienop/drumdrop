@@ -194,7 +194,9 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 // checkPlexConflicts refuses destinations another lesson claims: one another
 // lesson's record names (existing or not, so two records never share a path),
 // or an existing entry another lesson claims by name (a legacy row). ours are
-// the lesson's own previous entries, which it may replace.
+// the lesson's own previous entries (PlanLessonEntries' Remove), which it may
+// replace: no other record names one of them, and a legacy row's name match on
+// one does not outrank this lesson's record, as in the delete.
 func checkPlexConflicts(steps []plexMoveStep, c *claims, ours []string) error {
 	own := make(map[string]bool, len(ours))
 	for _, p := range ours {
@@ -202,12 +204,12 @@ func checkPlexConflicts(steps []plexMoveStep, c *claims, ours []string) error {
 	}
 	var errs []error
 	for _, st := range steps {
+		if own[st.dst] {
+			continue
+		}
 		ids, err := c.claimants(st.dst)
 		if err != nil {
 			return fmt.Errorf("refusing to move: %w", err)
-		}
-		if len(c.recorded[st.dst]) == 0 && own[st.dst] {
-			continue
 		}
 		if len(ids) > 0 {
 			errs = append(errs, fmt.Errorf("%q is claimed by lesson %v", st.dst, ids))
