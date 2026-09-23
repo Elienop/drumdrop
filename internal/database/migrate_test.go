@@ -107,8 +107,8 @@ func TestRunMigrationsIdempotent(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 3 {
-		t.Errorf("schema_migrations has %d rows, want 3", count)
+	if count != 4 {
+		t.Errorf("schema_migrations has %d rows, want 4", count)
 	}
 
 	// Versions are recorded in ascending filename order — the application order
@@ -129,7 +129,7 @@ func TestRunMigrationsIdempotent(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate versions: %v", err)
 	}
-	want := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql", "003_lessons_position.sql"}
+	want := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql", "003_lessons_position.sql", "004_lessons_library_entries.sql"}
 	if len(versions) != len(want) {
 		t.Fatalf("recorded versions = %v, want %v", versions, want)
 	}

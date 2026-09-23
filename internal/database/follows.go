@@ -175,25 +175,31 @@ func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality strin
 // caller opts in) BEFORE calling this, since the lesson rows carry the paths.
 func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE follow_id = ?`, id); err != nil {
-			return fmt.Errorf("delete jobs for follow %d: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM lessons WHERE follow_id = ?`, id); err != nil {
-			return fmt.Errorf("delete lessons for follow %d: %w", id, err)
-		}
-		res, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id)
-		if err != nil {
-			return fmt.Errorf("delete follow %d: %w", id, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected deleting follow %d: %w", id, err)
-		}
-		if n == 0 {
-			return fmt.Errorf("no follow with id %d", id)
-		}
-		return nil
+		return removeFollowCascadeTx(ctx, tx, id)
 	})
+}
+
+// removeFollowCascadeTx is the body of RemoveFollowCascade, shared with
+// RemoveFilelessFollowCascade.
+func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE follow_id = ?`, id); err != nil {
+		return fmt.Errorf("delete jobs for follow %d: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM lessons WHERE follow_id = ?`, id); err != nil {
+		return fmt.Errorf("delete lessons for follow %d: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete follow %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected deleting follow %d: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no follow with id %d", id)
+	}
+	return nil
 }
 
 // ListFollows returns every follow ordered by added_at (oldest first), with id

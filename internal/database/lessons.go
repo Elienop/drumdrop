@@ -37,13 +37,17 @@ type Lesson struct {
 	FirstSeenAt         sql.NullTime   `json:"first_seen_at"`
 	DownloadedAt        sql.NullTime   `json:"downloaded_at"`
 	UpdatedAt           sql.NullTime   `json:"updated_at"`
+	// LibraryEntries is the raw library_entries column: a JSON array of the
+	// absolute paths the plex-tv move placed in a season folder for this lesson,
+	// or NULL when there is no record. Read it through PlacedEntries.
+	LibraryEntries sql.NullString `json:"library_entries"`
 }
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
-	first_seen_at, downloaded_at, updated_at`
+	first_seen_at, downloaded_at, updated_at, library_entries`
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
 // *sql.Rows (both satisfy this Scan signature).
@@ -54,7 +58,7 @@ func scanLesson(row interface {
 	err := row.Scan(
 		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Position, &l.Status,
 		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
-		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
+		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt, &l.LibraryEntries,
 	)
 	return l, err
 }
@@ -150,7 +154,9 @@ func (s *Store) MarkDownloading(ctx context.Context, id int) error {
 
 // MarkDownloaded records a successful download: it sets status='downloaded',
 // stores the quality/paths/byte count, stamps downloaded_at, and clears any
-// prior error. It returns an error if no lesson row matched.
+// prior error. It records no library entries (library_entries = NULL). It
+// returns an error if no lesson row matched. The worker does not use it: it
+// records through FinishDownload, which only lands while its job still exists.
 func (s *Store) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
 	return s.updateStatus(ctx,
 		`UPDATE lessons
@@ -159,6 +165,7 @@ func (s *Store) MarkDownloaded(ctx context.Context, id int, quality, outputDir, 
 		        output_dir = ?,
 		        video_path = ?,
 		        bytes = ?,
+		        library_entries = NULL,
 		        error = NULL,
 		        downloaded_at = CURRENT_TIMESTAMP,
 		        updated_at = CURRENT_TIMESTAMP
@@ -215,7 +222,7 @@ func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 
 // UpdateLessonDeleted tombstone-skips a lesson whose files have just been
 // removed: it sets status='skipped', error='deleted', and clears the now-stale
-// download metadata (output_dir/video_path/bytes) so the row no longer claims a
+// download metadata (output_dir/video_path/bytes/library_entries) so the row no longer claims a
 // path that's gone. It is a tombstone, not a row delete, because the follow is
 // still active and the next sync would otherwise re-discover and re-download the
 // lesson — ShouldSkipEnqueue already skips 'skipped', and UnskipLesson can bring
@@ -231,6 +238,7 @@ func (s *Store) UpdateLessonDeleted(ctx context.Context, id int) error {
 			        output_dir = NULL,
 			        video_path = NULL,
 			        bytes = NULL,
+			        library_entries = NULL,
 			        updated_at = CURRENT_TIMESTAMP
 			  WHERE railcontent_id = ?`,
 			StatusSkipped, id,
