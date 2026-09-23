@@ -141,3 +141,34 @@ it("shows an 'already finished' toast when cancel returns 409", async () => {
 
   expect(await screen.findByText(/already finished/i)).toBeInTheDocument()
 })
+
+it("a cancel answered by a proxy's HTML page toasts a sentence, never a JSON parse error", async () => {
+  server.use(
+    ...jobsAndLessons(),
+    http.post(
+      `${ORIGIN}/api/jobs/22/cancel`,
+      () =>
+        new HttpResponse("<html><body>502 Bad Gateway</body></html>", {
+          status: 502,
+          headers: { "Content-Type": "text/html" },
+        }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Queue />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Double Stroke Roll")
+  const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
+  await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
+
+  expect(await screen.findByText("Couldn't cancel the job")).toBeInTheDocument()
+  expect(
+    screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again."),
+  ).toBeInTheDocument()
+  expect(screen.queryByText(/JSON|Unexpected token|HTTP 502/)).not.toBeInTheDocument()
+})

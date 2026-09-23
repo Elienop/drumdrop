@@ -2,6 +2,7 @@ import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
 import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { Toaster } from "@/components/ui/sonner"
 import { Dashboard } from "./Dashboard"
 
 it("renders summary cards with the downloaded and follows counts", async () => {
@@ -18,6 +19,23 @@ it("renders summary cards with the downloaded and follows counts", async () => {
 
   expect(await screen.findByText("128")).toBeInTheDocument()
   expect(screen.getByText("12")).toBeInTheDocument()
+})
+
+it("a sync that fails without a server message toasts the outcome and a sentence, never 'HTTP 500'", async () => {
+  server.use(http.post(`${ORIGIN}/api/sync`, () => new HttpResponse(null, { status: 500 })))
+  renderWithProviders(
+    <>
+      <Dashboard />
+      <Toaster />
+    </>,
+  )
+
+  await userEvent.click(await screen.findByRole("button", { name: /run sync/i }))
+  expect(await screen.findByText("Couldn't start a sync")).toBeInTheDocument()
+  expect(
+    screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again."),
+  ).toBeInTheDocument()
+  expect(screen.queryByText(/HTTP 500/)).not.toBeInTheDocument()
 })
 
 it("disables the Dry-run button after a 503 probe", async () => {
