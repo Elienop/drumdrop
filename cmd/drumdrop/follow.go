@@ -253,7 +253,10 @@ func cmdSync(argv []string) error {
 	}
 	defer store.Close()
 
-	cfg := engine.Config(*out, *quality, *resourcesOnly)
+	cfg, err := engine.Config(*out, *quality, *resourcesOnly)
+	if err != nil {
+		return err
+	}
 	planner, worker, _ := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
 	return runSync(context.Background(), planner, worker, *dryRun, *limit, os.Stdout)

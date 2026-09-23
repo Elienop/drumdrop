@@ -43,6 +43,11 @@ func cmdServe(argv []string) error {
 		return err
 	}
 
+	cfg, err := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	if err != nil {
+		return err
+	}
+
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", opts.listen, err)
@@ -54,7 +59,6 @@ func cmdServe(argv []string) error {
 		return err
 	}
 
-	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
 	hub := server.NewHub()
 	planner, worker, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, hub)
 

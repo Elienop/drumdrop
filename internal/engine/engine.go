@@ -62,7 +62,11 @@ func OpenStore() (*database.Store, error) {
 // Config builds a scheduler.Config from the shared download flags. An empty out
 // falls back to config.DownloadsDir() (the DRUMDROP_DOWNLOADS_DIR env or
 // ./downloads); an empty quality means "use each follow's saved quality".
-func Config(out, quality string, resourcesOnly bool) scheduler.Config {
+//
+// It refuses a library folder that is the downloads folder under another path
+// (scheduler.CheckLibraryDir), so sync, daemon and serve all refuse to start
+// rather than move lessons onto themselves.
+func Config(out, quality string, resourcesOnly bool) (scheduler.Config, error) {
 	cfg := scheduler.DefaultConfig()
 	cfg.DownloadsDir = out
 	if cfg.DownloadsDir == "" {
@@ -80,7 +84,10 @@ func Config(out, quality string, resourcesOnly bool) scheduler.Config {
 	// prefer the English/original audio track over Musora's es/pt dubs; "any"/"all"
 	// opt out. It is global, with no per-follow override.
 	cfg.AudioLang = config.AudioLang()
-	return cfg
+	if err := scheduler.CheckLibraryDir(cfg.DownloadsDir, cfg.LibraryDir); err != nil {
+		return scheduler.Config{}, err
+	}
+	return cfg, nil
 }
 
 // Expander adapts the musora package to scheduler.Expander.

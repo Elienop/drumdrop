@@ -670,12 +670,13 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     files, and the folders the copy creates, are flushed to disk before the downloads copy
     is removed, and the copy refuses a symlinked lesson folder instead of following it.
     Library == downloads is decided by identity, not spelling: the move is a no-op for an
-    alias (a symlink, or one folder bound twice) too. A plex-tv re-download first removes exactly what
+    alias (a symlink, or one folder bound twice) too, and every command refuses to start
+    with such a library (`engine.Config`). A plex-tv re-download first removes exactly what
     the lesson's previous download recorded (D51), and stops, recording what is left, if
     that fails. Anything that can't be cleaned up is logged with its path (`⚠ move to
     library`). The move stays non-fatal.
-  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared'
-    ./internal/scheduler/` (the permission-based ones skip as root).
+  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared|ConfigRefuses'
+    ./internal/scheduler/ ./internal/engine/` (the permission-based ones skip as root).
   - *Left open:* if the OS refuses both the move and its undo (a renamed entry can't be
     renamed back), the lesson stays split and the log names every path. Plex seeing
     half-copied files is D62.

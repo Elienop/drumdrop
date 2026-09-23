@@ -31,7 +31,10 @@ func cmdDaemon(argv []string) error {
 	}
 	defer store.Close()
 
-	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	cfg, err := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	if err != nil {
+		return err
+	}
 	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
 	if opts.once {

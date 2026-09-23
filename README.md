@@ -233,6 +233,11 @@ copy that fails part-way is taken back out of the library, so the lesson stays w
 downloads dir; if the copy finished but the downloads copy can't be removed, the library
 copy is kept and recorded. Anything drumdrop could not clean up is logged with its path.
 
+drumdrop refuses to start when `DRUMDROP_LIBRARY_DIR` is the downloads dir reached by
+another path (a symlink, or one host folder bound twice), because a move would then delete
+the only copy. The same path written the same way is allowed, and every move is then a
+no-op.
+
 Deleting a lesson (or a follow with its files) only ever removes files inside the downloads
 and library dirs. A path that reaches outside them through a symlinked folder is refused,
 and so is the root of either dir. The trade-off: a symlink you placed inside the library on
