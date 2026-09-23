@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -300,5 +303,55 @@ func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Sync complete") {
 		t.Errorf("real run should print a completion summary; got:\n%s", buf.String())
+	}
+}
+
+// interruptingDownloader is a download an interrupt stops: it writes a partial
+// file in its folder, the interrupt lands (cancel), and yt-dlp, killed,
+// returns the context's error.
+type interruptingDownloader struct {
+	cancel context.CancelFunc
+	dirs   []string
+}
+
+func (d *interruptingDownloader) Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	d.dirs = append(d.dirs, o.Dir)
+	if err := os.WriteFile(filepath.Join(o.Dir, "partial.mp4.part"), []byte("partial"), 0o644); err != nil {
+		return err
+	}
+	d.cancel()
+	return ctx.Err()
+}
+
+// TestRunSyncInterruptStopsAndSaysSo: an interrupt stops the download in
+// progress, starts no other, leaves no private folder behind, and sync reports
+// it as an interruption, not as a completed sync.
+func TestRunSyncInterruptStopsAndSaysSo(t *testing.T) {
+	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
+	exp := cliExpander{ids: map[int64][]int{1: {11, 12}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dl := &interruptingDownloader{cancel: cancel}
+	planner := &scheduler.Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	cfg := scheduler.DefaultConfig()
+	cfg.DownloadsDir = t.TempDir()
+	worker := scheduler.NewWorker(store, cliResolver{}, dl, cfg, "perm", nil)
+
+	var buf bytes.Buffer
+	err := runSync(ctx, planner, worker, false, 0, &buf)
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("runSync = %v, want an interruption error", err)
+	}
+	if strings.Contains(buf.String(), "Sync complete") {
+		t.Errorf("an interrupted sync reported itself complete:\n%s", buf.String())
+	}
+	if len(dl.dirs) != 1 {
+		t.Fatalf("downloads started = %d, want 1 (none after the interrupt)", len(dl.dirs))
+	}
+	if _, err := os.Stat(dl.dirs[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stopped download's private folder %q is still there (err=%v)", dl.dirs[0], err)
+	}
+	if len(store.markedDLed) != 0 {
+		t.Errorf("an interrupted download was recorded: %v", store.markedDLed)
 	}
 }

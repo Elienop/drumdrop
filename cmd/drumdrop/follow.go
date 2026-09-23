@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/database"
@@ -261,6 +263,18 @@ func lastSynced(f database.Follow) string {
 // active jobs, cap NEW downloads via --limit, never abort on one bad lesson, and
 // dry-run records but downloads nothing — live in and are tested by the scheduler
 // package.
+//
+// sync runs no startup recovery (Daemon.Recover), on purpose: it may run while
+// a daemon or serve works on the same database and folders, and it can not
+// tell that process's download from a crashed one. Worker.SweepPrivate keeps
+// only the private folders of jobs its own worker is running, which for sync is
+// none, so it would remove the other process's download in progress. The jobs
+// table is no substitute: a job canceled or removed meanwhile still uses its
+// folder until its worker has undone its placement, and a queued one can be
+// claimed between the check and the removal. Requeueing running jobs would
+// requeue the other process's. What a crash left is cleared by the next daemon
+// or serve start. An interrupt (Ctrl-C, SIGTERM) is not a crash: it stops the
+// download in progress, and the worker removes its private folder.
 
 // cmdSync parses the sync flags, builds a scheduler Planner + Worker over the
 // real store and adapters, and runs one plan+drain cycle (the daemon's per-cycle
@@ -292,7 +306,11 @@ func cmdSync(argv []string) error {
 	}
 	planner, worker, _ := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
-	return runSync(context.Background(), planner, worker, *dryRun, *limit, os.Stdout)
+	// yt-dlp runs in its own process group, so without this an interrupt would
+	// end drumdrop and leave yt-dlp writing on.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runSync(ctx, planner, worker, *dryRun, *limit, os.Stdout)
 }
 
 // runSync executes one sync cycle, decoupled from flag parsing so tests can drive
@@ -317,6 +335,12 @@ func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.
 	processed, err := worker.RunOnce(ctx, limit)
 	if err != nil {
 		return err
+	}
+	if ctx.Err() != nil {
+		// The stopped job stays marked running (Worker.shuttingDown), and only
+		// a daemon or serve start requeues it.
+		fmt.Fprintf(w, "\nSync interrupted — queued %d, processed %d\n", planned, processed)
+		return errors.New("sync interrupted: a download in progress was stopped; it starts over the next time daemon or serve starts")
 	}
 	fmt.Fprintf(w, "\nSync complete — queued %d, downloaded %d\n", planned, processed)
 	return nil
