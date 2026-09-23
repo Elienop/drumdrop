@@ -2,6 +2,7 @@ package musora
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -29,16 +30,26 @@ var allowedBrands = map[string]bool{
 	"playbass": true,
 }
 
+// ErrBadSlug is what an error wraps when an instructor slug is not of the form
+// Musora uses (reSlug), so it was refused before any network call.
+var ErrBadSlug = errors.New("invalid instructor slug")
+
+// ErrBadBrand is what an error wraps when a brand is not one of Musora's
+// (allowedBrands), so it was refused before any network call.
+var ErrBadBrand = errors.New("invalid brand")
+
 func validateSlug(slug string) error {
 	if !reSlug.MatchString(slug) {
-		return fmt.Errorf("invalid instructor slug %q: must match ^[a-z0-9-]+$", slug)
+		return fmt.Errorf("%w %q: must match ^[a-z0-9-]+$", ErrBadSlug, slug)
 	}
 	return nil
 }
 
-func validateBrand(brand string) error {
+// ValidateBrand returns an error wrapping ErrBadBrand when brand is not one of
+// Musora's brands, for a caller that stores a brand before any query uses it.
+func ValidateBrand(brand string) error {
 	if !allowedBrands[brand] {
-		return fmt.Errorf("invalid brand %q: not in allowlist", brand)
+		return fmt.Errorf("%w %q: not in allowlist", ErrBadBrand, brand)
 	}
 	return nil
 }
@@ -50,7 +61,7 @@ func buildInstructorQuery(slug, brand string) (string, error) {
 	if err := validateSlug(slug); err != nil {
 		return "", err
 	}
-	if err := validateBrand(brand); err != nil {
+	if err := ValidateBrand(brand); err != nil {
 		return "", err
 	}
 	tpl, err := LoadQuery("instructor_lessons")

@@ -56,6 +56,21 @@ func LoadCreds() (email, password string, ok bool) {
 	return string(parts[0]), string(parts[1]), true
 }
 
+// ErrLoginRejected is what Login's error wraps when Musora answered and refused
+// the email and password: any 4xx but 408 (timeout) and 429 (too many tries),
+// which say nothing about the credentials. Its text keeps the CLI's
+// "login failed: <Musora's message>".
+var ErrLoginRejected = errors.New("login failed")
+
+// ErrSessionNotSaved is what Login's error wraps when Musora accepted the login
+// but the session cookie could not be written to the config folder.
+var ErrSessionNotSaved = errors.New("login: save the session")
+
+// Login signs in to Musora and saves the session cookie. Its error wraps
+// ErrLoginRejected when Musora refused the credentials, ErrSessionNotSaved when
+// the cookie could not be written; any other error means Musora could not be
+// reached or its answer could not be read (a network error, a 5xx, a 408 or
+// 429, a 2xx that does not decode or carries no user or no session cookie).
 func Login(email, password string) (cookie string, err error) {
 	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
 	req, _ := http.NewRequest(http.MethodPost, AuthBase+"/sessions", bytes.NewReader(body))
@@ -81,6 +96,9 @@ func Login(email, password string) (cookie string, err error) {
 		if msg == "" {
 			msg = fmt.Sprintf("%d", resp.StatusCode)
 		}
+		if rejectsCredentials(resp.StatusCode) {
+			return "", fmt.Errorf("%w: %s", ErrLoginRejected, msg)
+		}
 		return "", fmt.Errorf("login failed: %s", msg)
 	}
 	for _, c := range resp.Cookies() {
@@ -92,9 +110,15 @@ func Login(email, password string) (cookie string, err error) {
 		return "", errors.New("login succeeded but no session cookie returned")
 	}
 	if err := writeFile0600(config.CookiePath(), cookie); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", ErrSessionNotSaved, err)
 	}
 	return cookie, nil
+}
+
+// rejectsCredentials reports whether a login answered with status refused the
+// credentials themselves (see ErrLoginRejected).
+func rejectsCredentials(status int) bool {
+	return status/100 == 4 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
 // Me returns true if the cookie is accepted by /me (401 -> false).
