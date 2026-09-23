@@ -11,14 +11,18 @@ resources (charts, play-along stems, sheet music), and a Plex/Jellyfin-ready `.n
 
 ## Status
 
-A pure-Go CLI built around a validated **core engine** (the catalog → resolve → download
-pipeline), proven end-to-end on real content. The roadmap is a Youtarr-style self-hosted
-app (web UI, job queue, scheduler, auto-sync) built around this engine.
+A pure-Go CLI and a Youtarr-style self-hosted app (web UI, job queue, scheduler, auto-sync),
+both built around a validated **core engine** (the catalog → resolve → download pipeline) and
+proven end-to-end on real content. Releases ship as standalone binaries and a Docker image.
 
 ## Requirements
 
 - Go ≥ 1.26 (only to build from source; the release is a single static binary)
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and `ffmpeg` on `PATH`
+- For **songs** only: [`deno`](https://deno.com) on `PATH` and a **current** yt-dlp. A song's
+  video is a YouTube recording, and YouTube makes yt-dlp solve a JavaScript challenge first —
+  yt-dlp uses deno for that, and an outdated yt-dlp fails with HTTP 403. The Docker image
+  bundles all three.
 
 ## Environment
 
@@ -31,6 +35,7 @@ the defaults give a working setup with no env at all.
 | `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. |
 | `DRUMDROP_LIBRARY_DIR` | _(none)_ | Optional Plex library. When set, each finished lesson folder is **moved** into this dir at the same path relative to the downloads root — a single copy, Sonarr-style. The downloads dir is then pure scratch for in-progress downloads; Plex watches a directory of **only** finished files and never the partials. drumdrop records the library path as the lesson's location, and Plex owns the file from there (no host-path mapping). Empty disables the move: the lesson stays in the downloads dir. For an **instant, atomic** move, downloads and library must be on **one filesystem as the process/container sees it** (see [single-parent bind mount](#run-with-docker)); across filesystems it falls back to a copy-then-delete. |
 | `DRUMDROP_LAYOUT` | _(none)_ | Library destination layout (case-insensitive). Empty or `default` keeps the per-lesson-subfolder layout (`<library>/Course/NN - Lesson/…`). `plex-tv` switches the library copy to Plex's TV-Shows naming — see [Plex TV layout](#plex-tv-layout). Requires `DRUMDROP_LIBRARY_DIR`; has no effect without one. It shapes **only** the library move target, not the in-progress scratch layout. |
+| `DRUMDROP_HOST_DOWNLOADS_DIR` | _(none)_ | For Docker: the host path that the downloads dir is bind-mounted from. The API rewrites lesson paths under the downloads dir to this host path, so the web UI's "Copy path" gives a path that works on the host. Only paths under the downloads dir are rewritten, so with `DRUMDROP_LIBRARY_DIR` set it no longer affects finished lessons (they live in the library). Empty keeps the container paths. |
 | `DRUMDROP_LISTEN` | `127.0.0.1:8080` | Address `serve` binds. A non-loopback bind (e.g. `0.0.0.0:8080`, as in the Docker image) refuses to start without `DRUMDROP_API_TOKEN`. |
 | `DRUMDROP_API_TOKEN` | _(none)_ | Bearer token for the `/api/*` data plane. Required for any non-loopback bind; the SPA shell stays unauthenticated. |
 | `DRUMDROP_CORS_ORIGIN` | _(none)_ | Allowed CORS origin for the HTTP API. Empty disables cross-origin requests. |
@@ -167,8 +172,9 @@ Then open <http://127.0.0.1:8080>.
 
 ## Run with Docker
 
-drumdrop ships as a multi-arch image (`amd64`/`arm64`) bundling yt-dlp + ffmpeg with the web UI
-embedded. The container binds `0.0.0.0`, so it **requires an API token** — generate one with
+drumdrop ships as a `linux/amd64` image bundling yt-dlp + deno + ffmpeg with the web UI
+embedded (for arm64, macOS or Windows, use a [standalone binary](#standalone-binary)). The
+container binds `0.0.0.0`, so it **requires an API token** — generate one with
 `openssl rand -hex 32`.
 
 ```bash
@@ -246,18 +252,19 @@ Each course becomes one *show*, each lesson an *episode*:
   it is non-fatal — a write failure logs a warning and the download still succeeds.
 
 **On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
-enable the **Local Media Assets** agent for it (Settings → Agents → *TV Shows*, or mark the
-show as *personal media*). The show won't match TheTVDB, so Plex reads the episode number,
-title, and summary from the local `<episodedetails>` nfo (and the filenames) — which is
-exactly what this layout encodes. The Local Media Assets agent (or, on older Plex/Kodi
-setups, the **XBMCnfoTVImporter** plugin) is required for Plex to read the episode titles
-from those nfos; without it Plex shows generic "Episode N".
+switch its agent to one that reads `.nfo` files — the **XBMCnfoTVImporter** plugin is what
+the working setup uses — then *Refresh Metadata*. The show won't match TheTVDB, so the
+episode number, title, and summary have to come from the local `<episodedetails>` nfo (and
+the filenames) — which is exactly what this layout encodes. Enabling **Local Media Assets**
+alone was not enough in testing: Plex kept showing generic "Episode N" until the library
+used the `.nfo` agent.
 
 ### Standalone binary
 
 Prefer no container? Download the archive for your OS/arch from the
 [GitHub Releases](https://github.com/elienop/drumdrop/releases) page and extract the `drumdrop`
-binary. **`yt-dlp` and `ffmpeg` must be on your `PATH`** — the binary shells out to them. Configure
+binary. **`yt-dlp` and `ffmpeg` must be on your `PATH`** (plus `deno` for songs — see
+[Requirements](#requirements)) — the binary shells out to them. Configure
 it through the `DRUMDROP_*` env vars (see the [Environment](#environment) table) or the `serve`
 flags.
 
@@ -283,4 +290,6 @@ Both use the same rule: `type(scope)!: description` with types `feat fix chore d
    metadata and resource links (`internal/musora`, embedded `internal/musora/queries/`).
 3. **Download** — `yt-dlp` pulls the manifest (best quality + subtitles); resources,
    play-along stems, sheet music, and a poster are fetched alongside; an `.nfo` is
-   written for media servers.
+   written for media servers. A **song** has no Musora video of its own: its videos are the
+   YouTube recordings in its soundslice play-along score, so each one (`[Original]` and
+   `[Drumless]`) is downloaded through yt-dlp as its own file (`internal/musora/soundslice.go`).
