@@ -384,13 +384,14 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n '^test' Makefile` · `grep -n 'go test' .github/workflows/ci.yml`
   - *Detail:* `drumdrop-race-needs-cgo.md`, `project_go_test_cache_stale_pass.md`.
 
-- **D21 · Test noise from staticcheck and React act() warnings.**
-  - *What:* `staticcheck` flags two nil contexts in `internal/musora/download_test.go`
-    (SA1012). A green `vitest run` prints React `act()` warnings from the SSE provider, the
-    token gate and the Select component (8 on 2026-09-23, *moves*).
+- **D21 · Test noise from React act() warnings.**
+  - *What:* a green `vitest run` prints React `act()` warnings from the SSE provider, the
+    token gate and the Select component (8 on 2026-09-23, *moves*). (The staticcheck half,
+    two nil contexts in `internal/musora/download_test.go`, is fixed on
+    `fix-library-delete-and-move`: `~/go/bin/staticcheck ./...` prints nothing.)
   - *Why:* noise teaches people to ignore warnings, and then it hides the real one when it
-    arrives. staticcheck isn't a CI gate.
-  - *Evidence:* `~/go/bin/staticcheck ./...` · `cd web && npx vitest run`
+    arrives. staticcheck isn't a CI gate, so nothing stops new findings.
+  - *Evidence:* `cd web && npx vitest run`
 
 - **D22 · Local clean-up, in this checkout only.**
   - *What:* this checkout has:
