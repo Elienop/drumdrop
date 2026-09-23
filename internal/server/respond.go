@@ -30,11 +30,12 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, errorBody{Error: msg})
 }
 
-// writeStoreErr writes the appropriate HTTP error response for a database
-// error:
+// writeStoreErr writes the error response for a store error on a request that
+// changes something:
 //   - a wrapped sql.ErrNoRows → 404 with notFoundMsg
-//   - ErrJobNotActive → 409 "job is not active"
-//   - ErrJobNotTerminal → 409 "job is not in a terminal state"
+//   - ErrJobNotActive → 409 msgJobNotActive (a cancel of an ended job)
+//   - ErrJobNotTerminal → 409 msgJobNotRetry (a retry of a job that isn't
+//     failed or canceled)
 //   - ErrLessonDeleting → 409, the lesson's files are being deleted
 //   - anything else → 500 msgServerError (the raw err is never leaked, so
 //     internal SQL phrasing such as "sql: no rows in result set" stays out of
@@ -43,18 +44,28 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // ErrAlreadyFollowing is intentionally not handled here: the follow handler maps
 // it to a 200 with the existing row, so it never reaches writeStoreErr.
 func writeStoreErr(w http.ResponseWriter, err error, notFoundMsg string) {
+	writeStoreErrAs(w, err, notFoundMsg, msgServerError)
+}
+
+// writeLoadErr is writeStoreErr for a read (a GET): its 500 says the page
+// couldn't be loaded (msgLoadFailed), since a read changes nothing.
+func writeLoadErr(w http.ResponseWriter, err error, notFoundMsg string) {
+	writeStoreErrAs(w, err, notFoundMsg, msgLoadFailed)
+}
+
+func writeStoreErrAs(w http.ResponseWriter, err error, notFoundMsg, serverMsg string) {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, http.StatusNotFound, notFoundMsg)
 	case errors.Is(err, database.ErrJobNotActive):
-		writeErr(w, http.StatusConflict, "job is not active")
+		writeErr(w, http.StatusConflict, msgJobNotActive)
 	case errors.Is(err, database.ErrJobNotTerminal):
-		writeErr(w, http.StatusConflict, "job is not in a terminal state")
+		writeErr(w, http.StatusConflict, msgJobNotRetry)
 	case errors.Is(err, database.ErrLessonDeleting):
 		writeErr(w, http.StatusConflict, msgBeingDeleted)
 	default:
 		fmt.Fprintf(logOut, "drumdrop: store error: %v\n", err)
-		writeErr(w, http.StatusInternalServerError, msgServerError)
+		writeErr(w, http.StatusInternalServerError, serverMsg)
 	}
 }
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,4 +185,100 @@ func TestLessonFolderGuards(t *testing.T) {
 		}
 		assertPresent(t, mine, "v.mp4")
 	})
+}
+
+// onLog is a log writer that runs hook once, the first time a line holding
+// trigger is written, so a test can act at an exact point of a request.
+type onLog struct {
+	trigger string
+	hook    func()
+	fired   bool
+}
+
+func (l *onLog) Write(p []byte) (int, error) {
+	if !l.fired && strings.Contains(string(p), l.trigger) {
+		l.fired = true
+		l.hook()
+	}
+	return len(p), nil
+}
+
+// TestFollowDeleteEndsOnlyTheLeasesItStillHolds (security LOW-1) is the
+// security seat's scenario, in one process with no lease lapsing: follow
+// delete F finishes lesson 1 (its tombstone ends lesson 1's lease), a lesson
+// delete B then takes lesson 1, and F goes on to fail on lesson 2 and end.
+// F's end must leave B's lease alone: lesson 1 stays held and refused to a
+// new download until B ends it.
+func TestFollowDeleteEndsOnlyTheLeasesItStillHolds(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	stuck := "Show - s01e06 - Six resources"
+	lockedEntry(t, season, stuck)
+	f := addFollow(t, store, 100)
+	seedPlexLesson(t, store, f, 1, "Five", season, "Show - s01e05 - Five.mp4")
+	seedPlexLesson(t, store, f, 2, "Six", season, stuck+"/", "Show - s01e06 - Six.mp4")
+	var beginB error
+	hook := &onLog{trigger: "drumdrop: delete lesson 2:", hook: func() {
+		_, _, beginB = store.BeginLessonDelete(ctx, 1)
+	}}
+	old := logOut
+	logOut = hook
+	t.Cleanup(func() { logOut = old })
+	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: library}, "test")
+
+	rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true")
+	wantError(t, rec, http.StatusInternalServerError, msgFollowFilesKept)
+	if !hook.fired || beginB != nil {
+		t.Fatalf("delete B never began on lesson 1 (fired=%v, err=%v)", hook.fired, beginB)
+	}
+	if l := mustLesson(t, store, 1); !l.Deleting {
+		t.Error("lesson 1 is no longer held: the follow delete ended the lease of the delete that began after it finished lesson 1")
+	}
+	if _, _, err := store.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 1); !errors.Is(err, database.ErrLessonDeleting) {
+		t.Errorf("EnqueueJob(1) = %v while delete B holds it, want ErrLessonDeleting", err)
+	}
+	if l := mustLesson(t, store, 2); l.Deleting {
+		t.Error("lesson 2 is still held after the follow delete ended")
+	}
+}
+
+// TestDeleteFollowRemovedMeanwhileIsALate404 (code review, unpinned) proves a
+// follow removed elsewhere while its files were being deleted answers 404
+// msgFollowGoneLate from the final cascade, which the web client counts as
+// already removed, not a 500.
+func TestDeleteFollowRemovedMeanwhileIsALate404(t *testing.T) {
+	store, path := newTestStoreAt(t)
+	ctx := t.Context()
+	f := addFollow(t, store, 100)
+	if err := store.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	job, _, err := store.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 1)
+	if err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	claimJob(t, store, job)
+	deps := Deps{CancelRunning: func(int64) bool {
+		rawExec(t, path, `DELETE FROM lessons WHERE follow_id = ?`, f)
+		rawExec(t, path, `DELETE FROM follows WHERE id = ?`, f)
+		return true
+	}}
+	srv := NewServer(store, deps, nil, Config{DownloadsDir: t.TempDir()}, "test")
+
+	rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true")
+	wantError(t, rec, http.StatusNotFound, msgFollowGoneLate)
+}
+
+// TestRemoveFollowKeepingFilesRemovedMeanwhileIs404 (code review, unpinned)
+// proves the keep-files removal answers 404 msgFollowGone when the follow is
+// gone by the time its cascade runs. It calls the removal directly: the
+// route's own read of the follow answers 404 first, so only a removal
+// elsewhere between the two reaches this arm.
+func TestRemoveFollowKeepingFilesRemovedMeanwhileIs404(t *testing.T) {
+	s := &Server{store: newTestStore(t)}
+	rec := httptest.NewRecorder()
+	s.removeFollowKeepingFiles(rec, httptest.NewRequest(http.MethodDelete, "/api/follows/404", nil), 404)
+	wantError(t, rec, http.StatusNotFound, msgFollowGone)
 }

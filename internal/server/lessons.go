@@ -21,7 +21,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	if status := q.Get("status"); status != "" {
 		lessons, err := s.store.ListByStatus(r.Context(), status)
 		if err != nil {
-			writeStoreErr(w, err, "lessons not found")
+			writeLoadErr(w, err, msgLoadFailed)
 			return
 		}
 		writeJSON(w, http.StatusOK, s.viewLessons(lessons))
@@ -38,7 +38,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	}
 	lessons, err := s.store.ListLessons(r.Context(), limit, offset)
 	if err != nil {
-		writeStoreErr(w, err, "lessons not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLessons(lessons))
@@ -53,7 +53,7 @@ func (s *Server) handleGetLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeLoadErr(w, err, msgNoSuchLesson)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -80,18 +80,18 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	lesson, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgDownloadGone)
 		return
 	}
 
 	jobID, created, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgDownloadGone)
 		return
 	}
 	job, err := s.store.GetJob(r.Context(), jobID)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgDownloadJobGone)
 		return
 	}
 	status := http.StatusOK
@@ -155,16 +155,16 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	if err := s.store.UnskipLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -206,12 +206,13 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := context.WithoutCancel(r.Context())
-	defer s.holdDelete(ctx, id)()
+	hold := s.holdDelete(ctx, id)
+	defer s.endDelete(ctx, hold)
 	s.killRunning(running)
 
 	c, err := s.claims(ctx)
 	if err == nil {
-		err = s.deleteLessonFiles(ctx, c, l)
+		err = s.deleteLessonFiles(ctx, c, hold, l)
 	}
 	switch {
 	case errors.Is(err, errNoClaims):
@@ -247,7 +248,7 @@ func queryInt(w http.ResponseWriter, raw, name string) (int, bool) {
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadQueryNumber(name))
 		return 0, false
 	}
 	return v, true
@@ -260,7 +261,7 @@ func pathInt(w http.ResponseWriter, r *http.Request, name string) (int, bool) {
 	raw := r.PathValue(name)
 	id, err := strconv.Atoi(raw)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadPathNumber(name))
 		return 0, false
 	}
 	return id, true

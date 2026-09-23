@@ -33,7 +33,7 @@ type createFollowRequest struct {
 func (s *Server) handleListFollows(w http.ResponseWriter, r *http.Request) {
 	follows, err := s.store.ListFollows(r.Context())
 	if err != nil {
-		writeStoreErr(w, err, "follows not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTOs(follows))
@@ -48,7 +48,7 @@ func (s *Server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.store.GetFollow(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeLoadErr(w, err, msgNoSuchFollow)
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTO(f))
@@ -66,12 +66,12 @@ func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeLoadErr(w, err, msgNoSuchFollow)
 		return
 	}
 	lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lessons not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	if status := r.URL.Query().Get("status"); status != "" {
@@ -119,6 +119,13 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, msgBadQuality)
 		return
 	}
+	// The brand is stored with the follow and its lessons, and an instructor
+	// follow's every sync queries by it: one Musora doesn't have is refused
+	// here, not left to fail each sync.
+	if err := musora.ValidateBrand(brand); err != nil {
+		writeLookupErr(w, "add follow", err, msgAddUnreachable)
+		return
+	}
 
 	switch req.Kind {
 	case "node":
@@ -159,7 +166,8 @@ func (s *Server) createNodeFollow(w http.ResponseWriter, r *http.Request, req cr
 
 // createInstructorFollow handles an instructor follow: validate the slug,
 // resolve the instructor's display name, then AddInstructorFollow. Musora not
-// answering is a 502; a slug it has no instructor for is a 400.
+// answering is a 502; a slug of a shape Musora never uses, or one it has no
+// instructor for, is a 400.
 func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, brand, quality string) {
 	if req.Slug == "" {
 		writeErr(w, http.StatusBadRequest, msgSlugRequired)
@@ -167,8 +175,7 @@ func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, 
 	}
 	id, name, ok, err := musora.ResolveInstructorID(req.Slug)
 	if err != nil {
-		fmt.Fprintf(logOut, "drumdrop: add follow: look up instructor: %v\n", err)
-		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
+		writeLookupErr(w, "add follow: look up instructor", err, msgAddUnreachable)
 		return
 	}
 	if !ok || id == "" {
@@ -291,11 +298,12 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 	for _, l := range lessons {
 		ids = append(ids, l.RailcontentID)
 	}
-	defer s.holdDelete(ctx, ids...)()
+	hold := s.holdDelete(ctx, ids...)
+	defer s.endDelete(ctx, hold)
 	s.killRunning(running)
 
 	// 2. Remove every lesson's files, then its paths.
-	if !s.deleteFollowFiles(ctx, w, lessons) {
+	if !s.deleteFollowFiles(ctx, w, hold, lessons) {
 		return
 	}
 	// 3. Cascade, unless a lesson records files again by now.
@@ -342,7 +350,7 @@ func (s *Server) removeFollowKeepingFiles(w http.ResponseWriter, r *http.Request
 // meanwhile: no download can record for a lesson being deleted. It writes the
 // error response and returns false when any lesson's files could not all be
 // removed (that lesson records what is left) or a store step failed.
-func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, lessons []database.Lesson) bool {
+func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, hold *deleteHold, lessons []database.Lesson) bool {
 	c, err := s.claims(ctx)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
@@ -353,7 +361,7 @@ func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, l
 		if !l.HasFiles() {
 			continue // no files recorded: the cascade removes the row
 		}
-		switch err := s.deleteLessonFiles(ctx, c, l); {
+		switch err := s.deleteLessonFiles(ctx, c, hold, l); {
 		case errors.Is(err, errFilesKept):
 			kept++
 		case errors.Is(err, database.ErrLessonChanged):
@@ -408,7 +416,7 @@ func pathInt64(w http.ResponseWriter, r *http.Request, name string) (int64, bool
 	raw := r.PathValue(name)
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadPathNumber(name))
 		return 0, false
 	}
 	return id, true

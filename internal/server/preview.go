@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -37,9 +38,10 @@ type loginRequest struct {
 // follow would track, so the UI can show a count/title before the user commits.
 // ?id=N(&whole=bool) previews a node follow (root id, lesson count, title);
 // ?slug= previews an instructor follow (display name + lesson count). A missing
-// or unparseable id, or neither param, is a 400; an unknown instructor is a 400.
-// Resolution failures against Musora surface as 502 (detail logged). No answer
-// echoes the input back.
+// or unparseable id, or neither param, is a 400; a slug or brand of a shape
+// Musora never uses, and an unknown instructor, are 400s too. Resolution
+// failures against Musora surface as 502 (detail logged). No answer echoes the
+// input back.
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	switch {
@@ -66,7 +68,7 @@ func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 	rootID, lessonIDs, err := musora.ResolveLessonIDs(id, whole, engine.PermissionIDs())
 	if err != nil {
 		fmt.Fprintf(logOut, "drumdrop: preview %d: %v\n", id, err)
-		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
+		writeErr(w, http.StatusBadGateway, msgPreviewUnreachable)
 		return
 	}
 
@@ -87,16 +89,20 @@ func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 }
 
 // previewInstructor resolves the instructor's display name and counts the
-// lessons that reference them in the given brand (defaulting to drumeo). An
-// unknown slug is a 400; Musora not answering is a 502.
+// lessons that reference them in the given brand (defaulting to drumeo). A
+// brand or slug of a shape Musora never uses, and an unknown slug, are 400s;
+// Musora not answering is a 502.
 func (s *Server) previewInstructor(w http.ResponseWriter, slug, brand string) {
 	if brand == "" {
 		brand = "drumeo"
 	}
+	if err := musora.ValidateBrand(brand); err != nil {
+		writeLookupErr(w, "preview instructor", err, msgPreviewUnreachable)
+		return
+	}
 	_, name, ok, err := musora.ResolveInstructorID(slug)
 	if err != nil {
-		fmt.Fprintf(logOut, "drumdrop: preview instructor: %v\n", err)
-		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
+		writeLookupErr(w, "preview instructor", err, msgPreviewUnreachable)
 		return
 	}
 	if !ok {
@@ -105,8 +111,7 @@ func (s *Server) previewInstructor(w http.ResponseWriter, slug, brand string) {
 	}
 	lessons, err := musora.InstructorLessons(slug, brand, engine.PermissionIDs())
 	if err != nil {
-		fmt.Fprintf(logOut, "drumdrop: preview instructor lessons: %v\n", err)
-		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
+		writeLookupErr(w, "preview instructor lessons", err, msgPreviewUnreachable)
 		return
 	}
 	writeJSON(w, http.StatusOK, previewResponse{
@@ -114,6 +119,22 @@ func (s *Server) previewInstructor(w http.ResponseWriter, slug, brand string) {
 		LessonCount: len(lessons),
 		Kind:        "instructor",
 	})
+}
+
+// writeLookupErr answers an error from a Musora instructor lookup. A slug or
+// brand musora refused before any network call (musora.ErrBadSlug,
+// ErrBadBrand) is the client's to fix: a 400 saying what is accepted. Anything
+// else is Musora failing: a 502 with unreachable, the detail logged under what.
+func writeLookupErr(w http.ResponseWriter, what string, err error, unreachable string) {
+	switch {
+	case errors.Is(err, musora.ErrBadSlug):
+		writeErr(w, http.StatusBadRequest, msgBadSlug)
+	case errors.Is(err, musora.ErrBadBrand):
+		writeErr(w, http.StatusBadRequest, msgBadBrand)
+	default:
+		fmt.Fprintf(logOut, "drumdrop: %s: %v\n", what, err)
+		writeErr(w, http.StatusBadGateway, unreachable)
+	}
 }
 
 // handleGetSession serves GET /api/session: reports whether the saved cookie is
@@ -128,24 +149,40 @@ func (s *Server) handleGetSession(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleLogin serves POST /api/session: logs in with the supplied credentials,
-// persisting the cookie and creds on success. A missing email/password is a
-// 400; a rejected login is a 401.
+// persisting the cookie and creds on success. A bad body or a missing
+// email/password is a 400; credentials Musora refused are a 422; Musora not
+// answering, or answering something unreadable, is a 502; a session that
+// couldn't be saved is a 500. Never a 401: the web client takes any 401 for its
+// own API token being refused (the auth middleware) and clears it, which would
+// log the user out of DrumDrop over a Musora password.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 	if req.Email == "" || req.Password == "" {
-		writeErr(w, http.StatusBadRequest, "email and password are required")
+		writeErr(w, http.StatusBadRequest, msgLoginMissing)
 		return
 	}
-	if _, err := musora.Login(req.Email, req.Password); err != nil {
-		writeErr(w, http.StatusUnauthorized, "login failed")
+	_, err := musora.Login(req.Email, req.Password)
+	switch {
+	case errors.Is(err, musora.ErrLoginRejected):
+		writeErr(w, http.StatusUnprocessableEntity, msgLoginRejected)
+		return
+	case errors.Is(err, musora.ErrSessionNotSaved):
+		fmt.Fprintf(logOut, "drumdrop: login: %v\n", err)
+		writeErr(w, http.StatusInternalServerError, msgLoginNotSaved)
+		return
+	case err != nil:
+		fmt.Fprintf(logOut, "drumdrop: login: %v\n", err)
+		writeErr(w, http.StatusBadGateway, msgLoginUnreachable)
 		return
 	}
 	// Best-effort persist of credentials so the daemon can refresh later; a
 	// save failure does not invalidate the (already saved) cookie/login.
-	_ = musora.SaveCreds(req.Email, req.Password)
+	if err := musora.SaveCreds(req.Email, req.Password); err != nil {
+		fmt.Fprintf(logOut, "drumdrop: login: save the credentials: %v\n", err)
+	}
 	writeJSON(w, http.StatusOK, sessionResponse{Connected: true})
 }

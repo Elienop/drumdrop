@@ -48,7 +48,7 @@ func serverClosingContext(ctx context.Context) context.Context {
 // honors the ?access_token query value EventSource clients pass.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if s.hub == nil {
-		writeErr(w, http.StatusServiceUnavailable, "progress stream unavailable")
+		writeErr(w, http.StatusServiceUnavailable, msgNoProgressStream)
 		return
 	}
 

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -24,18 +25,19 @@ type syncRequest struct {
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 
 	if req.DryRun {
 		if s.deps.Planner == nil {
-			writeErr(w, http.StatusServiceUnavailable, "dry-run sync unavailable: no planner attached")
+			writeErr(w, http.StatusServiceUnavailable, msgNoPlanner)
 			return
 		}
 		would, err := s.deps.Planner.PlanDryRun(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "dry-run sync failed")
+			fmt.Fprintf(logOut, "drumdrop: dry-run sync: %v\n", err)
+			writeErr(w, http.StatusInternalServerError, msgDryRunFailed)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]int{"would_enqueue": would})
@@ -43,7 +45,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.deps.Kick == nil {
-		writeErr(w, http.StatusServiceUnavailable, "sync unavailable: no daemon attached")
+		writeErr(w, http.StatusServiceUnavailable, msgNoDaemon)
 		return
 	}
 	// Non-blocking send: a full buffer means a cycle is already pending, which is

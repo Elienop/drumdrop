@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -156,8 +158,12 @@ func stillThere(path string) bool {
 //     errRecordNotUpdated returned (a wrapped sql.ErrNoRows passes through:
 //     the row is gone).
 //
+// A tombstone or keep that was written also ended the lesson's lease, so it
+// is dropped from hold: another delete may take the lesson from then on, and
+// this one must not end that delete's lease (security LOW-1).
+//
 // c holds what every lesson row with files claims, for the ownership checks.
-func (s *Server) deleteLessonFiles(ctx context.Context, c *library.Claims, l database.Lesson) error {
+func (s *Server) deleteLessonFiles(ctx context.Context, c *library.Claims, hold *deleteHold, l database.Lesson) error {
 	kept, err := s.removeLessonFiles(c, l)
 	var werr error
 	if err == nil {
@@ -165,6 +171,9 @@ func (s *Server) deleteLessonFiles(ctx context.Context, c *library.Claims, l dat
 	} else {
 		fmt.Fprintf(logOut, "drumdrop: delete lesson %d: %v\n", l.RailcontentID, err)
 		werr = s.store.KeepLessonFiles(ctx, l, kept)
+	}
+	if werr == nil {
+		hold.released(l.RailcontentID)
 	}
 	switch {
 	case errors.Is(werr, database.ErrLessonChanged):
@@ -205,37 +214,76 @@ func (s *Server) claims(ctx context.Context) (*library.Claims, error) {
 // lessons (database.DeleteRenewEvery); a variable so a test can shorten it.
 var deleteRenewEvery = database.DeleteRenewEvery
 
+// deleteHold is a running delete's hold on the lessons whose lease it still
+// holds (holdDelete).
+type deleteHold struct {
+	mu   sync.Mutex
+	ids  []int
+	stop chan struct{}
+	done chan struct{}
+}
+
+// released drops lesson id from the hold: the delete's own tombstone or keep
+// ended its lease, so the lesson is free and a later delete may take it. The
+// hold neither renews nor ends that lesson's lease from then on. A renewal
+// already under way may still extend a new delete's lease once, which only
+// lengthens a hold that delete keeps and ends itself anyway.
+func (h *deleteHold) released(id int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ids = slices.DeleteFunc(h.ids, func(held int) bool { return held == id })
+}
+
+// held returns the lessons whose lease the hold still holds.
+func (h *deleteHold) held() []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.ids)
+}
+
 // holdDelete keeps the delete of lessons ids (begun by BeginLessonDelete or
 // BeginFollowDelete) holding them for as long as it runs: it renews their
 // lease every deleteRenewEvery, so however long the removal takes, the
 // lessons stay refused to downloads and to a second delete, while a delete
-// the process died in lapses by itself (database.DeleteLease). The returned
-// func ends the hold: it stops the renewals, waits for one in flight, and
-// ends the deletes (EndLessonDelete), whatever happened. Failures are logged.
-func (s *Server) holdDelete(ctx context.Context, ids ...int) (end func()) {
-	stop := make(chan struct{})
-	done := make(chan struct{})
+// the process died in lapses by itself (database.DeleteLease). A lesson the
+// delete finished (deleteLessonFiles) leaves the hold. endDelete ends it.
+// Failures are logged.
+func (s *Server) holdDelete(ctx context.Context, ids ...int) *deleteHold {
+	h := &deleteHold{ids: slices.Clone(ids), stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
-		defer close(done)
+		defer close(h.done)
 		t := time.NewTicker(deleteRenewEvery)
 		defer t.Stop()
 		for {
 			select {
-			case <-stop:
+			case <-h.stop:
 				return
 			case <-t.C:
-				if err := s.store.RenewLessonDelete(ctx, ids...); err != nil {
-					fmt.Fprintf(logOut, "drumdrop: renew the delete of lessons %v: %v\n", ids, err)
+				held := h.held()
+				if len(held) == 0 {
+					continue
+				}
+				if err := s.store.RenewLessonDelete(ctx, held...); err != nil {
+					fmt.Fprintf(logOut, "drumdrop: renew the delete of lessons %v: %v\n", held, err)
 				}
 			}
 		}
 	}()
-	return func() {
-		close(stop)
-		<-done
-		if err := s.store.EndLessonDelete(ctx, ids...); err != nil {
-			fmt.Fprintf(logOut, "drumdrop: end delete of lessons %v: %v\n", ids, err)
-		}
+	return h
+}
+
+// endDelete ends hold h, whatever happened: it stops the renewals, waits for
+// one in flight, and ends the deletes of the lessons h still holds
+// (EndLessonDelete). Failures are logged.
+func (s *Server) endDelete(ctx context.Context, h *deleteHold) {
+	close(h.stop)
+	<-h.done
+	held := h.held()
+	if len(held) == 0 {
+		return
+	}
+	if err := s.store.EndLessonDelete(ctx, held...); err != nil {
+		fmt.Fprintf(logOut, "drumdrop: end delete of lessons %v: %v\n", held, err)
 	}
 }
 
