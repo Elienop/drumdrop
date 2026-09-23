@@ -472,7 +472,8 @@ func (s *Store) RetryJob(ctx context.Context, id int64) error {
 			return fmt.Errorf("rows affected retrying job %d: %w", id, err)
 		}
 		if n == 0 {
-			// Row exists but the guard excluded it: it is queued or running.
+			// The row exists but the guard excluded it: it is queued,
+			// running or done (only a failed or canceled job is retried).
 			return fmt.Errorf("retry job %d (status %q): %w", id, j.Status, ErrJobNotTerminal)
 		}
 
