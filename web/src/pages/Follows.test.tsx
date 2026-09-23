@@ -874,6 +874,79 @@ it("Enter previews from either instructor field, where a form with two fields wo
   expect(previews).toEqual(["?slug=jared-falk&brand=drumeo"])
 })
 
+it("the instructor field says what it takes: a name or a slug, like jared-falk", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])))
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+
+  const field = within(dialog).getByRole("textbox", { name: "Name or slug" })
+  expect(field).toHaveAccessibleDescription("The instructor's name or slug, like jared-falk.")
+})
+
+it("an instructor preview shows the slug the server normalised to, and Add still sends what was typed", async () => {
+  const previews: (string | null)[] = []
+  let created: CreateFollowRequest | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, ({ request }) => {
+      previews.push(new URL(request.url).searchParams.get("slug"))
+      return HttpResponse.json({
+        title: "Jared Falk",
+        lesson_count: 40,
+        kind: "instructor",
+        slug: "jared-falk",
+      })
+    }),
+    http.post(`${ORIGIN}/api/follows`, async ({ request }) => {
+      created = (await request.json()) as CreateFollowRequest
+      return HttpResponse.json(follows[1], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByRole("textbox", { name: "Name or slug" }), "Jared Falk{Enter}")
+
+  expect(await within(dialog).findByText("@jared-falk")).toBeInTheDocument()
+  expect(previews).toEqual(["Jared Falk"])
+
+  await user.keyboard("{Enter}")
+  await waitFor(() => expect(created).toMatchObject({ kind: "instructor", slug: "Jared Falk" }))
+})
+
+it("a node preview shows no slug", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, previewOf),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345{Enter}")
+
+  expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
+  expect(within(dialog).queryByText(/^@/)).not.toBeInTheDocument()
+})
+
+it("an instructor input nothing can normalise shows the server's sentence inline", async () => {
+  const BAD = "That can't be looked up. Enter an instructor's name or slug, like jared-falk, then Preview again."
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: BAD }, { status: 400 })),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByRole("textbox", { name: "Name or slug" }), "??{Enter}")
+
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(BAD))
+  expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
+})
+
 it("a failed preview's message clears as soon as the input is edited", async () => {
   const NOPE = "No content id was found in “URL or id”. Enter the id, then Preview again."
   server.use(

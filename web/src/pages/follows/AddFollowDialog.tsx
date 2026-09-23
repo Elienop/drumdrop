@@ -38,7 +38,9 @@ type Kind = "node" | "instructor"
 export const QUALITY_OPTIONS = ["best", "2160", "1440", "1080", "720", "480"] as const
 
 // What a preview is built from: the kind and the identity fields, exactly as
-// typed. Quality is not part of it (it does not change what is followed).
+// typed. Quality is not part of it (it does not change what is followed). The
+// instructor field is sent raw: the server normalises it the same way on
+// preview and on add, and the preview reports the slug it arrived at.
 type Target =
   | { kind: "node"; id: string }
   | { kind: "instructor"; slug: string; brand: string }
@@ -52,8 +54,9 @@ interface Preview {
 const targetKey = (t: Target) => JSON.stringify(t)
 
 // AddFollowDialog is the preview-then-add flow: a segmented kind control
-// (node | instructor), an input (URL-or-id for node, slug + optional brand for
-// instructor), a Preview button that fetches the title + lesson_count, and an
+// (node | instructor), an input (URL-or-id for node, name-or-slug + optional
+// brand for instructor), a Preview button that fetches the title +
+// lesson_count (and, for an instructor, the slug it resolves to), and an
 // Add button that registers the follow. createFollow resolves to { status,
 // data }: 201 → newly created ("Follow added"), 200 → already following.
 //
@@ -63,9 +66,10 @@ const targetKey = (t: Target) => JSON.stringify(t)
 // lands after the kind was switched, can never add something other than what
 // the dialog shows.
 //
-// A failure of either step shows inside the dialog (the 400 "check the URL or
-// slug" and 502 carry a clean server message), so the user can correct the
-// input; a toast would not be heard while the modal hides the rest of the page.
+// A failure of either step shows inside the dialog (a 400 saying what input
+// is accepted, and a 502, carry a clean server message), so the user can
+// correct the input; a toast would not be heard while the modal hides the
+// rest of the page.
 export function AddFollowDialog({
   open,
   onOpenChange,
@@ -88,6 +92,7 @@ export function AddFollowDialog({
     returnFocus,
   })
   const errorId = React.useId()
+  const slugHintId = React.useId()
   const addRef = React.useRef<HTMLButtonElement>(null)
 
   // A reopen starts clean. Reset as it opens, not as it closes, so the dialog
@@ -219,25 +224,38 @@ export function AddFollowDialog({
             />
           </TabsContent>
 
-          <TabsContent value="instructor" className="flex flex-col gap-2 pt-2">
-            <Label htmlFor="follow-slug">Slug</Label>
-            <Input
-              id="follow-slug"
-              placeholder="jared-falk"
-              value={slug}
-              disabled={adding}
-              onChange={edit(setSlug)}
-              onKeyDown={onFieldEnter}
-            />
-            <Label htmlFor="follow-brand">Brand (optional)</Label>
-            <Input
-              id="follow-brand"
-              placeholder="drumeo"
-              value={brand}
-              disabled={adding}
-              onChange={edit(setBrand)}
-              onKeyDown={onFieldEnter}
-            />
+          {/* One group per field, so the hint reads as the name field's and
+              not as a caption over the brand below it. */}
+          <TabsContent value="instructor" className="flex flex-col gap-4 pt-2">
+            <div className="flex flex-col gap-2">
+              {/* Named for what to type, like the node tab's "URL or id"; the
+                  tab already says it is an instructor. Links are not claimed:
+                  the server has not promised to take one. */}
+              <Label htmlFor="follow-slug">Name or slug</Label>
+              <Input
+                id="follow-slug"
+                placeholder="Jared Falk"
+                aria-describedby={slugHintId}
+                value={slug}
+                disabled={adding}
+                onChange={edit(setSlug)}
+                onKeyDown={onFieldEnter}
+              />
+              <p id={slugHintId} className="text-sm text-muted-foreground">
+                The instructor's name or slug, like jared-falk.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="follow-brand">Brand (optional)</Label>
+              <Input
+                id="follow-brand"
+                placeholder="drumeo"
+                value={brand}
+                disabled={adding}
+                onChange={edit(setBrand)}
+                onKeyDown={onFieldEnter}
+              />
+            </div>
           </TabsContent>
         </Tabs>
 
@@ -261,7 +279,16 @@ export function AddFollowDialog({
 
         {shown && (
           <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
-            <span className="font-medium">{shown.data.title}</span>
+            {/* The slug beside the name is what will be followed, whatever
+                was typed: "Jared Falk" previews as @jared-falk. */}
+            <div className="flex flex-wrap items-baseline gap-x-2">
+              <span className="font-medium">{shown.data.title}</span>
+              {shown.data.slug && (
+                <span className="text-sm wrap-anywhere text-muted-foreground">
+                  @{shown.data.slug}
+                </span>
+              )}
+            </div>
             <span className="text-sm text-muted-foreground">
               {shown.data.lesson_count} lessons
             </span>

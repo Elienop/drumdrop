@@ -66,6 +66,9 @@ export interface PreviewResponse {
   title: string
   lesson_count: number
   kind: "node" | "instructor"
+  // Instructor only (omitted for node): the slug the follow will use, which
+  // the server normalises from what was typed ("Jared Falk" → "jared-falk").
+  slug?: string
 }
 
 export interface SessionResponse {
