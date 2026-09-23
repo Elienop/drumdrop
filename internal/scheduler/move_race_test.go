@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -267,4 +268,39 @@ func TestEpisodeNFOSurvivesALeftoverTemporaryFile(t *testing.T) {
 		t.Errorf("nfo = %q, want the episode nfo", got)
 	}
 	assertExist(t, false, filepath.Join(scratch, "05 - Five.nfo"+episodeTempSuffix))
+}
+
+// TestMovesCopyOnlyAcrossFilesystems (code #2) proves the copy fallback is
+// only for a rename between two filesystems: any other rename failure (here a
+// permission error) refuses the move, in both layouts, and nothing reaches the
+// library.
+func TestMovesCopyOnlyAcrossFilesystems(t *testing.T) {
+	for _, layout := range []string{"", LayoutPlexTV} {
+		t.Run("layout="+layout, func(t *testing.T) {
+			tmp := t.TempDir()
+			dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+			scratch := filepath.Join(dl, "Course", "05 - Five")
+			seedSeason(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+			stubRename(t, func(oldpath, newpath string) error {
+				return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
+			})
+			var moved string
+			var err error
+			if layout == LayoutPlexTV {
+				var res plexMoveResult
+				res, err = testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
+					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl})
+				moved = res.seasonDir
+			} else {
+				moved, err = testMoveToLibrary(t, dl, lib, scratch)
+			}
+			if err == nil || moved != "" {
+				t.Errorf("move = %q, %v; want a refusal", moved, err)
+			}
+			if p := findContent(t, lib, "05 - Five.mp4"); p != "" {
+				t.Errorf("the lesson was copied into the library at %q", p)
+			}
+			assertContent(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+		})
+	}
 }
