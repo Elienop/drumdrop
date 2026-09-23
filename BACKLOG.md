@@ -418,16 +418,6 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
   - *Evidence:* `grep -n 'github-tag-action\|FORCE_JAVASCRIPT' .github/workflows/main.yml` ·
     `gh release list -R mathieudutour/github-tag-action --limit 3`
 
-- **D28 · Re-enable the tracked git hooks?**
-  - *What:* `scripts/hooks/` holds a `commit-msg` hook (conventional commit subject) and a
-    `pre-push` hook (PR title), which `make hooks` turns on. In this clone, `core.hooksPath`
-    points at `.git/hooks`, which holds only the `*.sample` files, so the hooks are off.
-    MusicDrop and SpenDrop have the same setting. `.git/config` last changed on 2026-09-11,
-    and the cause is unknown.
-  - *Why it's the owner's:* it changes local git config, and the identical setting in three
-    repos suggests something set it on purpose.
-  - *Evidence:* `git config --show-origin --get core.hooksPath` · `ls .git/hooks scripts/hooks`
-
 - **D29 · Keep `web/src/components/ui/**` out of SonarQube?**
   - *What:* the 13 vendored shadcn primitives are excluded from analysis. SpenDrop's test is
     that an edited primitive has become our code and should be analysed. SpenDrop analyses
@@ -581,6 +571,17 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
 
 ## Recently shipped
 
+- **D28 · The tracked git hooks are back on.** Local git config only, so there is no PR. The
+  owner asked on 2026-09-23: *"drumdrop: turn its Git hooks back on."*
+  - *Was:* `core.hooksPath` pointed at `.git/hooks`, which holds only the `*.sample` files, so
+    neither tracked hook ran.
+  - *Now:* `make hooks` set `core.hooksPath` to `scripts/hooks`. `commit-msg` rejects a
+    subject that isn't a conventional commit, and `pre-push` checks the PR title. This is
+    per clone: a fresh clone needs `make hooks` again. MusicDrop and SpenDrop still point
+    `core.hooksPath` at `.git/hooks`; their own sessions decide that.
+  - *Evidence:* `git config --show-origin --get core.hooksPath` (`file:.git/config
+    scripts/hooks`) · `printf 'bad subject\n' > /tmp/m && git hook run commit-msg -- /tmp/m`
+    (exits 1 with the bypass hint).
 - **D52 · A library move that failed part-way left an untracked copy.** This branch
   (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* on the copy fallback (two filesystems) nothing was undone when a step failed. A
