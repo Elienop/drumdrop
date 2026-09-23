@@ -2,6 +2,7 @@ import * as React from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
+import { brandName } from "@/lib/format"
 import { qk } from "@/lib/queryKeys"
 import { useDialogRequest } from "@/lib/dialog-request"
 import type { FocusTarget } from "@/lib/focus"
@@ -52,19 +53,6 @@ interface Preview {
 }
 
 const targetKey = (t: Target) => JSON.stringify(t)
-
-// Musora's own names for its brands, for the preview's "40 lessons on
-// Pianote": the server sends the lower-case value the Brand field takes. A
-// brand not listed here shows as the server sent it, not as a guessed
-// capitalisation.
-const BRAND_NAMES: Record<string, string> = {
-  drumeo: "Drumeo",
-  pianote: "Pianote",
-  guitareo: "Guitareo",
-  singeo: "Singeo",
-}
-
-const brandName = (brand: string) => BRAND_NAMES[brand] ?? brand
 
 // AddFollowDialog is the preview-then-add flow: a segmented kind control
 // (node | instructor), an input (URL-or-id for node; name, slug or coach link,

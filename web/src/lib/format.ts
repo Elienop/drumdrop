@@ -27,3 +27,20 @@ export function formatDuration(seconds: number): string {
   const s = seconds % 60
   return `${m}m ${s}s`
 }
+
+// Musora's own names for its brands. The server sends a brand as the
+// lower-case value the Brand field takes ("pianote"); every place the UI shows
+// one reads it through brandName, so the Add follow preview and the Follows
+// and Lessons tables all say "Pianote". A brand not listed here (playbass,
+// whose casing is unconfirmed) shows as the server sent it, not as a guessed
+// capitalisation.
+const BRAND_NAMES: Readonly<Record<string, string>> = {
+  drumeo: "Drumeo",
+  pianote: "Pianote",
+  guitareo: "Guitareo",
+  singeo: "Singeo",
+}
+
+export function brandName(brand: string): string {
+  return Object.hasOwn(BRAND_NAMES, brand) ? BRAND_NAMES[brand] : brand
+}

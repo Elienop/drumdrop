@@ -1,4 +1,4 @@
-import { formatBytes, formatRelativeTime, formatDuration } from "./format"
+import { brandName, formatBytes, formatRelativeTime, formatDuration } from "./format"
 
 describe("formatBytes", () => {
   it("handles null and zero", () => {
@@ -32,5 +32,22 @@ describe("formatDuration", () => {
   it("formats seconds and minutes", () => {
     expect(formatDuration(45)).toBe("45s")
     expect(formatDuration(125)).toBe("2m 5s")
+  })
+})
+
+describe("brandName", () => {
+  it("names Musora's brands as Musora does", () => {
+    expect(brandName("drumeo")).toBe("Drumeo")
+    expect(brandName("pianote")).toBe("Pianote")
+    expect(brandName("guitareo")).toBe("Guitareo")
+    expect(brandName("singeo")).toBe("Singeo")
+  })
+  it("shows any other brand as sent, playbass included (its casing is unconfirmed)", () => {
+    expect(brandName("playbass")).toBe("playbass")
+    expect(brandName("")).toBe("")
+    // Only the lookup's own entries count: `names[brand] ?? brand` would
+    // show Object's own function for these.
+    expect(brandName("constructor")).toBe("constructor")
+    expect(brandName("toString")).toBe("toString")
   })
 })

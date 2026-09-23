@@ -5,7 +5,7 @@ import { Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
-import { formatRelativeTime } from "@/lib/format"
+import { brandName, formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
 import { itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { FollowDTO } from "@/types"
@@ -161,7 +161,7 @@ export function Follows() {
                         {f.kind}
                       </Badge>
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{f.brand}</TableCell>
+                    <TableCell className="text-muted-foreground">{brandName(f.brand)}</TableCell>
                     <TableCell className="text-muted-foreground">{f.quality}</TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatRelativeTime(f.last_synced_at)}

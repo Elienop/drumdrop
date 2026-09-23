@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
-import { formatBytes, formatRelativeTime } from "@/lib/format"
+import { brandName, formatBytes, formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
 import { errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { ActiveDownload } from "@/lib/sse-reducer"
@@ -378,7 +378,7 @@ export function Lessons() {
                       <TableCell>
                         <StatusBadge status={busy ? "deleting" : lesson.status} />
                       </TableCell>
-                      <TableCell className="text-muted-foreground">{lesson.brand}</TableCell>
+                      <TableCell className="text-muted-foreground">{brandName(lesson.brand)}</TableCell>
                       <TableCell className="text-muted-foreground">
                         {lesson.quality ?? "—"}
                       </TableCell>

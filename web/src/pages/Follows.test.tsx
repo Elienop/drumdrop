@@ -43,6 +43,24 @@ it("renders both follow titles from the list", async () => {
   expect(screen.getByText("Jared Falk")).toBeInTheDocument()
 })
 
+it("the Brand column names a brand as the Add follow preview does", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () =>
+      HttpResponse.json([
+        { ...follows[0], brand: "pianote" },
+        { ...follows[1], brand: "playbass" },
+      ]),
+    ),
+  )
+  renderWithProviders(<Follows />)
+
+  const row = async (title: string) =>
+    within((await screen.findByText(title)).closest("tr") as HTMLElement)
+  expect((await row("Stick Control")).getByRole("cell", { name: "Pianote" })).toBeInTheDocument()
+  // No known name: shown as sent.
+  expect((await row("Jared Falk")).getByRole("cell", { name: "playbass" })).toBeInTheDocument()
+})
+
 it("previews a node then adds it, surfacing a 201 'Following' toast and closing the dialog", async () => {
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),

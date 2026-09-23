@@ -137,6 +137,24 @@ it("renders lessons with status badges and human sizes", async () => {
   expect(within(table).getByText("500.0 MB")).toBeInTheDocument()
 })
 
+it("the Brand column names a brand as the Add follow preview does", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () =>
+      HttpResponse.json([
+        { ...lessons[0], brand: "guitareo" },
+        { ...lessons[1], brand: "playbass" },
+      ]),
+    ),
+  )
+  renderWithProviders(<Lessons />)
+
+  const row = async (title: string) =>
+    within((await screen.findByText(title)).closest("tr") as HTMLElement)
+  expect((await row("Single Stroke Roll")).getByRole("cell", { name: "Guitareo" })).toBeInTheDocument()
+  // No known name: shown as sent.
+  expect((await row("Double Stroke Roll")).getByRole("cell", { name: "playbass" })).toBeInTheDocument()
+})
+
 it("queues a download (202) and shows a 'Queued' toast", async () => {
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
