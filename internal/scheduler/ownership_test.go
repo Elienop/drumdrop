@@ -373,6 +373,11 @@ func TestRemoveUnderRootConfinesTheRemoval(t *testing.T) {
 			t.Errorf("RemoveUnderRoot(%q) = nil, want a refusal", p)
 		}
 	}
+	// A root itself is refused by name. (os.Root would refuse "." too, but only
+	// as a bare "invalid argument" that names nothing.)
+	if err := RemoveUnderRoot(roots, lib); err == nil || !strings.Contains(err.Error(), "is not safely inside any of") {
+		t.Errorf("RemoveUnderRoot(root) = %v, want the named refusal", err)
+	}
 	if err := RemoveUnderRoot(nil, filepath.Join(lib, "Show")); err == nil {
 		t.Error("removed with no root, want a refusal")
 	}

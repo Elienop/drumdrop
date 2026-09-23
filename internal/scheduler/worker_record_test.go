@@ -172,6 +172,10 @@ func TestWorkerAbandonedDownloadLeavesNothingUntracked(t *testing.T) {
 			w.Cfg.Layout = layout
 			store.gone = map[int64]bool{}
 			dl.afterWrite = func(string) { store.gone[1] = true } // the delete lands mid-job
+			// Another lesson's files next to where this one lands: never touched.
+			neighbour := "Beginner Course - s01e06 - Lesson B.mp4"
+			seedSeason(t, season, neighbour)
+			seedSeason(t, filepath.Join(lib, "Beginner Course"), "06 - Lesson B/")
 
 			if _, err := w.RunOnce(context.Background(), 0); err != nil {
 				t.Fatalf("RunOnce: %v", err)
@@ -180,10 +184,11 @@ func TestWorkerAbandonedDownloadLeavesNothingUntracked(t *testing.T) {
 				t.Errorf("recorded %+v / done %v after the delete, want nothing", store.markDownloaded, store.markDone)
 			}
 			if layout == LayoutPlexTV {
-				assertNoEpisodeIn(t, season)
+				assertNoEpisodeIn(t, season, neighbour)
 			} else {
 				assertExist(t, false, filepath.Join(lib, "Beginner Course", "05 - Lesson A"))
 			}
+			assertExist(t, true, filepath.Join(season, neighbour), filepath.Join(lib, "Beginner Course", "06 - Lesson B"))
 			assertExist(t, false, filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A"))
 		})
 	}

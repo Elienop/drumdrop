@@ -383,6 +383,29 @@ func TestPlexTVMoveFitsLongNames(t *testing.T) {
 	assertExist(t, true, filepath.Join(lessonDir, "05 - T.mp4"))
 }
 
+// TestCopyFileRefusesANonRegularSource proves the copy never follows a
+// symlinked source into whatever it points at: it refuses, and leaves no
+// destination behind.
+func TestCopyFileRefusesANonRegularSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "secret.txt")
+	if err := os.WriteFile(target, []byte("not the lesson's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmp, "05 - Lesson.mp4")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(tmp, "copy.mp4")
+	if err := copyFile(link, dst, 0o644); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("copyFile(symlink) = %v, want a refusal", err)
+	}
+	assertExist(t, false, dst)
+}
+
 // TestDiscardPartialCopyReportsOnlyWhatIsThere proves a leftover is reported
 // only when it exists and could not be removed: never for a path that was
 // never created, a name too long to exist included.

@@ -152,6 +152,27 @@ func TestDeleteFollowFilesPlexTvRemovesOnlyItsLessonsEntries(t *testing.T) {
 	}
 }
 
+// TestDeleteFollowFilesRemovesAnEntryOnlyItsOwnLessonsShared proves an entry
+// two lessons of the same follow both record (identical titles at one episode)
+// goes with the follow: each lesson alone must keep it, since the other still
+// claims it, but once the first is deleted the second is its only claimant.
+func TestDeleteFollowFilesRemovesAnEntryOnlyItsOwnLessonsShared(t *testing.T) {
+	store := newTestStore(t)
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	f := addFollow(t, store, 100)
+	shared := "Show - s01e05 - Same.mp4"
+	seedPlexLesson(t, store, f, 1, "Same", season, shared, "Show - s01e05 - Same.nfo")
+	seedPlexLesson(t, store, f, 2, "Same", season, shared, "Show - s01e05 - Same-poster.jpg")
+	captureLog(t)
+	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: library}, "test")
+
+	if rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body %s)", rec.Code, rec.Body.String())
+	}
+	assertGone(t, season, shared, "Show - s01e05 - Same.nfo", "Show - s01e05 - Same-poster.jpg")
+}
+
 // TestDeleteLessonKeepsTheLessonWhenAFileCannotBeRemoved (D56) proves a lesson
 // whose files could not all be removed keeps its paths and a record of exactly
 // what is left, and the caller is told: a fixed 500 (no path, no OS detail),
