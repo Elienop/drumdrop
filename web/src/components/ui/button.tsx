@@ -5,18 +5,30 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  // LOCAL EDIT (owner's rulings 2026-09-23, decisions #68): the focus ring is
+  // ring-ring/60, not upstream's /50, as in every other primitive here: at
+  // least 3.4:1 on the background, cards, popovers and muted tab lists (/50
+  // was under 3:1 on all but the background). design-tokens.test.ts checks it.
+  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/90",
-        // LOCAL EDIT (owner's ruling 2026-09-23): upstream's red focus ring
-        // (focus-visible:ring-destructive/20, dark:…/40) is removed, so a
-        // destructive button keeps the base amber ring-ring/50 like every
-        // other control: 3.0:1 against the dark background, where red/40 was
-        // under 2:1. Re-apply this when updating the component from upstream.
+        // LOCAL EDIT (owner's rulings 2026-09-23, decisions #68). Re-apply
+        // all three when updating the component from upstream:
+        // - Ring colour: upstream's red focus ring (focus-visible:ring-
+        //   destructive/20, dark:…/40) is removed, so the button keeps the
+        //   base amber ring like every other control (red/40 was under 2:1).
+        // - Ring offset: a 2px strip of the dialog's background between the
+        //   red fill and the amber ring. The two colours are equally bright
+        //   (1:1), so without it the ring reads as a fatter button.
+        // - Dark hover: dark:hover:bg-destructive/50. Upstream's
+        //   hover:bg-destructive/90 loses to dark:bg-destructive/60 (same
+        //   specificity, later in the CSS), so the button had no hover in
+        //   dark mode. It dims like the primary button's hover; white text
+        //   on it is 7.7:1.
         destructive:
-          "bg-destructive text-white hover:bg-destructive/90 dark:bg-destructive/60",
+          "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:bg-destructive/60 dark:hover:bg-destructive/50",
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:

@@ -27,11 +27,13 @@
   --accent-foreground: oklch(0.95 0 0);
   /* shadcn's dark-theme red (owner's ruling 2026-09-23). On the dark
      background: red text 6.5:1, white text on the button fill
-     (destructive/60) 6.2:1. */
+     (destructive/60) 6.2:1 and on its hover (/50) 7.7:1. */
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.98 0 0);
   --border: oklch(0.3 0 0);
   --input: oklch(0.3 0 0);
+  /* Used at 60% (ring-ring/60, owner's ruling 2026-09-23): 3.4:1 or more
+     on every surface a ring sits on (background, card, popover, muted). */
   --ring: oklch(0.77 0.16 70);
 }
 
@@ -63,10 +65,14 @@
 * { border-color: var(--color-border); }
 
 /* Reduced motion: overlays still fade (a dissolve does not move anything),
-   but drop their zoom, slide and spin. tw-animate-css builds every enter/exit
-   from these variables, and a zoom-in-95 class sets them on the element
-   itself, so only !important on each element overrides it. The animation
-   itself stays, so Radix still waits for it before unmounting. */
+   but drop their enter/exit zoom, slide and rotation (tw-animate-css's
+   spin-in/spin-out). tw-animate-css builds every enter/exit from these
+   variables, and a zoom-in-95 class sets them on the element itself, so only
+   !important on each element overrides it. The animation itself stays, so
+   Radix still waits for it before unmounting. The loading spinner
+   (animate-spin) is not an enter/exit and keeps turning: a small spin in
+   place is not the motion this setting is for, and the "…ing" label beside
+   it says the same thing. */
 @media (prefers-reduced-motion: reduce) {
   * {
     --tw-enter-scale: 1 !important;

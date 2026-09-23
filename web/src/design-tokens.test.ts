@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { buttonVariants } from "@/components/ui/button"
@@ -58,6 +58,18 @@ function token(name: string): RGB {
 
 const WHITE: RGB = [1, 1, 1]
 
+// The alphas the classes use, read from the classes themselves, so a class
+// change that a ratio below does not survive fails it.
+const destructiveClasses = buttonVariants({ variant: "destructive" }).split(/\s+/)
+const alphaOf = (classes: string[], pattern: RegExp): number => {
+  const hit = classes.map((c) => c.match(pattern)).find((m) => m !== null)
+  if (!hit) throw new Error(`no class matches ${pattern}`)
+  return Number(hit[1]) / 100
+}
+const RED_FILL = alphaOf(destructiveClasses, /^dark:bg-destructive\/(\d+)$/)
+const RED_HOVER = alphaOf(destructiveClasses, /^dark:hover:bg-destructive\/(\d+)$/)
+const RING_ALPHA = alphaOf(destructiveClasses, /^focus-visible:ring-ring\/(\d+)$/)
+
 describe("theme tokens", () => {
   it("--destructive is shadcn's dark-theme red", () => {
     expect(css).toMatch(/--destructive:\s*oklch\(0\.704 0\.191 22\.216\)/)
@@ -68,24 +80,68 @@ describe("theme tokens", () => {
     expect(contrast(token("destructive"), token("popover"))).toBeGreaterThanOrEqual(4.5)
   })
 
-  it("white text on a destructive button (dark:bg-destructive/60) reads at 4.5:1", () => {
-    const fill = over(token("destructive"), token("background"), 0.6)
-    expect(contrast(WHITE, fill)).toBeGreaterThanOrEqual(4.5)
+  it("white text on a destructive button (dark:bg-destructive/60) reads at 4.5:1, and on its hover fill too", () => {
+    for (const alpha of [RED_FILL, RED_HOVER]) {
+      const fill = over(token("destructive"), token("background"), alpha)
+      expect(contrast(WHITE, fill)).toBeGreaterThanOrEqual(4.5)
+    }
   })
 
-  it("the focus ring (ring-ring/50) shows at 3:1 against the background", () => {
-    const ring = over(token("ring"), token("background"), 0.5)
-    expect(contrast(ring, token("background"))).toBeGreaterThanOrEqual(3)
-  })
+  // The ring is painted around a control, over whatever surface the control
+  // sits on: the page, a card, a popover (menus, selects) or the muted tab
+  // list. It must show at 3:1 against each of them.
+  it.each(["background", "card", "popover", "muted"])(
+    "the focus ring (ring-ring/60) shows at 3:1 against %s",
+    (surface) => {
+      const ring = over(token("ring"), token(surface), RING_ALPHA)
+      expect(contrast(ring, token(surface))).toBeGreaterThanOrEqual(3)
+    },
+  )
 })
 
 describe("destructive buttons", () => {
   it("use the same amber focus ring as every other control, not a red one", () => {
-    const classes = buttonVariants({ variant: "destructive" }).split(/\s+/)
-    expect(classes).toContain("focus-visible:ring-ring/50")
-    expect(classes.filter((c) => /ring-destructive/.test(c) && /focus-visible/.test(c))).toEqual(
-      [],
+    expect(destructiveClasses).toContain("focus-visible:ring-ring/60")
+    expect(
+      destructiveClasses.filter((c) => /ring-destructive/.test(c) && /focus-visible/.test(c)),
+    ).toEqual([])
+  })
+
+  it("set the ring 2px off the fill, over the background, so it reads as a ring and not a fatter button", () => {
+    expect(destructiveClasses).toContain("focus-visible:ring-offset-2")
+    expect(destructiveClasses).toContain("focus-visible:ring-offset-background")
+  })
+
+  it("change on hover in dark mode: the dark hover fill differs from the dark fill", () => {
+    // hover:bg-destructive/90 alone loses to dark:bg-destructive/60.
+    expect(RED_HOVER).not.toBe(RED_FILL)
+  })
+})
+
+// Every focus ring in the app uses the one amber at 60%: a primitive
+// re-added from upstream brings back ring-ring/50, which is under 3:1 on
+// cards and tab lists.
+describe("focus ring everywhere", () => {
+  const sources = (readdirSync(__dirname, { recursive: true }) as string[])
+    .filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f))
+    .map((f) => ({ file: f, text: readFileSync(resolve(__dirname, f), "utf8") }))
+
+  it("is ring-ring/60 in every source file that draws one", () => {
+    const users = sources.filter((s) => /ring-ring\//.test(s.text))
+    // Positive control: the scan reaches the primitives and the pages.
+    expect(users.map((s) => s.file)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/button\.tsx$/),
+        expect.stringMatching(/tabs\.tsx$/),
+        expect.stringMatching(/Follows\.tsx$/),
+      ]),
     )
+    const other = sources.flatMap((s) =>
+      [...s.text.matchAll(/ring-ring\/(\d+)/g)]
+        .filter((m) => m[1] !== "60")
+        .map((m) => `${s.file}: ${m[0]}`),
+    )
+    expect(other).toEqual([])
   })
 })
 
