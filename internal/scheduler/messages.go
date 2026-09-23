@@ -17,9 +17,9 @@ const (
 	msgRequeued = "Stopped: this download was queued again elsewhere, so it starts over."
 	// msgShutdown is a download stopped because drumdrop is shutting down.
 	msgShutdown = "Stopped: DrumDrop is shutting down. The download starts over when it's back."
-	// msgCanceled is a download a cancel stopped: a Cancel, or a shutdown
-	// that killed it mid-download.
-	msgCanceled = "Stopped before it finished: the download was canceled, or DrumDrop shut down."
+	// msgCanceled is a download a Cancel stopped. (A shutdown is msgShutdown:
+	// the job starts over.)
+	msgCanceled = "Stopped before it finished: the download was canceled."
 )
 
 // failure is what a failed job records, twice: lesson under the lesson, whose
@@ -38,6 +38,12 @@ var (
 	failNotStarted = failure{
 		lesson: "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Download again.",
 		job:    "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Retry.",
+	}
+	// failNoFolder is a download not started because its private folder, in
+	// the downloads folder, couldn't be made.
+	failNoFolder = failure{
+		lesson: "Didn't start this download: DrumDrop couldn't make a folder to download into. Check the server log, fix the problem, then Download again.",
+		job:    "Didn't start this download: DrumDrop couldn't make a folder to download into. Check the server log, fix the problem, then Retry.",
 	}
 	// failMusora is a lesson Musora couldn't be asked for (it didn't answer)
 	// or whose answer couldn't be read (a query or a shape DrumDrop doesn't

@@ -328,18 +328,24 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// sort the way they appear in the course; fall back to 1 when the position is
 	// unknown. The download and the worker's lessonDir MUST share this value so
 	// producedVideo and cleanupPartials target the exact folder DownloadLesson
-	// writes to. The row also says what the lesson's previous download left in
-	// the library, which a plex-tv move replaces; a delete can not change it
-	// while this job runs without removing the job (and then nothing here is
-	// recorded). A row that can not be read is not "owns nothing": the job fails
-	// without downloading, and the next cycle tries again.
+	// writes to. The row also says what the lesson's previous download left,
+	// which the placement replaces; a delete can not change it while this job
+	// runs without removing the job (and then nothing here is recorded). A row
+	// that can not be read is not "owns nothing": the job fails without
+	// downloading, and the next cycle tries again.
 	prev, err := w.Store.GetLesson(ctx, id)
 	if err != nil {
+		if w.shuttingDown(ctx, job, lesson) {
+			return
+		}
 		w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the lesson's record could not be read: %w", err), failNotStarted)
 		return
 	}
 	// What a download needs to be recorded is checked before it costs one.
 	if err := w.checkBeforeDownload(ctx); err != nil {
+		if w.shuttingDown(ctx, job, lesson) {
+			return
+		}
 		w.failBeforeDownload(ctx, job, lesson.Title, err, failNotStarted)
 		return
 	}
@@ -347,9 +353,6 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	if prev.Position.Valid {
 		index = int(prev.Position.Int64)
 	}
-	// What is in the lesson folder before the first attempt is not this job's
-	// to remove if it fails or is stopped (lessonFolder).
-	folder := newLessonFolder(lessonDir(outDir, index, lesson.Title), prev)
 
 	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
 	// the in-flight download (yt-dlp dies via the context). Cancelling jobCtx does
@@ -358,6 +361,17 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	w.register(job.ID, cancel)
 	defer w.unregister(job.ID)
 	defer cancel()
+
+	// The download writes only into its private folder; whatever happens, the
+	// folder goes when the job ends (a placed download has left it already).
+	lessonBase := filepath.Base(lessonDir("", index, lesson.Title))
+	private, err := w.startPrivate(job.ID, lessonBase)
+	if err != nil {
+		w.failBeforeDownload(ctx, job, lesson.Title, err, failNoFolder)
+		return
+	}
+	defer w.dropPrivate(job.ID)
+	privateLesson := filepath.Join(private, lessonBase)
 
 	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
 		// Abort promptly on cancellation: leave the job in its current state (it
@@ -388,7 +402,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			}
 		}
 
-		if w.stopped(ctx, job, lesson, folder, w.Store.StartDownload(ctx, job.ID, id), "mark downloading") {
+		if w.stopped(ctx, job, lesson, w.Store.StartDownload(ctx, job.ID, id), "mark downloading") {
 			return
 		}
 
@@ -404,8 +418,8 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Time:          time.Now(),
 		})
 		derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
-			Dir:           outDir,
-			Root:          w.Cfg.DownloadsDir,
+			Dir:           private,
+			Root:          private,
 			Index:         index,
 			Quality:       quality,
 			AudioLang:     w.Cfg.AudioLang,
@@ -413,29 +427,32 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			OnProgress:    w.progressCallback(job, lesson, attempt),
 		})
 
-		// Cancel-error-first: a CancelRunning kill (jobCtx cancelled) must never
-		// fall through to the success or failure branches: record the cancel
-		// and stop, no retry.
+		// Cancel-error-first: a kill (jobCtx cancelled) must never fall through
+		// to the success or failure branches. A shutdown leaves the job to start
+		// over; a Cancel is recorded, with no retry.
 		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
-			w.finishCanceled(ctx, job, lesson, folder)
+			if w.shuttingDown(ctx, job, lesson) {
+				return
+			}
+			w.finishCanceled(ctx, job, lesson)
 			return
 		}
 
 		if derr == nil {
-			// The download is complete; nothing is moved yet. A job a delete
+			// The download is complete; nothing is placed yet. A job a delete
 			// removed, or one canceled meanwhile, stops here.
-			if w.stopped(ctx, job, lesson, folder, w.Store.ConfirmDownload(ctx, job.ID, id), "confirm download") {
+			if w.stopped(ctx, job, lesson, w.Store.ConfirmDownload(ctx, job.ID, id), "confirm download") {
 				return
 			}
-			bytes, ok, rerr := w.recordDownload(ctx, job, lesson, follow, prev, quality, index, folder)
+			bytes, ok, rerr := w.recordDownload(ctx, job, lesson, follow, prev, quality, index, outDir, privateLesson)
 			if rerr == nil {
 				if ok {
 					w.downloaded(job, lesson, attempt, bytes)
 				}
 				return
 			}
-			// The download could not be recorded where it belongs (the other
-			// lessons' claims could not be read): a failed attempt, retried.
+			// The download could not be placed or recorded: a failed attempt,
+			// retried.
 			derr = rerr
 		}
 
@@ -456,26 +473,34 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// Every attempt failed: record the lesson + job as failed and move on. The
 	// next planner cycle re-enqueues the lesson (it is not downloaded, and the
 	// job is no longer active), giving it another chance next interval. Each
-	// attempt's error was logged above; the lesson records a sentence.
-	// WithoutCancel for parity with the cancel/resolve branches: the per-attempt
-	// ctx.Err() guard makes a cancelled ctx here practically unreachable, but
-	// keeping all terminal writes uncancellable makes "shutdown never strands a
-	// job" a single, obvious invariant.
-	finishCtx := context.WithoutCancel(ctx)
-	switch ferr := w.Store.FailDownload(finishCtx, job.ID, id, failDownload.lesson, failDownload.job); {
+	// attempt's error was logged above; the lesson records a sentence. What the
+	// download wrote goes with its private folder; nothing outside it was
+	// touched. WithoutCancel for parity with the cancel/resolve branches: the
+	// per-attempt ctx.Err() guard makes a cancelled ctx here practically
+	// unreachable, but keeping all terminal writes uncancellable makes
+	// "shutdown never strands a job" a single, obvious invariant.
+	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, failDownload.lesson, failDownload.job); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
-		// A delete or a skip removed the job while it failed: what it wrote goes
-		// as the stopper wants, the same as when it stops mid-download.
-		w.discardAbandoned(finishCtx, id, folder.path, nil, folder, ferr)
+		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it failed; nothing was recorded\n", id)
 	case errors.Is(ferr, database.ErrDownloadCanceled):
-		// Requeued elsewhere: the next run writes the same folder, so leave it.
 		fmt.Fprintf(w.log(), "  ⚠ record failure %d: its job was requeued meanwhile: %v\n", id, ferr)
-	default:
-		if ferr != nil {
-			fmt.Fprintf(w.log(), "  ⚠ record failure %d: %v\n", id, ferr)
-		}
-		w.dropFailedDownload(finishCtx, id, folder)
+	case ferr != nil:
+		fmt.Fprintf(w.log(), "  ⚠ record failure %d: %v\n", id, ferr)
 	}
+}
+
+// shuttingDown reports whether ctx, the worker's run, has ended: drumdrop is
+// shutting down. The job is then left as it is, running, so the next start
+// requeues it (Daemon.Recover) and it starts over; the lesson is never skipped
+// or failed for it. Its end is reported, and its private folder goes with the
+// job.
+func (w *Worker) shuttingDown(ctx context.Context, job database.Job, lesson *musora.Lesson) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	fmt.Fprintf(w.log(), "  ⊗ %d stopped: shutting down; it starts over at the next start\n", job.RailcontentID)
+	w.ended(job, lesson, msgShutdown)
+	return true
 }
 
 // failBeforeDownload fails a job that can not start its download (Musora
@@ -519,8 +544,8 @@ func (w *Worker) ended(job database.Job, lesson *musora.Lesson, msg string) {
 }
 
 // logAbandoned logs the outcome of a terminal store write made before anything
-// was downloaded (a skip, or a failed precondition), so there is nothing on
-// disk for a delete's intent to apply to.
+// was placed (a skip, a failed precondition, a cancel), so there is nothing
+// outside the private folder for a stopper's intent to apply to.
 func (w *Worker) logAbandoned(id int, err error) {
 	switch {
 	case errors.Is(err, database.ErrDownloadAbandoned):
@@ -531,17 +556,17 @@ func (w *Worker) logAbandoned(id int, err error) {
 }
 
 // stopped reports whether a guarded write's err ends the job: a delete or a
-// skip removed it (its end is reported, and what it wrote goes as the stopper
-// wants, see discardAbandoned), or it was canceled (recorded as a cancel). Any
-// other error is logged under what, and the download goes on.
-func (w *Worker) stopped(ctx context.Context, job database.Job, lesson *musora.Lesson, folder lessonFolder, err error, what string) bool {
+// skip removed it (its end is reported; what it wrote goes with its private
+// folder), or it was canceled (recorded as a cancel). Any other error is
+// logged under what, and the download goes on.
+func (w *Worker) stopped(ctx context.Context, job database.Job, lesson *musora.Lesson, err error, what string) bool {
 	switch {
 	case errors.Is(err, database.ErrDownloadAbandoned):
 		w.ended(job, lesson, msgStopped)
-		w.discardAbandoned(ctx, job.RailcontentID, folder.path, nil, folder, err)
+		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while downloading; nothing outside its private folder was touched\n", job.RailcontentID)
 		return true
 	case errors.Is(err, database.ErrDownloadCanceled):
-		w.finishCanceled(ctx, job, lesson, folder)
+		w.finishCanceled(ctx, job, lesson)
 		return true
 	case err != nil:
 		fmt.Fprintf(w.log(), "  ⚠ %s %d: %v\n", what, job.RailcontentID, err)
@@ -549,19 +574,14 @@ func (w *Worker) stopped(ctx context.Context, job database.Job, lesson *musora.L
 	return false
 }
 
-// finishCanceled records a canceled download: its partial files are removed,
-// the lesson is left as CancelDownload says, and the job canceled. The write
-// uses context.WithoutCancel(ctx): on a user Cancel the outer ctx is still
-// alive, but on SIGINT/SIGTERM shutdown it is ALSO cancelled (it is what
-// cancelled the job's context), and a plain ctx would make withTx's BeginTx
-// fail immediately, stranding the job 'running' and the lesson 'downloading'
-// until the next startup requeue. gracefulServe joins the daemon goroutine
-// before closing the store, so the DB is still open when it runs. A delete
-// that removed the job meanwhile decides what happens to what it wrote
-// (discardAbandoned); a job requeued meanwhile (a retry) records nothing.
-func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *musora.Lesson, folder lessonFolder) {
+// finishCanceled records a download a Cancel stopped: the lesson is left as
+// CancelDownload says, and the job canceled; what it wrote goes with its
+// private folder. The write uses context.WithoutCancel(ctx), so it lands
+// whatever happens to ctx meanwhile. A delete that removed the job meanwhile,
+// or a job requeued meanwhile (a retry), records nothing. A shutdown never
+// comes here (shuttingDown).
+func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *musora.Lesson) {
 	id := job.RailcontentID
-	dir := folder.path
 	fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
 	w.progress().Emit(ProgressEvent{
 		Kind:          "lesson_skipped",
@@ -572,16 +592,13 @@ func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *m
 		Err:           msgCanceled,
 		Time:          time.Now(),
 	})
-	finishCtx := context.WithoutCancel(ctx)
-	switch err := w.Store.CancelDownload(finishCtx, job.ID, id); {
+	switch err := w.Store.CancelDownload(context.WithoutCancel(ctx), job.ID, id); {
 	case errors.Is(err, database.ErrDownloadAbandoned):
-		w.discardAbandoned(finishCtx, id, dir, nil, folder, err)
-		return
+		fmt.Fprintf(w.log(), "  ⊗ %d was removed meanwhile; nothing was recorded\n", id)
 	case errors.Is(err, database.ErrDownloadCanceled):
 	case err != nil:
 		fmt.Fprintf(w.log(), "  ⚠ record cancel %d: %v\n", id, err)
 	}
-	cleanupPartials(dir)
 }
 
 // downloaded reports a recorded download.

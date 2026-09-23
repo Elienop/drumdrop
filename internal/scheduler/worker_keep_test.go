@@ -49,8 +49,9 @@ func (d *scratchWriter) Download(ctx context.Context, l *musora.Lesson, o musora
 // was in its lesson folder before the job began (a follow removed with its
 // files kept, then followed again): with no library and with the library the
 // downloads folder, that folder is the lesson's permanent home, and with a
-// separate library it is a copy an earlier failed move left there. Only
-// yt-dlp's partial file goes.
+// separate library it is a copy an earlier failed move left there. The
+// download wrote only into its private folder (D66), so nothing of it, the
+// partial file included, is left in the lesson folder.
 func TestWorkerKeepsWhatTheLessonFolderHeldBefore(t *testing.T) {
 	kept := []string{"05 - Lesson A.mp4", "old-sheet.pdf"}
 	for _, lib := range []string{"none", "downloads", "separate"} {
@@ -131,26 +132,28 @@ func TestWorkerSkipDuringTheMoveKeepsWhatTheScratchFolderHeld(t *testing.T) {
 	}
 }
 
-// TestWorkerDiscardStillCleansPartialsWhenTheFolderIsRefused (code
-// Suggestions) proves a discard whose lesson folder can not be removed whole,
-// because another lesson records something in it, still removes yt-dlp's
-// partial files, and keeps everything else.
-func TestWorkerDiscardStillCleansPartialsWhenTheFolderIsRefused(t *testing.T) {
+// TestWorkerStoppedDownloadNeverTouchesAFolderAnotherLessonRecords (was
+// TestWorkerDiscardStillCleansPartialsWhenTheFolderIsRefused, D66) proves a
+// Skip landing as a download fails leaves the lesson folder, which another
+// lesson records, exactly as it was: the download wrote only into its private
+// folder, which goes whole.
+func TestWorkerStoppedDownloadNeverTouchesAFolderAnotherLessonRecords(t *testing.T) {
 	w, store, _, _, _ := plexWorker(t)
 	w.Cfg.MaxAttempts = 1
 	store.skipped = map[int64]bool{}
 	w.Downloader = &failingWriter{onFail: func() { store.skipped[1] = true }}
 	scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	seedSeason(t, scratch, "05 - Lesson A.mp4", "05 - Lesson A.f137.mp4.part")
 	store.withFiles = []database.Lesson{{RailcontentID: 200, OutputDir: sql.NullString{String: scratch, Valid: true}}}
 	var log bytes.Buffer
 	w.Log = &log
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"))
-	assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"))
-	if !strings.Contains(log.String(), "kept the lesson folder") {
-		t.Errorf("log %q does not say the folder was kept", log.String())
+	assertContent(t, scratch, "05 - Lesson A.mp4", "05 - Lesson A.f137.mp4.part")
+	assertExist(t, false, w.privateDir(1))
+	if !strings.Contains(log.String(), "was stopped while it failed; nothing was recorded") {
+		t.Errorf("log %q does not say the stopped download recorded nothing", log.String())
 	}
 }
 

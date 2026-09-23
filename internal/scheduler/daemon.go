@@ -114,20 +114,25 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 
 // Recover is the startup crash recovery, run once however often it is called:
 // any job still marked running was orphaned by a previous process that died
-// mid-download, so it is re-queued for this run to pick up. serve calls it
-// before it starts serving, so no request races it; Run calls it too (a no-op
-// the second time).
+// mid-download, or left to start over by a shutdown, so it is re-queued for
+// this run to pick up; and the private download folder every such job left is
+// removed (Worker.SweepPrivate: a job starts over in a fresh one). serve calls
+// it before it starts serving, so no request races it; Run calls it too (a
+// no-op the second time).
 //
 // It assumes this is the only daemon (daemon or serve) on the database: a
-// second one would requeue the first one's running job. A delete's hold on a
-// lesson needs no recovery: it is a lease that lapses on its own
-// (database.DeleteLease).
+// second one would requeue the first one's running job, and remove its private
+// folder. A delete's hold on a lesson needs no recovery: it is a lease that
+// lapses on its own (database.DeleteLease).
 func (d *Daemon) Recover(ctx context.Context) {
 	d.recovered.Do(func() {
 		if reclaimed, err := d.Store.RequeueStaleRunning(ctx); err != nil {
 			fmt.Fprintf(d.log(), "startup: requeue stale running failed: %v\n", err)
 		} else {
 			fmt.Fprintf(d.log(), "startup: requeued %d stale running job(s)\n", reclaimed)
+		}
+		if d.Worker != nil {
+			d.Worker.SweepPrivate()
 		}
 	})
 }

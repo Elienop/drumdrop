@@ -43,7 +43,7 @@ func realWorker(t *testing.T, layout string) (*Worker, *database.Store, *fakeDow
 	dl := newFakeDownloader()
 	dl.writeMP4 = []byte("new mp4")
 	tmp := t.TempDir()
-	w := newTestWorker(s, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
+	w := newTestWorker(t, s, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = filepath.Join(tmp, "dl")
 	w.Cfg.LibraryDir = filepath.Join(tmp, "lib")
 	w.Cfg.Layout = layout
@@ -134,11 +134,11 @@ func (d *failingWriter) Download(_ context.Context, l *musora.Lesson, o musora.D
 	return errors.New("ffmpeg died")
 }
 
-// TestWorkerFinalFailureLeavesNothingUntracked (code L1) proves a download
-// that fails every attempt leaves no copy in downloads that no lesson records:
-// its scratch folder is removed, unless a lesson row records something in it
-// (as the lesson's own earlier download, recorded there after a failed move),
-// and then only yt-dlp's partial files go.
+// TestWorkerFinalFailureLeavesNothingUntracked (code L1; D66) proves a
+// download that fails every attempt leaves nothing of itself anywhere: its
+// private folder goes whole, and a lesson folder a lesson row records (the
+// lesson's own earlier download, recorded there after a failed move) is left
+// exactly as it was.
 func TestWorkerFinalFailureLeavesNothingUntracked(t *testing.T) {
 	for _, held := range []bool{false, true} {
 		t.Run(fmt.Sprintf("held=%v", held), func(t *testing.T) {
@@ -148,6 +148,7 @@ func TestWorkerFinalFailureLeavesNothingUntracked(t *testing.T) {
 			w.Cfg.MaxAttempts = 2
 			scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
 			if held {
+				seedSeason(t, scratch, "05 - Lesson A.mp4")
 				store.withFiles = []database.Lesson{{RailcontentID: 100, OutputDir: sql.NullString{String: scratch, Valid: true}}}
 			}
 			if _, err := w.RunOnce(context.Background(), 0); err != nil {
@@ -156,17 +157,20 @@ func TestWorkerFinalFailureLeavesNothingUntracked(t *testing.T) {
 			if dl.calls != 2 || !reflect.DeepEqual(store.markFailed, []int{100}) {
 				t.Errorf("attempts %d, failed %v; want 2 and lesson 100 failed", dl.calls, store.markFailed)
 			}
+			if held {
+				assertContent(t, scratch, "05 - Lesson A.mp4")
+			}
 			assertExist(t, held, filepath.Join(scratch, "05 - Lesson A.mp4"))
-			assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"))
+			assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"), w.privateDir(1))
 		})
 	}
 }
 
-// TestWorkerFailureStoppedByADeleteAppliesItsIntent (code L1) proves a
-// download that fails after a delete or a skip removed its job applies what
-// the stopper wanted, like one stopped mid-download: a discard removes the
-// scratch folder, a keep-files removal keeps what finished and drops only the
-// partial files.
+// TestWorkerFailureStoppedByADeleteAppliesItsIntent (code L1; D66) proves a
+// download that fails after a delete or a skip removed its job records no
+// failure, and leaves nothing of itself, whatever the stopper wanted: what it
+// wrote never became the lesson's, so a keep-files removal has nothing of it
+// to keep, and its private folder goes whole.
 func TestWorkerFailureStoppedByADeleteAppliesItsIntent(t *testing.T) {
 	for _, discard := range []bool{true, false} {
 		t.Run(fmt.Sprintf("discard=%v", discard), func(t *testing.T) {
@@ -187,8 +191,7 @@ func TestWorkerFailureStoppedByADeleteAppliesItsIntent(t *testing.T) {
 			if len(store.markFailed) != 0 {
 				t.Errorf("failure recorded for a stopped job: %v", store.markFailed)
 			}
-			assertExist(t, !discard, filepath.Join(scratch, "05 - Lesson A.mp4"))
-			assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"))
+			assertExist(t, false, scratch, w.privateDir(1))
 		})
 	}
 }
@@ -215,9 +218,9 @@ func TestWorkerUnrecordedDownloadIsNotReportedDone(t *testing.T) {
 	}
 }
 
-// TestWorkerCancelOfARequeuedJobCleansPartials (code L5, m43) proves a cancel
-// whose job another process requeued meanwhile still removes the killed
-// download's partial files, and records nothing.
+// TestWorkerCancelOfARequeuedJobCleansPartials (code L5, m43; D66) proves a
+// cancel whose job another process requeued meanwhile still removes what the
+// killed download wrote (its private folder, whole), and records nothing.
 func TestWorkerCancelOfARequeuedJobCleansPartials(t *testing.T) {
 	w, store, dl, _, _ := plexWorker(t)
 	store.canceled, store.requeued = map[int64]bool{}, map[int64]bool{}
@@ -232,8 +235,7 @@ func TestWorkerCancelOfARequeuedJobCleansPartials(t *testing.T) {
 	if len(store.markDownloaded) != 0 || len(store.markJobCanceled) != 0 {
 		t.Errorf("recorded %+v, canceled %v; want nothing", store.markDownloaded, store.markJobCanceled)
 	}
-	assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.mp4.part"))
-	assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"))
+	assertExist(t, false, scratch, w.privateDir(1))
 }
 
 // TestCleanupPartialsRemovesOnlyPartials (security I4, Info 2) proves the
@@ -316,10 +318,10 @@ func TestCleanupPartialsReachesSubfolders(t *testing.T) {
 	assertExist(t, true, filepath.Join(outside, "x.pdf"+musora.TempSuffix))
 }
 
-// TestWorkerPlexDiscardLeavesTheSeasonFolderQuietly (code M2, m19) proves a
-// plex-tv download stopped after its move removes only what it placed: the
-// season folder, and an episode in it no row records, stay, and the discard
-// reports success rather than a refused folder.
+// TestWorkerPlexDiscardLeavesTheSeasonFolderQuietly (code M2, m19; D79)
+// proves a plex-tv download stopped while it is placed takes back only what it
+// placed: the season folder, and an episode in it no row records, stay, and
+// the log says the placement was undone, not that anything was left.
 func TestWorkerPlexDiscardLeavesTheSeasonFolderQuietly(t *testing.T) {
 	w, store, _, _, season := plexWorker(t)
 	untracked := "Beginner Course - s01e02 - Kept Untracked.mp4"
@@ -333,7 +335,7 @@ func TestWorkerPlexDiscardLeavesTheSeasonFolderQuietly(t *testing.T) {
 	}
 	assertExist(t, true, filepath.Join(season, untracked))
 	assertNoEpisodeIn(t, season, untracked)
-	if !strings.Contains(log.String(), "removed what it had written") || strings.Contains(log.String(), "not everything") {
+	if !strings.Contains(log.String(), "the placement was undone") || strings.Contains(log.String(), "could not be fully undone") {
 		t.Errorf("log %q, want a clean discard", log.String())
 	}
 }

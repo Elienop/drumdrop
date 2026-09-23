@@ -58,7 +58,7 @@ func TestMovesStayInTheLibraryUnderARace(t *testing.T) {
 		seedSeason(t, outside)
 		swapBeforeFirstRename(t, filepath.Join(lib, "Course"), outside)
 
-		newDir, err := testMoveToLibrary(t, dl, lib, scratch)
+		newDir, err := testPlace(t, dl, lib, scratch, database.Lesson{})
 		if len(readDirNames(t, outside)) != 0 {
 			t.Fatalf("the move landed outside the library: %v (move = %q, %v)", readDirNames(t, outside), newDir, err)
 		}
@@ -74,8 +74,8 @@ func TestMovesStayInTheLibraryUnderARace(t *testing.T) {
 		season := filepath.Join(lib, "Show", "Season 01")
 		swapBeforeFirstRename(t, season, outside)
 
-		res, err := testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
-			plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl})
+		res, err := testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+			plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 		if got := readDirNames(t, outside); len(got) != 1 {
 			t.Errorf("the move landed outside the library: %v (move = %+v, %v)", got, res, err)
 		}
@@ -164,11 +164,11 @@ func TestMovesKeepAnEntryPlantedAtTheDestination(t *testing.T) {
 				var err error
 				if layout == LayoutPlexTV {
 					var res plexMoveResult
-					res, err = testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
-						plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl})
+					res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+						plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 					moved = res.seasonDir
 				} else {
-					moved, err = testMoveToLibrary(t, dl, lib, scratch)
+					moved, err = testPlace(t, dl, lib, scratch, database.Lesson{})
 				}
 				if *planted == "" {
 					t.Fatal("the move never renamed")
@@ -237,8 +237,8 @@ func TestEpisodeNFONeverReplacesAPlantedSymlink(t *testing.T) {
 	if err := os.Symlink(victim, filepath.Join(scratch, "05 - Five.nfo")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
-		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl, episodeNFO: []byte("<episodedetails/>")})
+	res, err := testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, episodeNFO: []byte("<episodedetails/>")})
 	if got, _ := os.ReadFile(victim); string(got) != "victim.nfo" {
 		t.Errorf("the symlink's target was written: %q", got)
 	}
@@ -288,11 +288,11 @@ func TestMovesCopyOnlyAcrossFilesystems(t *testing.T) {
 			var err error
 			if layout == LayoutPlexTV {
 				var res plexMoveResult
-				res, err = testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
-					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl})
+				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 				moved = res.seasonDir
 			} else {
-				moved, err = testMoveToLibrary(t, dl, lib, scratch)
+				moved, err = testPlace(t, dl, lib, scratch, database.Lesson{})
 			}
 			if err == nil || moved != "" {
 				t.Errorf("move = %q, %v; want a refusal", moved, err)

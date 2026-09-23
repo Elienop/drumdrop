@@ -31,10 +31,6 @@ var syncFile = (*os.File).Sync
 
 // plexLibrary is what the plex-tv move needs to know beyond the lesson itself.
 type plexLibrary struct {
-	// downloads is the downloads folder the scratch lesson folder is in. The
-	// move reads and removes the scratch folder only through it (os.Root), so
-	// a symlink planted in downloads can not make it take files from elsewhere.
-	downloads string
 	// self is the lesson's row as it was before this download: its record (or,
 	// for a legacy row, its season folder and video) says which library entries
 	// are its previous files.
@@ -43,20 +39,22 @@ type plexLibrary struct {
 	// them), so the move never overwrites or removes an entry another lesson
 	// claims. The caller builds it; one it could not build is a failed attempt.
 	claims *library.Claims
-	// roots are the folders the move may remove entries under; empty means the
-	// library only.
+	// roots are the downloads and library folders: the lesson's previous
+	// folder (previousFolder) is set aside only if it is inside one of them.
 	roots []string
-	// episodeNFO, when set, replaces the scratch "<base>.nfo" just before the
-	// entries are placed, so the season folder is never written to after its
-	// entries are in place.
+	// episodeNFO, when set, replaces the downloaded "<base>.nfo" just before
+	// the entries are placed, so the season folder is never written to after
+	// its entries are in place.
 	episodeNFO []byte
+	// jobID names the folder replaced entries are set aside in (asideArea).
+	jobID int64
 }
 
 // plexMoveResult says where a plex-tv move left the lesson.
 type plexMoveResult struct {
 	// seasonDir is the season folder holding every entry of the lesson, or ""
-	// when the lesson is whole in the scratch folder (the move refused, or
-	// failed and was undone).
+	// when nothing was placed (the move refused, or failed and was undone):
+	// the lesson is whole in its private folder.
 	seasonDir string
 	// videoPath is the episode video the move placed ("" with no video).
 	videoPath string
@@ -64,14 +62,17 @@ type plexMoveResult struct {
 	episodeBase string
 	// placed are the entries this move put in the library (all still there).
 	placed []string
-	// kept are entries of the lesson's previous download that are still in the
-	// library and still its own (the move refused before removing them, or
-	// could not remove them), plus any placed entry an undo could not take back.
+	// kept are entries of the lesson's previous download that are still its
+	// own when nothing was placed (the move refused, or was undone), plus any
+	// placed entry an undo could not take back.
 	kept []string
 	// known is false when the move stopped before it could tell what the
 	// lesson owns in the library (it could not start, or the lesson's own
 	// record is damaged): the lesson's record must then stay exactly as it is.
 	known bool
+	// pending is the placement to commit once the download is recorded, or
+	// to undo if it is not; nil when nothing was placed.
+	pending *placement
 }
 
 // record is what the worker records as the lesson's library entries: every
@@ -85,9 +86,9 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 	return library.EntriesFor(root, append(append([]string(nil), r.placed...), r.kept...))
 }
 
-// moveToLibraryPlexTV moves the finished lesson's files out of the scratch
-// lessonDir into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
-// from its scratch "NN - Title" base to the episode base
+// moveToLibraryPlexTV places the finished lesson's entries from its private
+// folder src into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
+// from its "NN - Title" base to the episode base
 // "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>" while preserving the suffix
 // (".mp4", ".en.vtt", ".nfo", "-poster.jpg", " [Drumless].mp4"); each subfolder
 // becomes "<episodeBase> <folder>". Files end up FLAT in the season folder,
@@ -99,56 +100,47 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 // The season folder may hold other lessons' entries, and two lessons can share
 // an episode number, so the move acts only on what it can prove (see
 // library.Claims), in this order, writing nothing until the checks pass:
-//  1. It refuses, leaving the lesson whole in scratch and the library
-//     untouched, if a destination is claimed by another lesson: named by its
-//     record, matched by a legacy row's name, or the same file as one of those
-//     under another spelling (a case-insensitive filesystem).
-//  2. It removes the lesson's previous download (its recorded entries, or a
-//     legacy row's name-matched ones that no other lesson claims), even under
-//     an old title, so a re-download replaces instead of merging.
-//  3. It replaces an existing entry at one of its names that no lesson claims
-//     (a leftover drumdrop no longer tracks), and says so (owner ruling #66).
-//  4. It places each entry (rename, or copy across filesystems), undoing
-//     every placed entry if one fails, and flushes copies to disk.
-//  5. It removes the scratch folder.
+//  1. It refuses, leaving the library untouched, if a destination is claimed
+//     by another lesson: named by its record, matched by a legacy row's name,
+//     or the same file as one of those under another spelling (a
+//     case-insensitive filesystem).
+//  2. It sets the lesson's previous download aside (its recorded entries, or
+//     a legacy row's name-matched ones that no other lesson claims), even
+//     under an old title, so a re-download replaces instead of merging.
+//  3. It sets aside an existing entry at one of its names that no lesson
+//     claims (a leftover drumdrop no longer tracks) (owner ruling #66).
+//  4. It places each entry (rename, or copy across filesystems), and flushes
+//     copies to disk.
+//
+// If any step fails, everything is undone: placed entries go back to src and
+// set-aside ones go back where they were. On success the result's pending
+// placement is the worker's to commit (the set-aside entries are removed) once
+// the download is recorded, or to undo if it is not. Nothing of the lesson's
+// earlier download is removed before then.
 //
 // Everything it reads, writes or removes goes through folders it holds open
-// (os.Root), never through a path read again later: the scratch lesson folder
-// must be a real folder inside downloads, the season folder must resolve
-// inside the library, a rename acts on the two open folders (renameAt; by path
-// only where the platform has no such call, Windows), and a copy creates each
-// entry afresh (O_EXCL), never writing through whatever is there. So a symlink
-// planted in either folder, or swapped in for one of them after it was opened,
-// can not send a write or a removal outside, and the move never copies a file
-// from outside downloads into the library.
+// (os.Root), never through a path read again later: the season folder must
+// resolve inside the library, a rename acts on the two open folders
+// (renameAt; by path only where the platform has no such call, Windows), and
+// a copy creates each entry afresh (O_EXCL), never writing through whatever is
+// there. So a symlink planted in either folder, or swapped in for one of them
+// after it was opened, can not send a write or a removal outside.
 //
-// Whatever fails, one complete copy of the lesson is left in one place, and the
-// result says where to record it: seasonDir == "" means the lesson is whole in
-// lessonDir; seasonDir != "" means every entry is in the season folder, and an
-// error alongside it names a scratch leftover or a note to log. The result's
-// record is what the lesson owns in the library either way. The error is for
-// the caller to LOG; the move is non-fatal and must never fail the job.
-func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string, lib plexLibrary) (plexMoveResult, error) {
-	roots := lib.roots
-	if len(roots) == 0 {
-		roots = []string{libraryDir}
-	}
+// The error is for the caller to LOG; the move is non-fatal and must never
+// fail the job. With seasonDir == "" the result's record is what the lesson
+// still owns in the library.
+func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title string, src *scratchDir, lib plexLibrary) (plexMoveResult, error) {
 	if _, _, rerr := library.Record(lib.self); rerr != nil {
-		return plexMoveResult{}, fmt.Errorf("refusing to move: the lesson's own record of its library files is damaged, so the lesson stays whole in downloads and its record as it is: %w", rerr)
+		return plexMoveResult{}, fmt.Errorf("refusing to move: the lesson's own record of its library files is damaged, so the lesson is not placed and its record stays as it is: %w", rerr)
 	}
 	c := lib.claims
 	if c == nil {
 		return plexMoveResult{}, errors.New("refusing to move: the other lessons' claims were not read")
 	}
-	scratch, err := openScratch(lib.downloads, lessonDir)
-	if err != nil {
-		return plexMoveResult{}, err
-	}
-	defer scratch.close()
 
 	seasonRel := filepath.Join(musora.Sanitize(show), library.SeasonName(season))
 	seasonDir := filepath.Join(libraryDir, seasonRel)
-	plan, err := planPlexTVMove(scratch, lessonDir, seasonDir, show, title, season, episode)
+	plan, err := planPlexTVMove(src, src.dir.Name(), seasonDir, show, title, season, episode)
 	if err != nil {
 		return plexMoveResult{}, err
 	}
@@ -163,30 +155,43 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	for _, p := range previous.Kept {
 		notes = append(notes, fmt.Errorf("left %q in the library: it looks like this lesson's previous download, but another lesson claims it", p))
 	}
-	// Refused before anything was removed, the lesson still owns its previous
-	// entries; if those are not known, its record stays as it is.
+	// Refused, or undone, the lesson still owns its previous entries; if those
+	// are not known, its record stays as it is.
 	refused := plexMoveResult{kept: previous.Remove, known: perr == nil}
 
 	if err := checkPlexConflicts(plan.steps, c, self, previous.Remove); err != nil {
 		return refused, errors.Join(append([]error{err}, notes...)...)
 	}
-	seasonRoot, closeSeason, err := openLibraryParent(libraryDir, seasonRel)
+	seasonRoot, err := openLibraryParent(libraryDir, seasonRel)
 	if err != nil {
 		return refused, errors.Join(append([]error{err}, notes...)...)
 	}
-	defer closeSeason()
 
-	// 2. The previous download goes first, so an undone move leaves nothing of
-	// the episode behind.
-	var left []string
+	aside := newAsideArea(lib.jobID)
+	fail := func(err error, stuck []string) (plexMoveResult, error) {
+		seasonRoot.Close()
+		_, rerr := aside.restore(false)
+		ferr := aside.finish(rerr != nil)
+		res := refused
+		res.kept = append(append([]string(nil), refused.kept...), stuck...)
+		res.known = refused.known || len(stuck) > 0
+		return res, errors.Join(append([]error{err, rerr, ferr}, notes...)...)
+	}
+
+	// 2. The previous download is set aside first, so an undone move puts it
+	// back as it was.
 	for _, p := range previous.Remove {
-		if err := library.Remove(roots, p); err != nil {
-			left = append(left, p)
-			notes = append(notes, fmt.Errorf("previous download could not be removed from the library, left at %q: %w", p, err))
+		if err := aside.setAsidePath(libraryDir, p, true); err != nil {
+			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
 		}
 	}
-	if len(left) > 0 {
-		return plexMoveResult{kept: left, known: true}, errors.Join(notes...)
+	// A previous download in the default layout (a lesson folder its row
+	// records, such as one kept in downloads when a move was refused) is
+	// replaced too.
+	if prev, ok := previousFolder(lib.self, seasonDir, c, lib.roots); ok {
+		if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
+			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
+		}
 	}
 
 	// 3. A leftover no lesson claims at one of this episode's names (step 1
@@ -196,71 +201,52 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 		if _, err := seasonRoot.Lstat(name); err != nil {
 			continue
 		}
-		if err := seasonRoot.RemoveAll(name); err != nil {
-			return plexMoveResult{known: true}, errors.Join(append(notes, fmt.Errorf("an entry no lesson records is in the way at %q and could not be removed: %w", st.dst, err))...)
+		if err := aside.setAside(libraryDir, seasonRoot, name, false); err != nil {
+			return fail(fmt.Errorf("an entry no lesson records is in the way at %q: %w", st.dst, err), nil)
 		}
-		notes = append(notes, fmt.Errorf("replaced %q, which no lesson records", st.dst))
 	}
 
 	if lib.episodeNFO != nil {
-		if err := writeScratchNFO(scratch.dir, scratch.base+".nfo", lib.episodeNFO); err != nil {
+		if err := writeScratchNFO(src.dir, src.base+".nfo", lib.episodeNFO); err != nil {
 			notes = append(notes, err)
 		}
 	}
 
 	// 4. Place every entry, or none.
-	placed := make([]placedStep, 0, len(plan.steps))
-	copied := false
-	for _, st := range plan.steps {
-		renamed, err := placePlexStep(seasonRoot, scratch.dir, st)
-		if err != nil {
-			stuck, uerr := undoPlexSteps(seasonRoot, scratch.dir, placed)
-			return plexMoveResult{kept: stuck, known: true}, errors.Join(append([]error{err, uerr}, notes...)...)
-		}
-		copied = copied || !renamed
-		placed = append(placed, placedStep{plexMoveStep: st, renamed: renamed})
-	}
-	if copied {
-		if err := syncIn(seasonRoot, "."); err != nil {
-			stuck, uerr := undoPlexSteps(seasonRoot, scratch.dir, placed)
-			err = fmt.Errorf("flush season folder %q after the copy: %w", seasonDir, err)
-			return plexMoveResult{kept: stuck, known: true}, errors.Join(append([]error{err, uerr}, notes...)...)
-		}
+	placed, stuck, err := placeSteps(seasonRoot, src.dir, plan.steps)
+	if err != nil {
+		return fail(err, stuck)
 	}
 
 	res := plexMoveResult{seasonDir: seasonDir, videoPath: plan.videoPath, episodeBase: plan.episodeBase, known: true}
 	for _, st := range plan.steps {
 		res.placed = append(res.placed, st.dst)
 	}
-	// 5. Every entry is in the library. Drop the scratch folder: it still holds
-	// the sources of copied entries, plus any non-regular file the plan left out.
-	if rmerr := scratch.remove(); rmerr != nil {
-		notes = append([]error{downloadsLeftoverErr(lessonDir, rmerr)}, notes...)
-	}
+	res.pending = &placement{dir: seasonDir, placed: res.placed, dest: seasonRoot, src: src.dir, steps: placed, aside: aside}
 	return res, errors.Join(notes...)
 }
 
-// scratchDir is a lesson's scratch folder in downloads, held open.
+// scratchDir is a finished download's lesson folder in its private folder,
+// held open.
 type scratchDir struct {
-	// parent is the folder holding the lesson folder, opened inside downloads.
-	parent *os.Root
-	// base is the lesson folder's name in parent ("NN - Title"), which every
-	// file the download wrote starts with.
+	// base is the lesson folder's name ("NN - Title"), which every file the
+	// download wrote starts with.
 	base string
 	// dir is the lesson folder itself.
 	dir *os.Root
 }
 
-// openScratch opens the scratch lesson folder lessonDir through the downloads
-// folder: lessonDir must be strictly inside downloads, reached without a
-// symlink that leads out of it, and itself a real folder (not a symlink).
+// openScratch opens the downloaded lesson folder lessonDir through the
+// downloads folder: lessonDir must be strictly inside downloads, reached
+// without a symlink that leads out of it, and itself a real folder (not a
+// symlink).
 func openScratch(downloads, lessonDir string) (*scratchDir, error) {
 	if downloads == "" {
-		return nil, fmt.Errorf("refusing to move %q: no downloads folder was given", lessonDir)
+		return nil, fmt.Errorf("refusing to place %q: no downloads folder was given", lessonDir)
 	}
 	rel, err := filepath.Rel(downloads, lessonDir)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, fmt.Errorf("refusing to move: lesson folder %q is not inside downloads %q", lessonDir, downloads)
+		return nil, fmt.Errorf("refusing to place: lesson folder %q is not inside downloads %q", lessonDir, downloads)
 	}
 	dl, err := os.OpenRoot(downloads)
 	if err != nil {
@@ -271,32 +257,17 @@ func openScratch(downloads, lessonDir string) (*scratchDir, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open the folder of %q inside downloads: %w", lessonDir, err)
 	}
+	defer parent.Close()
 	base := filepath.Base(rel)
-	info, err := parent.Lstat(base)
+	dir, err := openRealDir(parent, base)
 	if err != nil {
-		parent.Close()
-		return nil, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+		return nil, fmt.Errorf("open the downloaded lesson: %w", err)
 	}
-	if !info.IsDir() {
-		parent.Close()
-		return nil, fmt.Errorf("refusing to move %q: not a real folder (mode %s)", lessonDir, info.Mode().Type())
-	}
-	dir, err := parent.OpenRoot(base)
-	if err != nil {
-		parent.Close()
-		return nil, fmt.Errorf("open scratch lesson dir %q: %w", lessonDir, err)
-	}
-	return &scratchDir{parent: parent, base: base, dir: dir}, nil
+	return &scratchDir{base: base, dir: dir}, nil
 }
 
 func (s *scratchDir) close() {
 	s.dir.Close()
-	s.parent.Close()
-}
-
-// remove removes the scratch lesson folder, through its parent.
-func (s *scratchDir) remove() error {
-	return s.parent.RemoveAll(s.base)
 }
 
 // writeScratchNFO replaces the download's own nfo (name, in the scratch
@@ -373,14 +344,14 @@ type placedStep struct {
 	renamed bool
 }
 
-// placePlexStep puts one entry at its destination in the season folder: by a
+// placeStep puts one entry at its destination in the folder season: by a
 // rename from the scratch folder (renameAt, on the two open folders), or, when
 // the two are on different filesystems (and only then), by a copy made inside
 // season, leaving the source for the final scratch-folder removal. Any other
 // rename error is a refusal: an entry that appeared at the destination after
 // the checks is kept, never copied over. A copy that fails part-way takes back
 // out what it created, and nothing else.
-func placePlexStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err error) {
+func placeStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err error) {
 	name := filepath.Base(st.dst)
 	rerr := renameAt(scratch, st.name, season, name)
 	if rerr == nil {
@@ -401,11 +372,11 @@ func placePlexStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err
 	return false, nil
 }
 
-// undoPlexSteps takes placed entries back out of the season folder, newest
+// undoSteps takes placed entries back out of the destination folder, newest
 // first: a renamed entry is renamed back into the scratch folder (it has no
 // other copy), a copied one is removed (its source never left). It returns the
-// entries still in the library, each also reported in the error.
-func undoPlexSteps(season, scratch *os.Root, placed []placedStep) (stuck []string, err error) {
+// entries still in the destination, each also reported in the error.
+func undoSteps(season, scratch *os.Root, placed []placedStep) (stuck []string, err error) {
 	var errs []error
 	for i := len(placed) - 1; i >= 0; i-- {
 		st := placed[i]
@@ -418,14 +389,14 @@ func undoPlexSteps(season, scratch *os.Root, placed []placedStep) (stuck []strin
 		}
 		if rerr := renameAt(season, filepath.Base(st.dst), scratch, st.name); rerr != nil {
 			stuck = append(stuck, st.dst)
-			errs = append(errs, fmt.Errorf("could not return %q to downloads; its only copy is left in the library at %q: %w", st.src, st.dst, rerr))
+			errs = append(errs, fmt.Errorf("could not return %q to its private folder; its only copy is left at %q: %w", st.src, st.dst, rerr))
 		}
 	}
 	return stuck, errors.Join(errs...)
 }
 
 // discardPartialCopy removes a copy the move made in dir but will not record,
-// so the library never holds a copy drumdrop does not track. nil if nothing is
+// so no copy is left that drumdrop does not track. nil if nothing is
 // there (including a name too long to ever have been created); an error only
 // for a copy that exists and could not be removed.
 func discardPartialCopy(dir *os.Root, name string) error {
@@ -437,15 +408,9 @@ func discardPartialCopy(dir *os.Root, name string) error {
 		return fmt.Errorf("could not check for a partial copy at %q: %w", path, err)
 	}
 	if err := dir.RemoveAll(name); err != nil {
-		return fmt.Errorf("partial copy could not be removed from the library, left at %q: %w", path, err)
+		return fmt.Errorf("partial copy could not be removed, left at %q: %w", path, err)
 	}
 	return nil
-}
-
-// downloadsLeftoverErr reports a scratch folder that could not be fully removed
-// after its lesson was copied whole into the library.
-func downloadsLeftoverErr(lessonDir string, err error) error {
-	return fmt.Errorf("the library copy is complete, but the downloads copy could not be fully removed, leftover at %q: %w", lessonDir, err)
 }
 
 // plexMovePlan is what planPlexTVMove works out before the plex-tv move writes

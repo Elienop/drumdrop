@@ -183,17 +183,17 @@ func (daemonDownloader) Download(_ context.Context, l *musora.Lesson, o musora.D
 	return nil
 }
 
-func newTestDaemon(store *fakeDaemonStore) *Daemon {
+func newTestDaemon(t *testing.T, store *fakeDaemonStore) *Daemon {
 	planner := &Planner{Store: store, Expander: &daemonExpander{}, PermIDs: "perm"}
 	worker := NewWorker(store, daemonResolver{}, daemonDownloader{}, DefaultConfig(), "perm", nil)
-	worker.Cfg.DownloadsDir = "/dl"
+	worker.Cfg.DownloadsDir = t.TempDir()
 	worker.sleep = func(time.Duration) {} // no real delays
 	return &Daemon{Store: store, Planner: planner, Worker: worker}
 }
 
 func TestDaemonRunOncePlansThenDrains(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	if err := d.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -239,7 +239,7 @@ func TestDaemonRunOncePlansThenDrains(t *testing.T) {
 func TestDaemonRunOncePlanErrorIsFatal(t *testing.T) {
 	store := newFakeDaemonStore()
 	store.planErr = errors.New("db down")
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	if err := d.RunOnce(context.Background()); err == nil {
 		t.Fatal("RunOnce: want a fatal error from a failed plan, got nil")
@@ -248,7 +248,7 @@ func TestDaemonRunOncePlanErrorIsFatal(t *testing.T) {
 
 func TestDaemonRunReclaimsOnceAndStopsOnCancel(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -286,7 +286,7 @@ func TestDaemonRunReclaimsOnceAndStopsOnCancel(t *testing.T) {
 
 func TestDaemonRunDrivesMultipleCyclesBeforeCancel(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -324,7 +324,7 @@ func TestDaemonRunContinuesAfterCycleError(t *testing.T) {
 	// ticking until the context is cancelled, then returns nil.
 	store := newFakeDaemonStore()
 	store.planErr = errors.New("transient plan failure")
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -365,7 +365,7 @@ func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
 	// ticker cannot account for the second cycle, so the only way planRuns
 	// reaches 2 is the kick.
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	kick := make(chan struct{}, 1)
 	d.Kick = kick
 
@@ -405,7 +405,7 @@ func TestDaemonPauseSkipsCyclesThenResumes(t *testing.T) {
 	// dropped while paused, so no Plan/drain happens. Resuming lets the next tick
 	// (or kick) run a cycle again.
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	d.Pause()
 	if !d.IsPaused() {
 		t.Fatal("IsPaused() = false after Pause(), want true")

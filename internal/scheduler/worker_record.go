@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -13,132 +12,176 @@ import (
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
-// recordDownload finishes a successful download: it moves the lesson into the
-// library when one is configured, then records where its one complete copy is
-// (FinishDownload, which also closes the job). The move is non-fatal in either
-// layout: a move error is logged, and the lesson is recorded where the move says
-// it is — the library, or else the scratch downloads folder.
+// recordDownload finishes a successful download: it places the lesson where
+// it lives (place), records it there (FinishDownload, which also closes the
+// job), and only then commits the placement, which drops what it replaced.
+// The record is the commit point. If it is refused, the placement is undone,
+// so the lesson's earlier files are back where they were: a Skip, a delete or
+// a follow removal that lands while the files are being placed stops the
+// download as if it had landed before (D79).
 //
 // It returns the recorded byte count, and ok=false when nothing was recorded:
-// a delete or a skip removed the job or lesson meanwhile (what this download
-// wrote then goes as the stopper wants, see discardAbandoned), or the job was
+// a delete or a skip removed the job or lesson meanwhile, or the job was
 // requeued by someone else (it runs again). Either way it reports the job's
-// end itself (lesson_skipped). err is a failed attempt: the move needs every
-// other lesson's claims, and when they can not be read it does not move, nor
-// record the lesson in scratch (a lesson moved before the record existed would
-// lose track of its library copy); and a download FinishDownload could not
-// record is not reported as done. Either is retried.
+// end itself (lesson_skipped). err is a failed attempt: the other lessons'
+// claims could not be read, the download could not be placed anywhere, or
+// FinishDownload could not record it. Each is retried.
 //
-// Before a move, the lesson's partial files (isPartialName: yt-dlp's, and
-// drumdrop's own temporary files, left by an earlier run that died) are
-// removed from the scratch folder, so none of them lands in the library.
-func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, folder lessonFolder) (bytes int64, ok bool, err error) {
+// Before it places anything, the partial files an earlier attempt left in the
+// private folder (isPartialName: yt-dlp's, and drumdrop's own temporary files)
+// are removed, so none of them is placed.
+func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, outDir, privateLesson string) (bytes int64, ok bool, err error) {
 	id := job.RailcontentID
-	dir := folder.path
-	// A download that does not move into a season folder keeps the lesson's
-	// library record as it is (LibraryEntries nil): those entries are still on
-	// disk and still the lesson's.
-	rec := database.DownloadRecord{Quality: quality}
-	var placed []string
-	recorded := false
-	var claims *library.Claims
-	if w.Cfg.LibraryDir != "" {
-		if claims, err = w.claims(ctx); err != nil {
-			return 0, false, fmt.Errorf("not moved to the library: %w", err)
-		}
-		cleanupPartials(dir)
+	// The download is complete: a shutdown that began meanwhile does not stop
+	// it being placed and recorded (both are local and short).
+	claims, err := w.claims(context.WithoutCancel(ctx))
+	if err != nil {
+		return 0, false, fmt.Errorf("not placed: %w", err)
 	}
-	switch {
-	case w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "":
+	cleanupPartials(privateLesson)
+	src, err := openScratch(w.Cfg.DownloadsDir, privateLesson)
+	if err != nil {
+		return 0, false, fmt.Errorf("not placed: %w", err)
+	}
+	defer src.close()
+
+	rec := database.DownloadRecord{Quality: quality}
+	pl, err := w.place(job, lesson, follow, prev, index, outDir, claims, src, &rec)
+	if err != nil {
+		return 0, false, err
+	}
+
+	// The files are in place; record them even if shutdown began meanwhile.
+	finishCtx := context.WithoutCancel(ctx)
+	if ferr := w.Store.FinishDownload(finishCtx, job.ID, id, rec); ferr != nil {
+		// A delete of the lesson's files wants its earlier files gone, so the
+		// undo does not put those back.
+		stuck, uerr := pl.undo(errors.Is(ferr, database.ErrLessonDeleted))
+		if uerr != nil {
+			fmt.Fprintf(w.log(), "  ⚠ %d: the placement could not be fully undone (left: %q): %v\n", id, stuck, uerr)
+		}
+		switch {
+		case errors.Is(ferr, database.ErrDownloadAbandoned):
+			w.ended(job, lesson, msgStopped)
+			fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it was being placed; the placement was undone\n", id)
+			return 0, false, nil
+		case errors.Is(ferr, database.ErrDownloadCanceled):
+			// The job is neither running nor canceled: another process requeued it
+			// (a retry, or a startup recovery), so it runs again.
+			fmt.Fprintf(w.log(), "  ⚠ record download %d: not recorded, its job was requeued meanwhile: %v\n", id, ferr)
+			w.ended(job, lesson, msgRequeued)
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("the download could not be recorded: %w", ferr)
+	}
+	replaced, cerr := pl.commit()
+	for _, e := range replaced {
+		whose := "which no lesson recorded"
+		if e.own {
+			whose = "the lesson's earlier download"
+		}
+		fmt.Fprintf(w.log(), "  ↻ %d replaced %q (%s)\n", id, e.path, whose)
+	}
+	if cerr != nil {
+		fmt.Fprintf(w.log(), "  ⚠ %d: what the placement replaced could not all be removed: %v\n", id, cerr)
+	}
+	return rec.Bytes, true, nil
+}
+
+// place puts the finished download src where the lesson lives and fills rec
+// with where that is, returning the placement to commit or undo:
+//   - plex-tv with a library: the season folder (moveToLibraryPlexTV);
+//   - otherwise the lesson's folder <root>/<Course>/NN - Title
+//     (placeLessonFolder), root being the library, or the downloads folder
+//     without one. No library is a library rooted at the downloads folder.
+//
+// A placement in the library that is refused (another lesson owns the
+// destination, say) or fails is undone, and the lesson is placed in the
+// downloads folder instead, as drumdrop always kept a lesson it could not
+// move. A move error is logged, never fatal; an error returned means the
+// download could not be placed anywhere, and nothing outside its private
+// folder was changed.
+func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, index int, outDir string, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
+	id := job.RailcontentID
+	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(outDir, index, lesson.Title))
+	if err != nil {
+		return nil, fmt.Errorf("not placed: %w", err)
+	}
+	video, bytes := w.producedVideo(src.dir.Name())
+	placeFolder := func(root string) (*placement, error) {
+		pl, err := placeLessonFolder(root, rel, src, prev, claims, w.roots(), job.ID)
+		if err != nil {
+			return nil, err
+		}
+		rec.OutputDir = pl.dir
+		rec.VideoPath, rec.Bytes = "", 0
+		if video != "" {
+			rec.VideoPath, rec.Bytes = filepath.Join(pl.dir, filepath.Base(video)), bytes
+		}
+		return pl, nil
+	}
+	lib := w.Cfg.LibraryDir
+	if lib != "" && w.Cfg.Layout == LayoutPlexTV {
 		// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
 		// every entry to the episode base. output_dir = the season folder;
-		// video_path = the moved episode .mp4; library_entries = exactly what the
-		// lesson owns there.
+		// video_path = the placed episode .mp4; library_entries = exactly what
+		// the lesson owns there. The <episodedetails> nfo replaces the
+		// download's <movie> one before the entries are placed, so a Plex
+		// TV-Shows library (which can't match Drumeo to TheTVDB) gets the real
+		// episode title/season/episode from local metadata.
 		show := plexShow(follow, job, lesson)
-		// The <episodedetails> nfo replaces the download's <movie> one before
-		// the move places it, so a Plex TV-Shows library (which can't match
-		// Drumeo to TheTVDB) gets the real episode title/season/episode from
-		// local metadata, and nothing is written in the season folder after.
-		res, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir, plexLibrary{
-			downloads: w.Cfg.DownloadsDir, self: prev, claims: claims, roots: w.roots(),
+		res, err := moveToLibraryPlexTV(lib, show, 1, index, lesson.Title, src, plexLibrary{
+			self: prev, claims: claims, roots: w.roots(), jobID: job.ID,
 			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),
 		})
 		if err != nil {
 			fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 		}
 		// Whatever happened, the record is what the lesson has in the library
-		// now: the placed entries, and any previous ones it still owns.
-		entries, rerr := res.record(w.Cfg.LibraryDir)
+		// now: the placed entries, or the previous ones it still owns.
+		entries, rerr := res.record(lib)
 		if rerr != nil {
 			fmt.Fprintf(w.log(), "  ⚠ move to library %d: its library record is left as it was: %v\n", id, rerr)
 		}
 		rec.LibraryEntries = entries
-		placed = res.placed
-		if res.seasonDir == "" {
-			break // the lesson is whole in the scratch folder: record it there
-		}
-		dir = res.seasonDir
-		rec.VideoPath = res.videoPath
-		if !w.Cfg.ResourcesOnly && res.videoPath != "" {
-			if info, serr := os.Stat(res.videoPath); serr == nil {
-				rec.Bytes = info.Size()
+		if res.pending != nil {
+			rec.OutputDir, rec.VideoPath = res.seasonDir, res.videoPath
+			if !w.Cfg.ResourcesOnly && res.videoPath != "" {
+				if info, serr := os.Stat(res.videoPath); serr == nil {
+					rec.Bytes = info.Size()
+				}
 			}
+			return res.pending, nil
 		}
-		recorded = true
-	case w.Cfg.LibraryDir != "":
-		// Default layout: move the whole "NN - title" leaf into the library at
-		// the same path relative to DownloadsDir. A non-empty newDir holds the
-		// whole lesson even when an error came with it (the downloads copy could
-		// not be fully removed, or a note), so record it either way.
-		newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir, claims, id)
-		if err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
+	} else if lib != "" {
+		pl, err := placeFolder(lib)
+		if err == nil {
+			return pl, nil
 		}
-		if newDir != "" {
-			dir = newDir
-		}
+		fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 	}
-	// For the default layout (and for a plex-tv move that did not happen,
-	// leaving the files in the scratch dir) derive the video from the dir's
-	// "<base>.mp4".
-	if !recorded {
-		rec.VideoPath, rec.Bytes = w.producedVideo(dir)
+	pl, err := placeFolder(w.Cfg.DownloadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("the download could not be placed: %w", err)
 	}
-	rec.OutputDir = dir
-
-	// The files are in place; record them even if shutdown began meanwhile.
-	finishCtx := context.WithoutCancel(ctx)
-	ferr := w.Store.FinishDownload(finishCtx, job.ID, id, rec)
-	switch {
-	case errors.Is(ferr, database.ErrDownloadAbandoned):
-		w.ended(job, lesson, msgStopped)
-		w.discardAbandoned(finishCtx, id, dir, placed, folder, ferr)
-		return 0, false, nil
-	case errors.Is(ferr, database.ErrDownloadCanceled):
-		// The job is neither running nor canceled: another process requeued it
-		// (a retry, or a startup recovery), so it runs again and replaces this.
-		fmt.Fprintf(w.log(), "  ⚠ record download %d: not recorded, its job was requeued meanwhile: %v\n", id, ferr)
-		w.ended(job, lesson, msgRequeued)
-		return 0, false, nil
-	case ferr != nil:
-		return 0, false, fmt.Errorf("the download could not be recorded: %w", ferr)
+	if lib != "" {
+		fmt.Fprintf(w.log(), "  ⚠ %d is kept in downloads at %q\n", id, pl.dir)
 	}
-	return rec.Bytes, true, nil
+	return pl, nil
 }
 
 // checkBeforeDownload is what a download needs before it starts, so a
-// precondition that can not pass never costs a download: with a library, the
-// other lessons' claims must be readable (the move needs them). A damaged
-// record anywhere fails here, every cycle, without downloading.
+// precondition that can not pass never costs a download: the other lessons'
+// claims must be readable, since placing the download needs them (whose
+// files are at its destination). A damaged record anywhere fails here, every
+// cycle, without downloading.
 func (w *Worker) checkBeforeDownload(ctx context.Context) error {
-	if w.Cfg.LibraryDir == "" {
-		return nil
-	}
 	_, err := w.claims(ctx)
 	return err
 }
 
-// claims indexes what every lesson row with files claims in the library.
+// claims indexes what every lesson row with files claims, in the library and
+// in downloads.
 func (w *Worker) claims(ctx context.Context) (*library.Claims, error) {
 	rows, err := w.Store.ListLessonsWithFiles(ctx)
 	if err != nil {
@@ -151,135 +194,7 @@ func (w *Worker) claims(ctx context.Context) (*library.Claims, error) {
 	return c, nil
 }
 
-// roots are the folders the worker may remove entries under.
+// roots are the folders the worker may set entries aside under.
 func (w *Worker) roots() []string {
 	return library.Roots(w.Cfg.LibraryDir, w.Cfg.DownloadsDir)
-}
-
-// lessonFolder is the scratch lesson folder a job downloads into, and what
-// was there before the job's first attempt. What was in it then is not this
-// job's to remove (owner ruling #66): a folder kept when a follow was removed
-// with its files kept, an archive a fresh database was pointed at, or a copy
-// an earlier failed move left in downloads. Without a library (or with the
-// library the downloads folder) this folder is the lesson's permanent home.
-type lessonFolder struct {
-	path string
-	// existed: something was at path before the first attempt, or whether it
-	// was could not be read. A failed or stopped download then removes nothing
-	// in it but yt-dlp's partial files, and nothing a move placed from it.
-	existed bool
-	// recorded: the lesson's own row named path as its folder then. A delete
-	// of the lesson's files takes that folder as the lesson's (the delete
-	// removes it too), so existed does not keep it from that delete.
-	recorded bool
-}
-
-// newLessonFolder reads what is at path before a job's first attempt; prev is
-// the lesson's row as the job read it.
-func newLessonFolder(path string, prev database.Lesson) lessonFolder {
-	_, err := os.Lstat(path)
-	return lessonFolder{
-		path:     path,
-		existed:  !errors.Is(err, fs.ErrNotExist),
-		recorded: prev.OutputDir.Valid && filepath.Clean(prev.OutputDir.String) == filepath.Clean(path),
-	}
-}
-
-// keeps reports whether what the job found in the folder stays, for a stopper
-// whose answer is cause.
-func (f lessonFolder) keeps(cause error) bool {
-	return f.existed && !(f.recorded && errors.Is(cause, database.ErrLessonDeleted))
-}
-
-// discardAbandoned is what happens to what a download wrote once a delete or a
-// skip removed its job or lesson (cause, from the guarded write, says what the
-// stopper wanted). dir is where the lesson's files are now: folder's scratch
-// path, or the library folder a default-layout move put them in.
-//   - a stopper that keeps the files (a follow removed without its files), or
-//     one whose intent is unknown: nothing the download finished is removed,
-//     only yt-dlp's partial files in its lesson folder;
-//   - a lesson folder that held files before this job (folder.keeps): the
-//     same, and nothing a move placed is removed either, since what it placed
-//     includes what the folder held (logged);
-//   - one that discards them (a skip): the library entries this download
-//     placed, and its lesson folder dir (scratch, or the folder it moved into),
-//     are removed, except anything a lesson row records now (read fresh),
-//     which is kept and logged;
-//   - a delete of the lesson's files: the same, except that the lesson's own
-//     row does not count (its files are being deleted, so its record protects
-//     nothing this download wrote).
-//
-// A season folder is never removed, nor a folder not named like a lesson
-// folder. If the rows can not be read, nothing is removed.
-func (w *Worker) discardAbandoned(ctx context.Context, id int, dir string, placed []string, folder lessonFolder, cause error) {
-	if !errors.Is(cause, database.ErrDiscardDownload) {
-		if !library.IsSeasonDir(dir) {
-			cleanupPartials(dir)
-		}
-		fmt.Fprintf(w.log(), "  ⊗ %d was removed while downloading; its files were kept, as asked\n", id)
-		return
-	}
-	if folder.keeps(cause) {
-		if !library.IsSeasonDir(dir) {
-			cleanupPartials(dir)
-		}
-		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while downloading; %q held files before this download, so only partial files were removed (kept in the library: %q)\n", id, folder.path, placed)
-		return
-	}
-	c, err := w.claims(ctx)
-	if err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ %d was stopped while downloading; nothing it wrote was removed: %v\n", id, err)
-		return
-	}
-	self := 0
-	if errors.Is(cause, database.ErrLessonDeleted) {
-		self = id
-	}
-	var errs []error
-	for _, p := range placed {
-		if ids, err := c.Claimants(p, self, true); err != nil || len(ids) > 0 {
-			errs = append(errs, fmt.Errorf("kept %q, which lessons %v record (%v)", p, ids, err))
-			continue
-		}
-		errs = append(errs, library.Remove(w.roots(), p))
-	}
-	if !library.IsSeasonDir(dir) {
-		if err := c.RemoveLessonFolder(w.roots(), dir, self); err != nil {
-			cleanupPartials(dir)
-			errs = append(errs, fmt.Errorf("kept the lesson folder: %w", err))
-		}
-	}
-	if err := errors.Join(errs...); err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ %d was stopped while downloading; not everything it wrote was removed: %v\n", id, err)
-		return
-	}
-	fmt.Fprintf(w.log(), "  ⊗ %d was stopped while downloading; removed what it had written\n", id)
-}
-
-// dropFailedDownload removes what a download that failed every attempt left in
-// its scratch lesson folder, so no copy stays in downloads that no lesson
-// records: the whole folder, when this job created it and no lesson row (this
-// lesson's included) records something in it. A folder that held files before
-// this job (see lessonFolder), one a row records something in (as when the
-// lesson's earlier download is recorded there), or one whose rows can not be
-// read, loses only yt-dlp's partial files.
-func (w *Worker) dropFailedDownload(ctx context.Context, id int, folder lessonFolder) {
-	dir := folder.path
-	if folder.existed {
-		cleanupPartials(dir)
-		fmt.Fprintf(w.log(), "  ⊗ %d failed; %q held files before this download, so only partial files were removed\n", id, dir)
-		return
-	}
-	c, err := w.claims(ctx)
-	if err != nil {
-		cleanupPartials(dir)
-		fmt.Fprintf(w.log(), "  ⚠ %d failed; its partial files were removed, the rest of %q was kept: %v\n", id, dir, err)
-		return
-	}
-	if err := c.RemoveLessonFolder(w.roots(), dir, 0); err != nil {
-		cleanupPartials(dir)
-		if len(c.Holds(dir, 0)) == 0 {
-			fmt.Fprintf(w.log(), "  ⚠ %d failed; %q could not be removed: %v\n", id, dir, err)
-		}
-	}
 }

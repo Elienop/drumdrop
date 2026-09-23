@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // TestDaemonRecoverRunsOnce (code L4) proves crash recovery runs once per
@@ -14,7 +16,7 @@ import (
 // cycle's worker already claimed.
 func TestDaemonRecoverRunsOnce(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	d.Recover(context.Background())
 	d.Recover(context.Background())
 	store.mu.Lock()
@@ -50,13 +52,13 @@ func TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads(t *testing.T) {
 			var err error
 			if layout == LayoutPlexTV {
 				var res plexMoveResult
-				res, err = testMovePlexTV(t, lib, "Show", 1, 5, "Five", lessonDir, plexLibrary{downloads: dl})
+				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", lessonDir, plexLibrary{})
 				if res.seasonDir != "" {
 					t.Errorf("seasonDir = %q, want none", res.seasonDir)
 				}
 			} else {
 				var newDir string
-				newDir, err = testMoveToLibrary(t, dl, lib, lessonDir)
+				newDir, err = testPlace(t, dl, lib, lessonDir, database.Lesson{})
 				if newDir != "" {
 					t.Errorf("newDir = %q, want none", newDir)
 				}

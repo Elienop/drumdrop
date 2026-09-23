@@ -29,7 +29,7 @@ func plexWorker(t *testing.T) (w *Worker, store *fakeWorkerStore, dl *fakeDownlo
 	dl.writeMP4 = []byte("new mp4")
 	tmp := t.TempDir()
 	lib = filepath.Join(tmp, "lib")
-	w = newTestWorker(store, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
+	w = newTestWorker(t, store, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = filepath.Join(tmp, "dl")
 	w.Cfg.LibraryDir = lib
 	w.Cfg.Layout = LayoutPlexTV
@@ -189,9 +189,8 @@ func TestWorkerFailsBeforeDownloadingWhenTheOtherLessonsCannotBeRead(t *testing.
 
 // TestWorkerAbandonedMidMoveRemovesWhatItPlaced proves a delete that removes
 // the lesson's files, landing while the download is being moved (after it was
-// confirmed), gets what the download placed removed too, in both layouts; an
-// entry a lesson row records by then is kept, and another lesson's files are
-// never touched.
+// confirmed), has the placement undone, in both layouts, so nothing it placed is
+// left, and another lesson's files are never touched.
 func TestWorkerAbandonedMidMoveRemovesWhatItPlaced(t *testing.T) {
 	for _, layout := range []string{LayoutPlexTV, ""} {
 		t.Run("layout="+layout, func(t *testing.T) {
@@ -217,69 +216,6 @@ func TestWorkerAbandonedMidMoveRemovesWhatItPlaced(t *testing.T) {
 	}
 }
 
-// TestWorkerAbandonedKeepsWhatARowRecords proves a Skip's discard never
-// removes a path a lesson row records by then (read fresh), the skipped
-// lesson's own row included: a placed entry a row names, and a lesson folder a
-// row records (the lesson's earlier download, recorded there). A delete of the
-// lesson's files is different (L5): its own row protects nothing, since those
-// files are being deleted; another lesson's row still does.
-func TestWorkerAbandonedKeepsWhatARowRecords(t *testing.T) {
-	base := "Beginner Course - s01e05 - Lesson A"
-	for _, c := range []struct {
-		name     string
-		stopper  func(s *fakeWorkerStore) map[int64]bool
-		recorder int
-		wantKept bool
-	}{
-		{"skip, own row", func(s *fakeWorkerStore) map[int64]bool { s.skipped = map[int64]bool{}; return s.skipped }, 100, true},
-		{"delete, own row", func(s *fakeWorkerStore) map[int64]bool { s.gone = map[int64]bool{}; return s.gone }, 100, false},
-		{"delete, another row", func(s *fakeWorkerStore) map[int64]bool { s.gone = map[int64]bool{}; return s.gone }, 200, true},
-	} {
-		// Another lesson recording the path before the move makes the move
-		// refuse it: nothing would be placed there to keep.
-		if c.recorder == 100 {
-			t.Run("placed entry/"+c.name, func(t *testing.T) {
-				w, store, _, _, season := plexWorker(t)
-				stopped := c.stopper(store)
-				store.onConfirm = func() {
-					stopped[1] = true
-					store.withFiles = []database.Lesson{recordedRow(c.recorder, season, base+".mp4")}
-				}
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				assertExist(t, c.wantKept, filepath.Join(season, base+".mp4"))
-				assertExist(t, false, filepath.Join(season, base+".nfo"))
-			})
-		}
-		t.Run("lesson folder/"+c.name, func(t *testing.T) {
-			w, store, dl, _, _ := plexWorker(t)
-			w.Cfg.LibraryDir = ""
-			stopped := c.stopper(store)
-			folder := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-			dl.afterWrite = func(string) {
-				stopped[1] = true
-				store.withFiles = []database.Lesson{{RailcontentID: c.recorder, OutputDir: sql.NullString{String: folder, Valid: true}}}
-			}
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertExist(t, c.wantKept, filepath.Join(folder, "05 - Lesson A.mp4"))
-		})
-	}
-	t.Run("rows unreadable", func(t *testing.T) {
-		w, store, dl, _, _ := plexWorker(t)
-		w.Cfg.LibraryDir = ""
-		store.gone = map[int64]bool{}
-		store.withFilesErr = errors.New("database is locked")
-		dl.afterWrite = func(string) { store.gone[1] = true }
-		if _, err := w.RunOnce(context.Background(), 0); err != nil {
-			t.Fatalf("RunOnce: %v", err)
-		}
-		assertExist(t, true, filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A", "05 - Lesson A.mp4"))
-	})
-}
-
 // TestWorkerDefaultLayoutCarriesTheLibraryRecord proves a default-layout
 // download leaves the lesson's library record as it is (after a layout switch
 // its episode entries are still on disk and still its own) instead of
@@ -303,7 +239,7 @@ func TestWorkerDefaultLayoutCarriesTheLibraryRecord(t *testing.T) {
 }
 
 // TestWorkerAbandonedDownloadLeavesNothingUntracked covers the delete race: a
-// delete removes the job while the download is being moved. The worker records
+// delete removes the job while the download is being written. The worker records
 // nothing and removes what it wrote, in both layouts, so once the delete has
 // answered no file of that download is left without a row.
 func TestWorkerAbandonedDownloadLeavesNothingUntracked(t *testing.T) {
@@ -331,74 +267,6 @@ func TestWorkerAbandonedDownloadLeavesNothingUntracked(t *testing.T) {
 			}
 			assertExist(t, true, filepath.Join(season, neighbour), filepath.Join(lib, "Beginner Course", "06 - Lesson B"))
 			assertExist(t, false, filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A"))
-		})
-	}
-}
-
-// TestWorkerAbandonedWithoutALibrary proves that without a library (where the
-// lesson folder is also the lesson's permanent home) a delete that removes the
-// lesson's files gets the folder the download wrote removed too (the delete
-// already removed what the row recorded, so what is there now is only this
-// download's), while one that keeps the files (a follow removed without its
-// files) leaves it whole.
-func TestWorkerAbandonedWithoutALibrary(t *testing.T) {
-	for _, discard := range []bool{true, false} {
-		w, store, dl, _, _ := plexWorker(t)
-		w.Cfg.LibraryDir = ""
-		store.gone, store.kept = map[int64]bool{}, map[int64]bool{}
-		dl.afterWrite = func(string) {
-			if discard {
-				store.gone[1] = true
-			} else {
-				store.kept[1] = true
-			}
-		}
-		if _, err := w.RunOnce(context.Background(), 0); err != nil {
-			t.Fatalf("RunOnce: %v", err)
-		}
-		if len(store.markDownloaded) != 0 {
-			t.Errorf("discard=%v: recorded %+v, want nothing", discard, store.markDownloaded)
-		}
-		assertExist(t, !discard, filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A"))
-	}
-}
-
-// TestWorkerKeepsFilesWhenTheDeleteKeepsThem (D60, I3) proves
-// a download stopped by a delete that keeps the files (a follow removed
-// without its files) removes nothing it finished, wherever it is stopped:
-// mid-download (its scratch folder, which may hold a copy a row still
-// records, stays, and only yt-dlp's partial files go) or mid-move (what it
-// placed, and the previous copy's replacement, stay).
-func TestWorkerKeepsFilesWhenTheDeleteKeepsThem(t *testing.T) {
-	for _, layout := range []string{LayoutPlexTV, ""} {
-		t.Run("mid-download/layout="+layout, func(t *testing.T) {
-			w, store, dl, _, _ := plexWorker(t)
-			w.Cfg.Layout = layout
-			store.kept = map[int64]bool{}
-			scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-			dl.afterWrite = func(dir string) {
-				seedSeason(t, dir, "05 - Lesson A.mp4.part", "old-sheet.pdf")
-				store.kept[1] = true
-			}
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"), filepath.Join(scratch, "old-sheet.pdf"))
-			assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.mp4.part"))
-		})
-		t.Run("mid-move/layout="+layout, func(t *testing.T) {
-			w, store, _, lib, season := plexWorker(t)
-			w.Cfg.Layout = layout
-			store.kept = map[int64]bool{}
-			store.onConfirm = func() { store.kept[1] = true }
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			if layout == LayoutPlexTV {
-				assertExist(t, true, filepath.Join(season, "Beginner Course - s01e05 - Lesson A.mp4"))
-			} else {
-				assertExist(t, true, filepath.Join(lib, "Beginner Course", "05 - Lesson A", "05 - Lesson A.mp4"))
-			}
 		})
 	}
 }

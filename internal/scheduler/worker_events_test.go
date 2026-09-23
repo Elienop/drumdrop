@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,6 +193,13 @@ func TestWorkerRecordsSentencesNotErrors(t *testing.T) {
 		{"claims unreadable", func(w *Worker, store *fakeWorkerStore) {
 			store.withFilesErr = errors.New("no such column: library_entries")
 		}, failNotStarted, "no such column"},
+		{"no private folder", func(w *Worker, store *fakeWorkerStore) {
+			// The downloads folder is a file: no private folder can be made in it.
+			w.Cfg.DownloadsDir = filepath.Join(t.TempDir(), "downloads-is-a-file")
+			if err := os.WriteFile(w.Cfg.DownloadsDir, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, failNoFolder, "downloads-is-a-file"},
 		{"Musora unreachable", func(w *Worker, store *fakeWorkerStore) {
 			w.Resolver = fakeResolver{errs: map[int]error{100: errors.New("GET https://musora.example/api: 500")}}
 		}, failMusora, "musora.example"},
@@ -243,7 +251,7 @@ func TestWorkerMessagesFitTheDialog(t *testing.T) {
 }
 
 // failures are every failure the worker records.
-var failures = []failure{failDownload, failNotStarted, failMusora}
+var failures = []failure{failDownload, failNotStarted, failNoFolder, failMusora}
 
 // TestWorkerSentencesNameTheButtonsWhereTheyAreShown (round-4 item 7) proves
 // every sentence the worker stores is true where it is shown: a failure's

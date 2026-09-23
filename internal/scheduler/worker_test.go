@@ -439,9 +439,9 @@ func queuedJob(id int64, followID int64, railcontentID int) database.Job {
 	}
 }
 
-func newTestWorker(store Store, res Resolver, dl Downloader, sleep func(time.Duration)) *Worker {
+func newTestWorker(t *testing.T, store Store, res Resolver, dl Downloader, sleep func(time.Duration)) *Worker {
 	w := NewWorker(store, res, dl, DefaultConfig(), "perm", nil)
-	w.Cfg.DownloadsDir = "/dl"
+	w.Cfg.DownloadsDir = t.TempDir()
 	if sleep != nil {
 		w.sleep = sleep
 	}
@@ -562,7 +562,7 @@ func TestNewWorkerClampsMaxAttempts(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
 	dl := newFakeDownloader()
 
-	w := NewWorker(store, res, dl, Config{MaxAttempts: 0, DownloadsDir: "/dl"}, "perm", nil)
+	w := NewWorker(store, res, dl, Config{MaxAttempts: 0, DownloadsDir: t.TempDir()}, "perm", nil)
 	w.sleep = (&recordingSleeper{}).sleep
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -584,7 +584,7 @@ func TestWorkerSuccessFirstTry(t *testing.T) {
 	dl := newFakeDownloader()
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	processed, err := w.RunOnce(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -614,7 +614,7 @@ func TestWorkerSuccessFirstTry(t *testing.T) {
 		t.Errorf("lessons downloaded = %+v, want one call for lesson 100", store.markDownloaded)
 	}
 	// Output dir folds under the node follow; lessonDir is "01 - <title>".
-	wantDir := "/dl/Beginner Course/01 - Lesson A"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "01 - Lesson A")
 	if got := store.markDownloaded[0].outputDir; got != wantDir {
 		t.Errorf("lessonDir = %q, want %q", got, wantDir)
 	}
@@ -647,7 +647,7 @@ func TestWorkerFailTwiceThenSucceed(t *testing.T) {
 	dl.failsBefore[100] = 2 // fail attempts 1 and 2, succeed on attempt 3
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
@@ -692,7 +692,7 @@ func TestWorkerAlwaysFails(t *testing.T) {
 	dl.alwaysFail = true
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
@@ -734,7 +734,7 @@ func TestWorkerUnresolvableLessonSkipped(t *testing.T) {
 	dl := newFakeDownloader()
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	processed, err := w.RunOnce(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -779,7 +779,7 @@ func TestWorkerNeverAbortsOnFailingJob(t *testing.T) {
 	}
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	processed, err := w.RunOnce(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -822,7 +822,7 @@ func TestWorkerStopsClaimingWhenPaused(t *testing.T) {
 	}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	// Become paused once the first download has completed: the loop's pre-claim
 	// check then fires before job 2 is claimed.
 	w.IsPaused = func() bool { return len(dl.calls) >= 1 }
@@ -860,7 +860,7 @@ func TestWorkerLimitCapsProcessed(t *testing.T) {
 	}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	processed, err := w.RunOnce(context.Background(), 2)
 	if err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -886,7 +886,7 @@ func TestWorkerCanceledContextReturnsNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	processed, err := w.RunOnce(ctx, 0)
 	if err != nil {
 		t.Errorf("RunOnce on cancelled ctx = %v, want nil", err)
@@ -905,7 +905,7 @@ func TestWorkerClaimErrorIsFatal(t *testing.T) {
 	res := fakeResolver{}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	_, err := w.RunOnce(context.Background(), 0)
 	if err == nil {
 		t.Fatal("RunOnce: want a fatal error from ClaimNextJob, got nil")
@@ -925,12 +925,12 @@ func TestWorkerNullFollowFallsBackToParentTitle(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
 
-	wantDir := "/dl/Some Course/01 - Orphan Lesson"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Some Course", "01 - Orphan Lesson")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -947,11 +947,11 @@ func TestWorkerNullFollowFallsBackToContentID(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{777: lesson(777, "Lone")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
-	wantDir := "/dl/content-777/01 - Lone"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "content-777", "01 - Lone")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -972,14 +972,14 @@ func TestWorkerGetFollowErrorFallsBackToDefaults(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
 	if got := store.jobs[1].Status; got != database.JobDone {
 		t.Errorf("job status = %q, want done despite GetFollow failure", got)
 	}
-	wantDir := "/dl/Recovered Course/01 - Resilient"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Recovered Course", "01 - Resilient")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -993,7 +993,7 @@ func TestWorkerQualityAndResourcesOnlyOverride(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "A")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.Quality = "best"     // override wins over the follow's 1080
 	w.Cfg.ResourcesOnly = true // flows into DownloadOpts
 	w.Cfg.AudioLang = "en"     // flows into DownloadOpts
@@ -1026,7 +1026,7 @@ func TestWorkerBackoffClampsToLastEntry(t *testing.T) {
 	dl.alwaysFail = true
 	sleeper := &recordingSleeper{}
 
-	w := newTestWorker(store, res, dl, sleeper.sleep)
+	w := newTestWorker(t, store, res, dl, sleeper.sleep)
 	w.Cfg.MaxAttempts = 5 // raise above the 3-entry backoff to reach the clamp
 
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
@@ -1069,7 +1069,7 @@ func TestWorkerCancelDuringBackoffAbortsRetries(t *testing.T) {
 		cancel()
 	}
 
-	w := newTestWorker(store, res, dl, cancelling)
+	w := newTestWorker(t, store, res, dl, cancelling)
 	w.Cfg.MaxAttempts = 5
 
 	processed, err := w.RunOnce(ctx, 0)
@@ -1112,7 +1112,7 @@ func TestWorkerFinishDownloadRecordsVideoMetadata(t *testing.T) {
 
 	// Point DownloadsDir at a real temp dir so the produced mp4 can be stat'd.
 	tmp := t.TempDir()
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = tmp
 
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
@@ -1148,7 +1148,7 @@ func TestWorkerFinishDownloadNoVideoWhenResourcesOnly(t *testing.T) {
 	dl.writeMP4 = []byte("should not be written in resources-only")
 
 	tmp := t.TempDir()
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = tmp
 	w.Cfg.ResourcesOnly = true
 
@@ -1187,8 +1187,9 @@ func (d *blockingDownloader) Download(ctx context.Context, _ *musora.Lesson, _ m
 
 // TestWorkerCancelRunningSkipsAndCancelsJob verifies the cancel-error-first
 // branch: a running download whose job is cancelled via CancelRunning is recorded
-// as a skipped lesson + a canceled job, has its partial files cleaned up, is NOT
-// retried, and never falls through to the success branch.
+// as a skipped lesson + a canceled job, has its private folder removed, is NOT
+// retried, and never falls through to the success branch. The lesson's own
+// folder, outside the private folder, is left exactly as it was (D66).
 func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
@@ -1197,7 +1198,7 @@ func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 	dl := newBlockingDownloader()
 
 	tmp := t.TempDir()
-	// Pre-create the lesson dir with a partial file so cleanupPartials has work.
+	// The lesson's folder holds a partial file of its own: not the download's.
 	lessonDirPath := filepath.Join(tmp, "Beginner Course", "01 - Lesson A")
 	if err := os.MkdirAll(lessonDirPath, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -1207,7 +1208,7 @@ func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 		t.Fatalf("write partial: %v", err)
 	}
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.MaxAttempts = 5 // ensure cancel beats retries
 	w.Cfg.DownloadsDir = tmp
 
@@ -1243,19 +1244,19 @@ func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 	if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 {
 		t.Errorf("failure branch ran: markFailed=%v markJobFailed=%v", store.markFailed, store.markJobFailed)
 	}
-	// Partial file removed; the directory itself is left in place.
-	if _, err := os.Stat(partial); !os.IsNotExist(err) {
-		t.Errorf("partial file still present (stat err = %v), want removed", err)
+	// The download's private folder is gone; the lesson's folder is untouched.
+	assertExist(t, false, w.privateDir(1))
+	if got, err := os.ReadFile(partial); err != nil || string(got) != "half a file" {
+		t.Errorf("the lesson folder's own file = %q, %v; want it untouched", got, err)
 	}
 }
 
-// TestWorkerKillByADeleteDiscardsWhatItWrote proves a download killed by a
-// delete that removes the lesson's files (its job already removed, with that
-// intent) goes as the delete wants: its lesson folder is removed whole, not
-// just its partial files, and no cancel is recorded. That holds for a folder
-// the download created, and for one the lesson's own row recorded before (the
-// delete takes that folder anyway); a folder that held files no row of the
-// lesson recorded is kept (TestWorkerKeepsWhatTheLessonFolderHeldBefore).
+// TestWorkerKillByADeleteDiscardsWhatItWrote (D66) proves a download killed by
+// a delete that removes the lesson's files (its job already removed, with that
+// intent) has what it wrote removed, its private folder whole, and records no
+// cancel. The worker touches nothing outside that folder: a lesson folder the
+// row recorded is the delete's to remove, and one that does not exist is never
+// made.
 func TestWorkerKillByADeleteDiscardsWhatItWrote(t *testing.T) {
 	for _, recorded := range []bool{false, true} {
 		t.Run(fmt.Sprintf("recorded=%v", recorded), func(t *testing.T) {
@@ -1269,7 +1270,7 @@ func TestWorkerKillByADeleteDiscardsWhatItWrote(t *testing.T) {
 				store.lessons[100] = database.Lesson{RailcontentID: 100, OutputDir: sql.NullString{String: dir, Valid: true}}
 				seedSeason(t, dir, "01 - Lesson A.mp4", "sheet.pdf")
 			}
-			w := newTestWorker(store, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
+			w := newTestWorker(t, store, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
 			w.Cfg.DownloadsDir = tmp
 
 			done := make(chan struct{})
@@ -1278,14 +1279,21 @@ func TestWorkerKillByADeleteDiscardsWhatItWrote(t *testing.T) {
 				close(done)
 			}()
 			<-dl.started
-			seedSeason(t, dir, "01 - Lesson A.mp4.part", "sheet.pdf") // what the download wrote
-			store.gone[1] = true                                      // the delete removed the job, then killed the download
+			// What the download wrote; then the delete removes the job, and
+			// kills the download.
+			seedSeason(t, filepath.Join(w.privateDir(1), "01 - Lesson A"), "01 - Lesson A.mp4.part", "sheet.pdf")
+			store.gone[1] = true
 			if !w.CancelRunning(1) {
 				t.Fatal("CancelRunning(1) = false, want true (job is running)")
 			}
 			<-done
 
-			assertExist(t, false, dir)
+			assertExist(t, false, w.privateDir(1))
+			if recorded {
+				assertContent(t, dir, "01 - Lesson A.mp4", "sheet.pdf")
+			} else {
+				assertExist(t, false, dir)
+			}
 			if len(store.markJobCanceled) != 0 || len(store.markDownloaded) != 0 {
 				t.Errorf("recorded cancel %v, download %+v; want nothing recorded", store.markJobCanceled, store.markDownloaded)
 			}
@@ -1293,15 +1301,16 @@ func TestWorkerKillByADeleteDiscardsWhatItWrote(t *testing.T) {
 	}
 }
 
-// TestWorkerCancelDuringShutdownFinalizesWithLiveCtx simulates SIGINT/SIGTERM
-// arriving while a download is in flight: cancelling the OUTER ctx (not just the
-// per-job ctx) makes the download return context.Canceled and runs the cancel-
-// first branch with the outer ctx already dead. The finalization writes
-// (CancelDownload, for the lesson and the job) must NOT ride that cancelled ctx — they use
-// context.WithoutCancel so the real store's BeginTx still commits, otherwise the
-// job/lesson would be stranded 'running'/'downloading'. The fake records the
-// ctx.Err() it saw for each write; both must be nil.
-func TestWorkerCancelDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
+// TestWorkerShutdownDuringADownloadLeavesTheJobToStartOver (was
+// TestWorkerCancelDuringShutdownFinalizesWithLiveCtx, D66) simulates
+// SIGINT/SIGTERM arriving while a download is in flight: cancelling the OUTER
+// ctx (not just the per-job ctx) makes the download return context.Canceled.
+// That is not a Cancel: the lesson is never skipped and the job never
+// canceled (the old contract recorded CancelDownload here, which skipped the
+// lesson for good). The job is left running, for the next start's recovery
+// to requeue (TestWorkerShutdownIsRequeuedNotSkipped runs that on a real
+// store), its end is reported once as a shutdown, and its private folder goes.
+func TestWorkerShutdownDuringADownloadLeavesTheJobToStartOver(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
 	store.follows[nodeFollow().ID] = nodeFollow()
@@ -1309,9 +1318,11 @@ func TestWorkerCancelDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 	dl := newBlockingDownloader()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
-	w.Cfg.MaxAttempts = 5 // ensure the cancel path beats retries
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
+	w.Cfg.MaxAttempts = 5 // a retry would show as a second download call
 	w.Cfg.DownloadsDir = t.TempDir()
+	sink := &recordingSink{}
+	w.Progress = sink
 
 	done := make(chan struct{})
 	go func() {
@@ -1319,31 +1330,27 @@ func TestWorkerCancelDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 		close(done)
 	}()
 
-	// Once the download is in flight, cancel the OUTER ctx (shutdown). That cancels
-	// jobCtx too, so the download returns context.Canceled and the cancel branch
-	// runs while ctx itself is dead.
 	<-dl.started
 	cancel()
 	<-done
 
-	// The cancel branch ran: lesson skipped + job canceled.
-	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("markSkipped = %v, want %v", got, want)
+	if len(store.markSkipped) != 0 || len(store.markJobCanceled) != 0 || len(store.markFailed) != 0 || len(store.markJobFailed) != 0 {
+		t.Errorf("skipped %v, canceled %v, failed %v/%v; want nothing recorded for a shutdown",
+			store.markSkipped, store.markJobCanceled, store.markFailed, store.markJobFailed)
 	}
-	if got, want := store.markJobCanceled, []int64{1}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("markJobCanceled = %v, want %v", got, want)
+	if got := store.jobs[1].Status; got != database.JobRunning {
+		t.Errorf("job status = %q, want running (the next start requeues it)", got)
 	}
-	// Crucially, neither finalization write saw a cancelled context.
-	for i, e := range store.markSkippedCtxErr {
-		if e != nil {
-			t.Errorf("CancelDownload (lesson) call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
+	if dl.calls != 1 {
+		t.Errorf("download calls = %d, want 1", dl.calls)
+	}
+	assertEndsOnce(t, sink, 1)
+	for _, e := range sink.snapshot() {
+		if e.Kind == "lesson_skipped" && e.Err != msgShutdown {
+			t.Errorf("end reported as %q, want the shutdown sentence", e.Err)
 		}
 	}
-	for i, e := range store.markJobCanceledCtxErr {
-		if e != nil {
-			t.Errorf("CancelDownload (job) call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
-		}
-	}
+	assertExist(t, false, w.privateDir(1))
 }
 
 // TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx is the resolve-branch
@@ -1361,7 +1368,7 @@ func TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 	res := cancelingResolver{cancel: cancel}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(ctx, 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
@@ -1387,7 +1394,7 @@ func TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 // TestWorkerCancelRunningUnknownJob verifies CancelRunning returns false when no
 // job by that id is currently registered as running.
 func TestWorkerCancelRunningUnknownJob(t *testing.T) {
-	w := newTestWorker(newFakeWorkerStore(), fakeResolver{}, newFakeDownloader(), func(time.Duration) {})
+	w := newTestWorker(t, newFakeWorkerStore(), fakeResolver{}, newFakeDownloader(), func(time.Duration) {})
 	if w.CancelRunning(999) {
 		t.Error("CancelRunning(999) = true, want false (no such running job)")
 	}
@@ -1406,12 +1413,12 @@ func TestWorkerUsesLessonPositionForNumbering(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
 
-	wantDir := "/dl/Beginner Course/02 - Lesson A"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "02 - Lesson A")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -1435,11 +1442,11 @@ func TestWorkerNullPositionFallsBackToOne(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
-	wantDir := "/dl/Beginner Course/01 - Lesson A"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "01 - Lesson A")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -1466,7 +1473,7 @@ func TestWorkerInstructorFollowGroupsByParentCourse(t *testing.T) {
 	dl := newFakeDownloader()
 	dl.writeMP4 = []byte("video-bytes")
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	tmp := t.TempDir()
 	w.Cfg.DownloadsDir = tmp
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
@@ -1507,7 +1514,7 @@ func TestWorkerMovesToLibraryOnSuccess(t *testing.T) {
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
 	library := filepath.Join(tmp, "lib")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.LibraryDir = library
 
@@ -1559,7 +1566,7 @@ func TestWorkerNoLibraryDirKeepsInDownloads(t *testing.T) {
 
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	// Cfg.LibraryDir stays empty: feature off.
 
@@ -1613,7 +1620,7 @@ func TestWorkerMoveToLibraryFailureNonFatal(t *testing.T) {
 		t.Fatalf("write library-as-file: %v", err)
 	}
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.LibraryDir = library
 
@@ -1646,11 +1653,11 @@ func TestWorkerInstructorFollowNoParentCourse(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Solo Lesson")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
 	}
-	wantDir := "/dl/Mike Johnston/04 - Solo Lesson"
+	wantDir := filepath.Join(w.Cfg.DownloadsDir, "Mike Johnston", "04 - Solo Lesson")
 	if len(store.markDownloaded) != 1 || store.markDownloaded[0].outputDir != wantDir {
 		t.Errorf("lessonDir = %+v, want %q", store.markDownloaded, wantDir)
 	}
@@ -1674,7 +1681,7 @@ func TestWorkerPlexTvLayoutOnSuccess(t *testing.T) {
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
 	library := filepath.Join(tmp, "lib")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.LibraryDir = library
 	w.Cfg.Layout = "plex-tv"
@@ -1735,7 +1742,7 @@ func TestWorkerPlexTvLayoutOnSuccessSong(t *testing.T) {
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
 	library := filepath.Join(tmp, "lib")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.LibraryDir = library
 	w.Cfg.Layout = "plex-tv"
@@ -1807,7 +1814,7 @@ func TestWorkerPlexTvWritesEpisodeNFO(t *testing.T) {
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
 	library := filepath.Join(tmp, "lib")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.LibraryDir = library
 	w.Cfg.Layout = "plex-tv"
@@ -1857,7 +1864,7 @@ func TestWorkerPlexTvLayoutNoLibraryKeepsInDownloads(t *testing.T) {
 
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = downloads
 	w.Cfg.Layout = "plex-tv" // but no LibraryDir
 
@@ -1951,7 +1958,7 @@ func songJobWorker(t *testing.T, layout string) (*Worker, *fakeWorkerStore, *fak
 	dl.writeMP4 = []byte("fake mp4 bytes")
 
 	tmp := t.TempDir()
-	w := newTestWorker(store, fakeResolver{lessons: map[int]*musora.Lesson{100: song}}, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, fakeResolver{lessons: map[int]*musora.Lesson{100: song}}, dl, func(time.Duration) {})
 	w.Cfg.DownloadsDir = filepath.Join(tmp, "dl")
 	w.Cfg.LibraryDir = filepath.Join(tmp, "lib")
 	w.Cfg.Layout = layout
@@ -1991,12 +1998,14 @@ func assertRecordedWhole(t *testing.T, rec markDownloadedCall, names ...string) 
 }
 
 // TestWorkerDefaultMoveCopyFailsRecordsDownloads covers D52's first case at the
-// worker: the default-layout copy fails part-way. The lesson is recorded in
-// downloads, where it is whole, and the library holds no copy of it.
+// worker: the default-layout copy into the library (another filesystem) fails
+// part-way. The lesson is placed in downloads instead (the same filesystem as
+// its private folder, so a rename), where it is whole, and the library holds
+// no copy of it.
 func TestWorkerDefaultMoveCopyFailsRecordsDownloads(t *testing.T) {
 	skipWithoutPermissionChecks(t)
 	w, store, dl, _, tmp := songJobWorker(t, "")
-	forceCopyFallback(t)
+	forceCopyFallbackInto(t, w.Cfg.LibraryDir)
 	dl.afterWrite = func(dir string) { makeUnreadable(t, filepath.Join(dir, "05 - Even Flow [Original].mp4")) }
 
 	rec := runSongJob(t, w, store)
@@ -2011,9 +2020,10 @@ func TestWorkerDefaultMoveCopyFailsRecordsDownloads(t *testing.T) {
 }
 
 // TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary covers D52's third case
-// at the worker (default layout): the copy is complete but downloads cannot be
-// cleared. The worker records the library folder (it used to drop it on any
-// error), and the log names the downloads leftover.
+// at the worker (default layout): the copy is complete but the private folder
+// it came from cannot be cleared. The worker records the library folder (it
+// used to drop it on any error), and the log names the private folder left
+// behind (the next start's sweep removes it).
 func TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 	skipWithoutPermissionChecks(t)
 	w, store, dl, logBuf, tmp := songJobWorker(t, "")
@@ -2026,20 +2036,18 @@ func TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 		t.Errorf("outputDir = %q, want the complete library copy %q", rec.outputDir, libDir)
 	}
 	assertRecordedWhole(t, rec, "05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4", "resources/song.pdf")
-	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
-	if !strings.Contains(logBuf.String(), fmt.Sprintf("leftover at %q", srcDir)) {
-		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
-	}
+	assertNamesThePrivateLeftover(t, w, logBuf)
 }
 
 // TestWorkerPlexTvMoveCopyFailsRecordsScratch covers D52's second case at the
-// worker: the plex-tv copy fails part-way. The move is undone, the lesson is
-// recorded in scratch WITH its video (it used to lose it), and the season folder
-// holds nothing of the episode.
+// worker: the plex-tv copy into the library (another filesystem) fails
+// part-way. The move is undone, the lesson is placed in downloads WITH its
+// video (it used to lose it), and the season folder holds nothing of the
+// episode.
 func TestWorkerPlexTvMoveCopyFailsRecordsScratch(t *testing.T) {
 	skipWithoutPermissionChecks(t)
 	w, store, dl, _, tmp := songJobWorker(t, LayoutPlexTV)
-	forceCopyFallback(t)
+	forceCopyFallbackInto(t, w.Cfg.LibraryDir)
 	dl.afterWrite = func(dir string) { makeUnreadable(t, filepath.Join(dir, "05 - Even Flow [Original].mp4")) }
 
 	rec := runSongJob(t, w, store)
@@ -2058,7 +2066,7 @@ func TestWorkerPlexTvMoveCopyFailsRecordsScratch(t *testing.T) {
 
 // TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary covers D52's third case
 // in plex-tv at the worker: every entry is in the season folder, which is what
-// gets recorded, and the log names the downloads leftover.
+// gets recorded, and the log names the private folder left behind.
 func TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 	skipWithoutPermissionChecks(t)
 	w, store, dl, logBuf, tmp := songJobWorker(t, LayoutPlexTV)
@@ -2072,8 +2080,16 @@ func TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 	}
 	base := "Beginner Course - s01e05 - Even Flow"
 	assertRecordedWhole(t, rec, base+" [Drumless].mp4", base+" [Original].mp4", base+" resources/song.pdf")
-	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
-	if !strings.Contains(logBuf.String(), fmt.Sprintf("leftover at %q", srcDir)) {
-		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
+	assertNamesThePrivateLeftover(t, w, logBuf)
+}
+
+// assertNamesThePrivateLeftover checks the log names job 1's private folder as
+// one that could not be removed, and that it is still there to be named.
+func assertNamesThePrivateLeftover(t *testing.T, w *Worker, logBuf *bytes.Buffer) {
+	t.Helper()
+	want := fmt.Sprintf("its private download folder %q could not be removed", w.privateDir(1))
+	if !strings.Contains(logBuf.String(), want) {
+		t.Errorf("log %q does not name the private folder left behind (%s)", logBuf.String(), want)
 	}
+	assertExist(t, true, w.privateDir(1))
 }

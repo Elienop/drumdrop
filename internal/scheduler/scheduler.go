@@ -88,11 +88,11 @@ var _ Store = (*database.Store)(nil)
 type Config struct {
 	// DownloadsDir is the root under which per-follow folders are created.
 	DownloadsDir string
-	// LibraryDir, when non-empty, is the root the Worker MOVES each finished
-	// lesson folder into (single location) at the lesson's path relative to
-	// DownloadsDir — os.Rename on the same filesystem, copy-tree + remove-source
-	// across filesystems. The downloads dir is then pure scratch. Empty disables
-	// the move: the lesson stays in DownloadsDir.
+	// LibraryDir, when non-empty, is the root the Worker PLACES each finished
+	// lesson into (single location) at the lesson's path relative to
+	// DownloadsDir: a rename on the same filesystem, a copy across filesystems.
+	// Empty places it in DownloadsDir itself. Either way a download is written
+	// in its job's private folder under DownloadsDir first (see private.go).
 	LibraryDir string
 	// Layout selects the library destination layout (lower-cased upstream). ""
 	// or "default" keeps today's per-lesson-subfolder layout; "plex-tv" emits

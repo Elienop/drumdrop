@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,10 +92,13 @@ func TestPlexTVMoveWithAnUnknownPreviousDownload(t *testing.T) {
 	})
 }
 
-// TestPlexTVMoveRemovesEveryPreviousEntryItCan proves one previous entry that
-// can not be removed does not stop the others: they are removed, and only the
-// one left is still owned (none is left on disk unrecorded).
-func TestPlexTVMoveRemovesEveryPreviousEntryItCan(t *testing.T) {
+// TestPlexTVMoveSetsNothingAsideUnlessItCanSetAll (was
+// TestPlexTVMoveRemovesEveryPreviousEntryItCan) proves one previous entry that
+// can not be set aside stops the move, and puts back the ones already set
+// aside: nothing of the earlier download is lost, and every entry is still
+// owned. (The move used to remove every previous entry it could, which a
+// Skip landing during the move could not undo: D79.)
+func TestPlexTVMoveSetsNothingAsideUnlessItCanSetAll(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
@@ -103,17 +107,19 @@ func TestPlexTVMoveRemovesEveryPreviousEntryItCan(t *testing.T) {
 	seedSeason(t, season, stale+"/", old)
 	makeUndeletable(t, filepath.Join(season, stale))
 
-	// The record lists the stale folder first, so it fails before old is tried.
+	// The record lists old first, so it is set aside before the stale folder
+	// fails.
 	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
-		plexLibrary{self: recordedRow(1, season, stale+"/", old)})
+		plexLibrary{self: recordedRow(1, season, old, stale+"/")})
 	if err == nil {
 		t.Fatal("move = nil error, want the stale entry reported")
 	}
-	if res.seasonDir != "" || !reflect.DeepEqual(res.kept, paths(season, stale)) {
-		t.Errorf("result %+v, want only the stale entry still owned", res)
+	if res.seasonDir != "" || !reflect.DeepEqual(res.kept, paths(season, old, stale)) {
+		t.Errorf("result %+v, want both previous entries still owned", res)
 	}
-	assertExist(t, false, filepath.Join(season, old))
+	assertContent(t, season, old)
 	assertScratchWhole(t, lessonDir)
+	assertExist(t, false, filepath.Join(lib, privateRootName, replacedFolderName(0)))
 }
 
 // TestPlexTVUndoThatCannotRenameBackKeepsTheEntry proves an entry the move
@@ -134,7 +140,7 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 
 	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
 	stuck := filepath.Join(season, episodeBase+" [Drumless].mp4")
-	if err == nil || !strings.Contains(err.Error(), "its only copy is left in the library") {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("its only copy is left at %q", stuck)) {
 		t.Errorf("err = %v, want the stuck entry named", err)
 	}
 	if res.seasonDir != "" || !res.known || !reflect.DeepEqual(res.kept, []string{stuck}) {

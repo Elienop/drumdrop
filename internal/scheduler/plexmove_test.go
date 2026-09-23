@@ -290,7 +290,8 @@ func TestPlexTVMoveRefusesAnEntryAnotherLessonOwns(t *testing.T) {
 
 // TestPlexTVMoveReplacesAnEntryNoLessonClaims proves an entry at one of the
 // episode's own names that no lesson records (left by a follow deleted with its
-// files kept) is replaced, and said so, instead of blocking the move forever or
+// files kept) is replaced, and said so (the commit returns it, not the
+// lesson's own, for the worker's log), instead of blocking the move forever or
 // being merged into.
 func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 	tmp := t.TempDir()
@@ -298,12 +299,32 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
 	seedSeason(t, season, episodeBase+".nfo", episodeBase+" resources/")
 
-	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
-	if res.seasonDir != season {
+	c, err := library.NewClaims(lib, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := openScratch(filepath.Dir(lessonDir), lessonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.close()
+	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", src, plexLibrary{claims: c})
+	if err != nil || res.seasonDir != season || res.pending == nil {
 		t.Fatalf("move = (%+v, %v), want a move", res, err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "which no lesson records") {
-		t.Errorf("err = %v, want a note naming the replaced entries", err)
+	replaced, err := res.pending.commit()
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	var got []string
+	for _, e := range replaced {
+		if e.own {
+			t.Errorf("%q was replaced as the lesson's own; no lesson records it", e.path)
+		}
+		got = append(got, e.path)
+	}
+	if want := paths(season, episodeBase+" resources", episodeBase+".nfo"); !reflect.DeepEqual(sorted(got), sorted(want)) {
+		t.Errorf("replaced %q, want %q", got, want)
 	}
 	assertExist(t, false, filepath.Join(season, episodeBase+" resources", "f.pdf"))
 	assertExist(t, true, filepath.Join(season, episodeBase+" resources", "song.pdf"))
@@ -326,7 +347,7 @@ func TestPlexTVMoveStopsWhenThePreviousDownloadCannotBeCleared(t *testing.T) {
 
 	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
 		plexLibrary{self: recordedRow(1, season, stale+"/")})
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("previous download could not be removed from the library, left at %q", filepath.Join(season, stale))) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("could not set %q aside", filepath.Join(season, stale))) {
 		t.Fatalf("err = %v, want one naming the stale entry", err)
 	}
 	if res.seasonDir != "" || len(res.placed) != 0 || !reflect.DeepEqual(res.kept, paths(season, stale)) {
@@ -509,7 +530,7 @@ func TestMoveToLibraryCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 	}
 	t.Cleanup(func() { syncFile = orig })
 
-	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
+	newDir, err := testPlace(t, downloadsDir, libraryDir, lessonDir, database.Lesson{})
 	if err != nil {
 		t.Fatalf("moveToLibrary: %v", err)
 	}
@@ -545,7 +566,7 @@ func TestMoveToLibrarySymlinkedLessonFolderKeepsTheLesson(t *testing.T) {
 	}
 	forceCopyFallback(t)
 
-	newDir, err := testMoveToLibrary(t, downloadsDir, filepath.Join(tmp, "lib"), lessonDir)
+	newDir, err := testPlace(t, downloadsDir, filepath.Join(tmp, "lib"), lessonDir, database.Lesson{})
 	if err == nil || newDir != "" {
 		t.Fatalf("= (%q, %v), want (\"\", a refusal)", newDir, err)
 	}
@@ -565,11 +586,13 @@ func TestMoveToLibrarySymlinkedLessonFolderKeepsTheLesson(t *testing.T) {
 	}
 }
 
-// TestMoveToLibraryAliasedLibraryIsANoOp proves a library that is the
-// downloads folder under another path (here a symlink; a double bind mount
-// behaves the same) keeps the lesson: the move is a no-op instead of deleting
-// the only copy, and startup refuses the configuration.
-func TestMoveToLibraryAliasedLibraryIsANoOp(t *testing.T) {
+// TestPlaceLessonFolderAliasedToItsSourceRefuses (was
+// TestMoveToLibraryAliasedLibraryIsANoOp) proves a placement whose
+// destination is its own source under another path (a symlink; a double bind
+// mount behaves the same) keeps the lesson: the placement refuses instead of
+// replacing the source's entries with themselves, and startup refuses a
+// library that is the downloads folder under another path.
+func TestPlaceLessonFolderAliasedToItsSourceRefuses(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on Windows")
 	}
@@ -580,9 +603,9 @@ func TestMoveToLibraryAliasedLibraryIsANoOp(t *testing.T) {
 	}
 	forceCopyFallback(t)
 
-	newDir, err := testMoveToLibrary(t, downloadsDir, alias, lessonDir)
-	if err != nil || newDir != filepath.Join(alias, "Inst", "Course", "01 - L") {
-		t.Fatalf("= (%q, %v), want the aliased folder as a no-op", newDir, err)
+	newDir, err := testPlace(t, downloadsDir, alias, lessonDir, database.Lesson{})
+	if err == nil || newDir != "" || !strings.Contains(err.Error(), "it is the downloaded folder itself") {
+		t.Fatalf("= (%q, %v), want the named refusal", newDir, err)
 	}
 	assertExist(t, true, paths(lessonDir, lessonFiles...)...)
 

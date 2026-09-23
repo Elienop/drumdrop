@@ -139,8 +139,17 @@ var fiveLookAlikes = map[string][]string{
 var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}
 
 // testMovePlexTV runs the plex-tv move as the worker does, with the claims of
-// others (none when empty) unless pl already carries claims.
+// others (none when empty) unless pl already carries claims, reading the
+// downloaded lesson lessonDir through its parent folder. A placement is
+// committed and the downloaded folder removed, as the worker does once the
+// download is recorded; a refused move leaves lessonDir as it is.
 func testMovePlexTV(t *testing.T, libraryDir, show string, season, episode int, title, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
+	t.Helper()
+	return testMovePlexTVFrom(t, filepath.Dir(lessonDir), libraryDir, show, season, episode, title, lessonDir, pl, others...)
+}
+
+// testMovePlexTVFrom is testMovePlexTV reading lessonDir through downloads.
+func testMovePlexTVFrom(t *testing.T, downloads, libraryDir, show string, season, episode int, title, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
 	t.Helper()
 	if pl.claims == nil {
 		c, err := library.NewClaims(libraryDir, others)
@@ -149,21 +158,64 @@ func testMovePlexTV(t *testing.T, libraryDir, show string, season, episode int, 
 		}
 		pl.claims = c
 	}
-	if pl.downloads == "" {
-		pl.downloads = filepath.Dir(lessonDir)
+	src, err := openScratch(downloads, lessonDir)
+	if err != nil {
+		return plexMoveResult{}, err
 	}
-	return moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, pl)
+	defer src.close()
+	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, src, pl)
+	if res.pending != nil {
+		if _, cerr := res.pending.commit(); cerr != nil {
+			t.Fatalf("commit: %v", cerr)
+		}
+		if rerr := os.RemoveAll(lessonDir); rerr != nil {
+			t.Fatalf("remove the downloaded folder: %v", rerr)
+		}
+	}
+	return res, err
 }
 
-// testMoveToLibrary runs the default-layout move as the worker does, as
-// lesson 1, with the claims of others (none when empty).
-func testMoveToLibrary(t *testing.T, downloadsDir, libraryDir, lessonDir string, others ...database.Lesson) (string, error) {
+// testPlace runs the default-layout placement as the worker does, as lesson
+// 1 (or self when given), into root at lessonDir's path relative to
+// downloads, with the claims of others (none when empty). A placement is
+// committed and lessonDir removed, as the worker does once the download is
+// recorded; it returns the lesson's folder.
+func testPlace(t *testing.T, downloads, root, lessonDir string, self database.Lesson, others ...database.Lesson) (string, error) {
 	t.Helper()
-	c, err := library.NewClaims(libraryDir, others)
+	pl, err := testPlacePending(t, downloads, root, lessonDir, self, others...)
+	if err != nil {
+		return "", err
+	}
+	if _, cerr := pl.commit(); cerr != nil {
+		t.Fatalf("commit: %v", cerr)
+	}
+	if rerr := os.RemoveAll(lessonDir); rerr != nil {
+		t.Fatalf("remove the downloaded folder: %v", rerr)
+	}
+	return pl.dir, nil
+}
+
+// testPlacePending is testPlace without the commit: the caller commits or
+// undoes the placement.
+func testPlacePending(t *testing.T, downloads, root, lessonDir string, self database.Lesson, others ...database.Lesson) (*placement, error) {
+	t.Helper()
+	if self.RailcontentID == 0 {
+		self.RailcontentID = 1
+	}
+	c, err := library.NewClaims(root, others)
 	if err != nil {
 		t.Fatalf("NewClaims: %v", err)
 	}
-	return moveToLibrary(downloadsDir, libraryDir, lessonDir, c, 1)
+	rel, err := filepath.Rel(downloads, lessonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := openScratch(filepath.Dir(lessonDir), lessonDir)
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(src.close)
+	return placeLessonFolder(root, rel, src, self, c, library.Roots(root, downloads), 7)
 }
 
 // stubRename makes every rename of the moves call f with the two full paths

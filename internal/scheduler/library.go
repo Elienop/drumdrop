@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,141 +15,26 @@ import (
 // "default") keeps the per-lesson-subfolder layout.
 const LayoutPlexTV = "plex-tv"
 
-// moveToLibrary moves lessonDir into libraryDir at lessonDir's path relative to
-// downloadsDir, returning the new (library) dir. It tries a rename first
-// (instant and atomic on the same filesystem); on a cross-filesystem rename
-// error, and only then, it falls back to copying the tree then removing the
-// source. Any other rename error is a refusal (an entry that appeared at the
-// destination after the checks is kept, never copied over). The downloads
-// folder is gone after a successful move.
-//
-// Whatever fails, one complete copy of the lesson is left in one place, and
-// newDir says where to record it:
-//   - newDir == "": the lesson is whole in lessonDir. A copy that failed
-//     part-way is removed from the library first (only what it created).
-//   - newDir != "": the library holds the whole lesson. An error alongside it
-//     means lessonDir could not be fully removed, or is a note (a leftover it
-//     replaced); the message says which.
-//
-// A copied lesson is flushed to disk (every file and folder) before the
-// downloads copy is removed, so a crash right after can not leave the only copy
-// truncated. A library leftover that cannot be removed is named in the error.
-//
-// It rejects a lessonDir that is not under downloadsDir (rel ".", "..", an
-// absolute Rel result) before any write, so a stray path can never land outside
-// the library. Everything it reads, creates or removes goes through folders it
-// holds open (os.Root): the lesson folder must be a real folder inside
-// downloads, the destination's parent must resolve inside the library (a
-// symlinked course folder is refused, not followed), and the rename acts on
-// the two open folders (renameAt; by path only on Windows). A destination
-// that already exists is replaced only if no lesson other than self records
-// anything in it (claims.Holds): the lesson's own previous download is
-// replaced, a leftover no lesson records is replaced and reported, and one
-// another lesson records refuses the move (the lesson stays in downloads). It
-// returns the new dir and an error for the caller to LOG — the caller treats
-// the move as non-fatal and must never fail the job on it.
-func moveToLibrary(downloadsDir, libraryDir, lessonDir string, claims *library.Claims, self int) (newDir string, err error) {
-	// Move to the same path relative to the downloads root. Reject a lessonDir
-	// that escapes the root (".." prefix or an absolute Rel result) before any
-	// write, so a stray path can never land outside the library.
-	rel, err := filepath.Rel(downloadsDir, lessonDir)
+// openLibraryParent creates the folder rel inside root (the library, or the
+// downloads folder) and opens it as an os.Root, refusing one that resolves
+// outside root (a symlinked folder on the way). The caller closes it.
+func openLibraryParent(root, rel string) (*os.Root, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("create folder %q: %w", root, err)
+	}
+	r, err := os.OpenRoot(root)
 	if err != nil {
-		return "", fmt.Errorf("relativize %q under %q: %w", lessonDir, downloadsDir, err)
+		return nil, fmt.Errorf("open folder %q: %w", root, err)
 	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("lesson dir %q is not under downloads dir %q", lessonDir, downloadsDir)
+	defer r.Close()
+	if err := r.MkdirAll(rel, 0o755); err != nil {
+		return nil, fmt.Errorf("create %q inside %q: %w", rel, root, err)
 	}
-	dstDir := filepath.Join(libraryDir, rel)
-
-	// Destination == source (e.g. libraryDir == downloadsDir, spelled the same or
-	// reached another way: a symlink, the same host folder bind-mounted twice):
-	// the lesson is already where it would be moved to. Return it as a no-op
-	// success — the file stays put. WITHOUT this guard the removal below would
-	// delete the source before the rename, then both the rename and the copy
-	// fall-back fail against a now-missing source and the lesson is permanently
-	// lost. Identity (os.SameFile) decides, not spelling.
-	if filepath.Clean(dstDir) == filepath.Clean(lessonDir) || sameDir(dstDir, lessonDir) {
-		return dstDir, nil
-	}
-	if claims == nil {
-		return "", errors.New("refusing to move: the other lessons' files were not read")
-	}
-
-	scratch, err := openScratch(downloadsDir, lessonDir)
+	dir, err := r.OpenRoot(rel)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("open %q inside %q: %w", rel, root, err)
 	}
-	defer scratch.close()
-
-	// Open the destination's PARENT inside the library (created if missing), so
-	// the rename moves the whole lesson folder in as the leaf, and nothing is
-	// created or removed through a symlink leading out of the library.
-	parent, closeParent, err := openLibraryParent(libraryDir, filepath.Dir(rel))
-	if err != nil {
-		return "", err
-	}
-	defer closeParent()
-	leaf := filepath.Base(rel)
-	var note error
-	if _, lerr := parent.Lstat(leaf); lerr == nil {
-		if ids := claims.Holds(dstDir, self); len(ids) > 0 {
-			return "", fmt.Errorf("refusing to move: %q holds files lessons %v record, so the lesson stays whole in downloads", dstDir, ids)
-		}
-		if ids := claims.Holds(dstDir, 0); len(ids) == 0 {
-			note = fmt.Errorf("replaced %q, which no lesson records", dstDir)
-		}
-		if err := parent.RemoveAll(leaf); err != nil {
-			return "", fmt.Errorf("remove existing library dir %q: %w", dstDir, err)
-		}
-	}
-
-	rerr := renameAt(scratch.parent, scratch.base, parent, leaf)
-	if rerr == nil {
-		return dstDir, note
-	}
-	if !crossDevice(rerr) {
-		// A refusal: above all, an entry that appeared at the destination after
-		// the checks. Nothing moved, and nothing there is touched or copied over.
-		return "", errors.Join(fmt.Errorf("refusing to move: %w; the lesson stays whole in downloads", rerr), note)
-	}
-	if cerr := copyTreeInto(parent, leaf, scratch.parent, scratch.base); cerr != nil {
-		// Across filesystems: copy the tree, then drop the source. The copy only
-		// read the source, so the whole lesson is still in downloads, and it took
-		// back out of the library whatever it had created.
-		err := fmt.Errorf("copy tree %q -> %q (across filesystems): %w", lessonDir, dstDir, cerr)
-		return "", errors.Join(err, note)
-	}
-	if err := syncIn(parent, "."); err != nil {
-		err = fmt.Errorf("flush library folder %q after the copy: %w", filepath.Dir(dstDir), err)
-		return "", errors.Join(err, discardPartialCopy(parent, leaf), note)
-	}
-	if rmerr := scratch.remove(); rmerr != nil {
-		return dstDir, errors.Join(downloadsLeftoverErr(lessonDir, rmerr), note)
-	}
-	return dstDir, note
-}
-
-// openLibraryParent creates the folder rel inside libraryDir and opens it as
-// an os.Root, refusing one that resolves outside the library (a symlinked
-// folder on the way). closeFn releases both handles.
-func openLibraryParent(libraryDir, rel string) (dir *os.Root, closeFn func(), err error) {
-	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("create library folder %q: %w", libraryDir, err)
-	}
-	lib, err := os.OpenRoot(libraryDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open library folder %q: %w", libraryDir, err)
-	}
-	if err := lib.MkdirAll(rel, 0o755); err != nil {
-		lib.Close()
-		return nil, nil, fmt.Errorf("create %q inside the library %q: %w", rel, libraryDir, err)
-	}
-	dir, err = lib.OpenRoot(rel)
-	if err != nil {
-		lib.Close()
-		return nil, nil, fmt.Errorf("open %q inside the library %q: %w", rel, libraryDir, err)
-	}
-	return dir, func() { dir.Close(); lib.Close() }, nil
+	return dir, nil
 }
 
 // sameDir reports whether a and b both exist and are the same folder, however
@@ -165,10 +49,15 @@ func sameDir(a, b string) bool {
 }
 
 // CheckLibraryDir refuses a library folder that IS the downloads folder under
-// another path (a symlink, or one host folder bind-mounted twice): the move
-// would then delete a lesson's only copy while replacing it. The same path
-// spelled the same way is allowed (every move is then a no-op), as is a library
-// that does not exist yet.
+// another path (a symlink, or one host folder bind-mounted twice). It was the
+// guard for a move that replaced the library folder with the downloads folder
+// it came from, deleting the lesson's only copy. A placement's source is now
+// always the job's private folder, which is never a destination
+// (placeLessonFolder refuses it), so that loss can not happen any more; the
+// refusal stays because an alias gives every recorded path two spellings,
+// which nothing here was built for. The same path spelled the same way is
+// allowed (the library is then the downloads folder), as is a library that
+// does not exist yet.
 func CheckLibraryDir(downloadsDir, libraryDir string) error {
 	if downloadsDir == "" || libraryDir == "" || filepath.Clean(downloadsDir) == filepath.Clean(libraryDir) {
 		return nil
