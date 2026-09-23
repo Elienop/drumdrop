@@ -39,9 +39,14 @@ type fakeWorkerStore struct {
 	markSkipped     []int // railcontent ids marked skipped
 	markDownloadng  []int // railcontent ids marked downloading
 
+	// lessonErr is the error each FailDownload/SkipDownload stored on the
+	// lesson (the job's is in jobs[id].Error).
+	lessonErr map[int]string
+
 	// ctx.Err() observed at each SkipDownload/CancelDownload call, so the
 	// shutdown-finalize test can assert those writes do NOT ride a cancelled ctx.
 	markSkippedCtxErr     []error
+	markFailedCtxErr      []error
 	markJobCanceledCtxErr []error
 
 	// Optional fault injection.
@@ -90,6 +95,8 @@ func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
 		jobs:    map[int64]database.Job{},
 		follows: map[int64]database.Follow{},
 		lessons: map[int]database.Lesson{},
+
+		lessonErr: map[int]string{},
 	}
 	for _, j := range jobs {
 		s.queue = append(s.queue, j)
@@ -229,12 +236,14 @@ func (s *fakeWorkerStore) FinishDownload(ctx context.Context, jobID int64, id in
 	return nil
 }
 
-func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, errMsg string) error {
+func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
 	}
 	s.markFailed = append(s.markFailed, id)
-	s.markJobFailedAs(jobID, errMsg)
+	s.markFailedCtxErr = append(s.markFailedCtxErr, ctx.Err())
+	s.lessonErr[id] = lessonMsg
+	s.markJobFailedAs(jobID, jobMsg)
 	return nil
 }
 
@@ -244,6 +253,7 @@ func (s *fakeWorkerStore) SkipDownload(ctx context.Context, jobID int64, id int,
 	}
 	s.markSkipped = append(s.markSkipped, id)
 	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
+	s.lessonErr[id] = reason
 	s.markJobFailedAs(jobID, reason)
 	return nil
 }
@@ -1339,7 +1349,7 @@ func TestWorkerCancelDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 // TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx is the resolve-branch
 // twin of the cancel-branch shutdown test: Resolve runs before the loop's
 // ctx.Err() guard, so a shutdown landing mid-resolve takes the resolve-failure
-// branch with the outer ctx already cancelled. SkipDownload must
+// branch with the outer ctx already cancelled. FailDownload must
 // still commit (WithoutCancel), else the job is stranded 'running' until the next
 // startup requeue.
 func TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
@@ -1356,17 +1366,20 @@ func TestWorkerResolveFailureDuringShutdownFinalizesWithLiveCtx(t *testing.T) {
 		t.Fatalf("RunOnce error: %v", err)
 	}
 
-	// The lesson was skipped (resolve failed) and the download never ran.
-	if got, want := store.markSkipped, []int{100}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("markSkipped = %v, want %v", got, want)
+	// The lesson failed (resolve failed: not skipped) and the download never ran.
+	if got, want := store.markFailed, []int{100}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("markFailed = %v, want %v", got, want)
+	}
+	if len(store.markSkipped) != 0 {
+		t.Errorf("markSkipped = %v, want none: a failed resolve is retried, not skipped", store.markSkipped)
 	}
 	if len(dl.calls) != 0 {
 		t.Errorf("download calls = %d, want 0 (resolve failed before any download)", len(dl.calls))
 	}
 	// The finalization write did NOT ride the cancelled ctx.
-	for i, e := range store.markSkippedCtxErr {
+	for i, e := range store.markFailedCtxErr {
 		if e != nil {
-			t.Errorf("CancelDownload (lesson) call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
+			t.Errorf("FailDownload call %d saw ctx.Err()=%v, want nil (must use WithoutCancel)", i, e)
 		}
 	}
 }

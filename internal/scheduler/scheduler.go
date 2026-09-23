@@ -70,7 +70,10 @@ type Store interface {
 	StartDownload(ctx context.Context, jobID int64, id int) error
 	ConfirmDownload(ctx context.Context, jobID int64, id int) error
 	FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error
-	FailDownload(ctx context.Context, jobID int64, id int, msg string) error
+	// FailDownload stores lessonMsg under the lesson (whose menu offers
+	// Download) and jobMsg on the job (shown in the Queue beside Retry);
+	// SkipDownload stores reason in both, so it names no button.
+	FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error
 	SkipDownload(ctx context.Context, jobID int64, id int, reason string) error
 	CancelDownload(ctx context.Context, jobID int64, id int) error
 	RequeueStaleRunning(ctx context.Context) (int, error)

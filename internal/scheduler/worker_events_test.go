@@ -102,6 +102,45 @@ func TestWorkerStopReportsTheJobsEnd(t *testing.T) {
 	}
 }
 
+// TestWorkerCancelLeavesASentence (round-4 item 7) proves a canceled
+// download, over a real store, leaves a sentence, not the bare word
+// "canceled", both as the note under its lesson and as its event's Err.
+func TestWorkerCancelLeavesASentence(t *testing.T) {
+	ctx := context.Background()
+	w, s, _, f, _ := realWorker(t, "")
+	dl := newBlockingDownloader()
+	w.Downloader = dl
+	sink := &recordingSink{}
+	w.Progress = sink
+	jobID, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = w.RunOnce(ctx, 0)
+	}()
+	<-dl.started
+	if !w.CancelRunning(jobID) {
+		t.Fatal("CancelRunning = false, want the running download canceled")
+	}
+	<-done
+	l, err := s.GetLesson(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note := l.Error.String; l.Status != database.StatusSkipped || !strings.HasSuffix(note, "Download again to get this lesson.") {
+		t.Errorf("lesson = %s/%q, want skipped with a sentence that says what to do", l.Status, note)
+	}
+	assertEndsOnce(t, sink, jobID)
+	for _, e := range sink.snapshot() {
+		if e.Kind == "lesson_skipped" && e.Err != msgCanceled {
+			t.Errorf("the cancel's event Err = %q, want %q", e.Err, msgCanceled)
+		}
+	}
+}
+
 // TestWorkerRequeuedDuringTheMoveReportsTheJobsEnd (code #1) proves a job
 // requeued elsewhere while its download was moved reports its end too.
 func TestWorkerRequeuedDuringTheMoveReportsTheJobsEnd(t *testing.T) {
@@ -132,28 +171,33 @@ func TestWorkerShutdownBeforeTheFirstAttemptReportsTheJobsEnd(t *testing.T) {
 }
 
 // TestWorkerRecordsSentencesNotErrors (security Info 5) proves the lesson's
-// error and the events' Err hold a sentence written for the user, never the
-// Go error behind it, for each way a job fails: every attempt failed, a
-// precondition failed, and a lesson Musora did not return.
+// error, the job's, and the events' Err hold a sentence written for the user,
+// never the Go error behind it, for each way a job fails: every attempt
+// failed, a precondition failed, Musora couldn't be asked, and a lesson
+// Musora has no match for. The lesson's sentence and the job's are each the
+// one for the place it is shown in (round-4 item 7).
 func TestWorkerRecordsSentencesNotErrors(t *testing.T) {
 	cases := []struct {
 		name   string
 		set    func(w *Worker, store *fakeWorkerStore)
-		want   string
+		want   failure
 		secret string
 	}{
 		{"every attempt failed", func(w *Worker, store *fakeWorkerStore) {
 			w.Downloader = &scratchWriter{}
-		}, msgDownloadFailed, "403"},
+		}, failDownload, "403"},
 		{"records unreadable", func(w *Worker, store *fakeWorkerStore) {
 			store.getLessonErr = errors.New("database is locked at /srv/drumdrop.db")
-		}, msgNotStarted, "/srv/drumdrop.db"},
+		}, failNotStarted, "/srv/drumdrop.db"},
 		{"claims unreadable", func(w *Worker, store *fakeWorkerStore) {
 			store.withFilesErr = errors.New("no such column: library_entries")
-		}, msgNotStarted, "no such column"},
-		{"not resolved", func(w *Worker, store *fakeWorkerStore) {
+		}, failNotStarted, "no such column"},
+		{"Musora unreachable", func(w *Worker, store *fakeWorkerStore) {
 			w.Resolver = fakeResolver{errs: map[int]error{100: errors.New("GET https://musora.example/api: 500")}}
-		}, msgNotResolved, "musora.example"},
+		}, failMusora, "musora.example"},
+		{"no match", func(w *Worker, store *fakeWorkerStore) {
+			w.Resolver = fakeResolver{}
+		}, failure{lesson: msgNotResolved, job: msgNotResolved}, "nil"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -165,8 +209,11 @@ func TestWorkerRecordsSentencesNotErrors(t *testing.T) {
 			if _, err := w.RunOnce(context.Background(), 0); err != nil {
 				t.Fatalf("RunOnce: %v", err)
 			}
-			if got := store.jobs[1].Error.String; got != c.want {
-				t.Errorf("recorded error %q, want %q", got, c.want)
+			if got := store.jobs[1].Error.String; got != c.want.job {
+				t.Errorf("recorded job error %q, want %q", got, c.want.job)
+			}
+			if got := store.lessonErr[100]; got != c.want.lesson {
+				t.Errorf("recorded lesson error %q, want %q", got, c.want.lesson)
 			}
 			for _, e := range sink.snapshot() {
 				if strings.Contains(e.Err, c.secret) {
@@ -178,11 +225,42 @@ func TestWorkerRecordsSentencesNotErrors(t *testing.T) {
 }
 
 // TestWorkerMessagesFitTheDialog checks every sentence the worker shows a user
-// against the copy rules: at most 220 characters, and no raw "could not".
+// against the copy rules: at most 220 characters, no raw "could not", and a
+// "check the log" sentence in the one wording.
 func TestWorkerMessagesFitTheDialog(t *testing.T) {
-	for _, m := range []string{msgDownloadFailed, msgAttemptFailed, msgNotStarted, msgNotResolved, msgStopped, msgRequeued, msgShutdown} {
+	all := []string{msgAttemptFailed, msgNotResolved, msgStopped, msgRequeued, msgShutdown, msgCanceled}
+	for _, f := range failures {
+		all = append(all, f.lesson, f.job)
+	}
+	for _, m := range all {
 		if len(m) > 220 || strings.Contains(m, "could not") {
 			t.Errorf("%q: %d characters; want at most 220, in the UI's voice (couldn't)", m, len(m))
 		}
+		if strings.Contains(m, "server log") && !strings.Contains(m, "Check the server log, fix the problem, then ") {
+			t.Errorf("%q: want the one \"check the log\" wording", m)
+		}
+	}
+}
+
+// failures are every failure the worker records.
+var failures = []failure{failDownload, failNotStarted, failMusora}
+
+// TestWorkerSentencesNameTheButtonsWhereTheyAreShown (round-4 item 7) proves
+// every sentence the worker stores is true where it is shown: a failure's
+// lesson sentence (under the lesson, whose menu offers Download) names
+// Download and never Retry, its job sentence (in the Queue, beside Retry)
+// names Retry and never Download, and a sentence stored in both places
+// (SkipDownload's, and the one a stopped download leaves) names neither.
+func TestWorkerSentencesNameTheButtonsWhereTheyAreShown(t *testing.T) {
+	for _, f := range failures {
+		if !strings.HasSuffix(f.lesson, "then Download again.") || strings.Contains(f.lesson, "Retry") {
+			t.Errorf("lesson sentence %q: want it to end by naming Download, and never Retry", f.lesson)
+		}
+		if !strings.HasSuffix(f.job, "then Retry.") || strings.Contains(f.job, "Download") {
+			t.Errorf("job sentence %q: want it to end by naming Retry, and never Download", f.job)
+		}
+	}
+	if strings.Contains(msgNotResolved, "Download") || strings.Contains(msgNotResolved, "Retry") {
+		t.Errorf("%q is stored on the lesson and on its job alike: want it to name no button", msgNotResolved)
 	}
 }

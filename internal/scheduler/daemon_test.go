@@ -112,7 +112,7 @@ func (s *fakeDaemonStore) FinishDownload(ctx context.Context, jobID int64, id in
 	s.record("job-done")
 	return nil
 }
-func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, m string) error {
+func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, lm, jm string) error {
 	return nil
 }
 func (s *fakeDaemonStore) SkipDownload(ctx context.Context, jobID int64, id int, r string) error {

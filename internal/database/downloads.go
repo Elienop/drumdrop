@@ -281,34 +281,38 @@ func (s *Store) FinishDownload(ctx context.Context, jobID int64, id int, rec Dow
 	})
 }
 
-// FailDownload records a download that failed every attempt: the lesson
-// becomes 'failed' with msg, and the job 'failed' with msg unless it was
-// canceled meanwhile, in one transaction. It lands only while the job and
-// lesson still exist (ErrDownloadAbandoned otherwise).
-func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, msg string) error {
-	return s.finishWith(ctx, jobID, id, StatusFailed, msg, JobFailed)
+// FailDownload records a download that failed: the lesson becomes 'failed'
+// with lessonMsg, and the job 'failed' with jobMsg unless it was canceled
+// meanwhile, in one transaction. It lands only while the job and lesson still
+// exist (ErrDownloadAbandoned otherwise). The two are shown in different
+// places, each beside its own button: the lesson's error under the lesson,
+// whose menu offers Download, and the job's in the Queue, beside Retry. So a
+// sentence that names what to press next needs one version for each.
+func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
+	return s.finishWith(ctx, jobID, id, StatusFailed, lessonMsg, jobMsg, JobFailed)
 }
 
-// SkipDownload records a lesson that could not be resolved (gated or missing):
-// the lesson becomes 'skipped' with reason, and the job 'failed' with reason
-// unless it was canceled meanwhile, in one transaction, only while both still
-// exist (ErrDownloadAbandoned otherwise).
+// SkipDownload records a lesson Musora answered with no match (gated or
+// missing): the lesson becomes 'skipped' with reason, and the job 'failed'
+// with reason unless it was canceled meanwhile, in one transaction, only while
+// both still exist (ErrDownloadAbandoned otherwise). reason is shown both
+// under the lesson and in the Queue, so it must name no button.
 func (s *Store) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
-	return s.finishWith(ctx, jobID, id, StatusSkipped, reason, JobFailed)
+	return s.finishWith(ctx, jobID, id, StatusSkipped, reason, reason, JobFailed)
 }
 
 // finishWith is the shared body of FailDownload and SkipDownload.
-func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonStatus, msg, jobStatus string) error {
+func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonStatus, lessonMsg, jobMsg, jobStatus string) error {
 	return s.withLiveJob(ctx, jobID, id, runningOrCanceled, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE lessons SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE railcontent_id = ?`,
-			lessonStatus, msg, id,
+			lessonStatus, lessonMsg, id,
 		); err != nil {
 			return fmt.Errorf("mark lesson %d %s: %w", id, lessonStatus, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE jobs SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
-			jobStatus, msg, jobID, JobRunning,
+			jobStatus, jobMsg, jobID, JobRunning,
 		); err != nil {
 			return fmt.Errorf("mark job %d %s: %w", jobID, jobStatus, err)
 		}
@@ -316,14 +320,22 @@ func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonStatu
 	})
 }
 
+// stoppedNote is the error a download that ended without recording anything
+// leaves on a lesson that records no files (see endDownloadSQL). It is shown
+// under the lesson, whose menu offers Download, and nothing reads it: it is a
+// sentence for the user, not a marker. Migration 005 gave the rows an older
+// version left with the bare word 'canceled' this sentence.
+const stoppedNote = "The download stopped before it finished. Download again to get this lesson."
+
 // endDownloadSQL is what a download that ended without recording anything
-// leaves on its lesson (a cancel, or a delete that removed its job): a lesson
-// that still records files from an earlier download reads 'downloaded' (its
-// files are there, and a 'skipped' lesson is never downloaded again), any
-// other 'skipped' with error 'canceled'. Its one argument is the lesson id.
+// leaves on its lesson (a cancel, a shutdown, or a delete, skip or follow
+// removal that removed its job): a lesson that still records files from an
+// earlier download reads 'downloaded' (its files are there, and a 'skipped'
+// lesson is never downloaded again), any other 'skipped' with stoppedNote.
+// Its arguments are stoppedNote and the lesson id.
 const endDownloadSQL = `UPDATE lessons
 	    SET status = CASE WHEN ` + hasFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + StatusSkipped + `' END,
-	        error = CASE WHEN ` + hasFilesSQL + ` THEN NULL ELSE 'canceled' END,
+	        error = CASE WHEN ` + hasFilesSQL + ` THEN NULL ELSE ? END,
 	        updated_at = CURRENT_TIMESTAMP
 	  WHERE railcontent_id = ?`
 
@@ -333,7 +345,7 @@ const endDownloadSQL = `UPDATE lessons
 // and lesson still exist (ErrDownloadAbandoned otherwise).
 func (s *Store) CancelDownload(ctx context.Context, jobID int64, id int) error {
 	return s.withLiveJob(ctx, jobID, id, runningOrCanceled, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, endDownloadSQL, id); err != nil {
+		if _, err := tx.ExecContext(ctx, endDownloadSQL, stoppedNote, id); err != nil {
 			return fmt.Errorf("mark lesson %d canceled: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -615,7 +627,7 @@ func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, intent, where string, a
 		return nil, fmt.Errorf("delete active jobs: %w", err)
 	}
 	for _, rcID := range lessons {
-		if _, err := tx.ExecContext(ctx, endDownloadSQL+` AND status = '`+StatusDownloading+`'`, rcID); err != nil {
+		if _, err := tx.ExecContext(ctx, endDownloadSQL+` AND status = '`+StatusDownloading+`'`, stoppedNote, rcID); err != nil {
 			return nil, fmt.Errorf("end the download of lesson %d: %w", rcID, err)
 		}
 	}

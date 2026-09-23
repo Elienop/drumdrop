@@ -202,7 +202,7 @@ func recordDownloaded(t *testing.T, s *Store, id int, rec DownloadRecord) {
 // a claimed job, then FailDownload.
 func recordFailed(t *testing.T, s *Store, id int, msg string) {
 	t.Helper()
-	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg); err != nil {
+	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg, msg); err != nil {
 		t.Fatalf("FailDownload %d: %v", id, err)
 	}
 }
@@ -215,7 +215,7 @@ func guardedWrites(ctx context.Context) map[string]func(s *Store, jobID int64, i
 		"FinishDownload": func(s *Store, j int64, id int) error {
 			return s.FinishDownload(ctx, j, id, DownloadRecord{OutputDir: "/x", LibraryEntries: []string{"S/Season 01/y"}})
 		},
-		"FailDownload":   func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom") },
+		"FailDownload":   func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom", "boom") },
 		"SkipDownload":   func(s *Store, j int64, id int) error { return s.SkipDownload(ctx, j, id, "gated") },
 		"CancelDownload": func(s *Store, j int64, id int) error { return s.CancelDownload(ctx, j, id) },
 	}
@@ -355,9 +355,9 @@ func TestGuardedFailSkipCancelWrites(t *testing.T) {
 		jobStatus  string
 		jobErrText string
 	}{
-		{"fail", false, func(s *Store, j int64) error { return s.FailDownload(ctx, j, 1, "boom") }, StatusFailed, "boom", JobFailed, "boom"},
+		{"fail", false, func(s *Store, j int64) error { return s.FailDownload(ctx, j, 1, "press Download", "press Retry") }, StatusFailed, "press Download", JobFailed, "press Retry"},
 		{"skip", false, func(s *Store, j int64) error { return s.SkipDownload(ctx, j, 1, "gated") }, StatusSkipped, "gated", JobFailed, "gated"},
-		{"cancel", false, func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusSkipped, "canceled", JobCanceled, ""},
+		{"cancel", false, func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusSkipped, stoppedNote, JobCanceled, ""},
 		{"cancel with files", true, func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusDownloaded, "", JobCanceled, ""},
 	}
 	for _, c := range cases {
@@ -411,8 +411,8 @@ func TestBeginLessonDeleteRemovesItsJobsAndBlocksNewOnes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginLessonDelete: %v", err)
 	}
-	if l.RailcontentID != 1 || !l.Deleting || l.Status != StatusSkipped || l.Error.String != "canceled" {
-		t.Errorf("returned lesson = %+v, want lesson 1, deleting, its download ended (skipped/canceled: no files)", l)
+	if l.RailcontentID != 1 || !l.Deleting || l.Status != StatusSkipped || l.Error.String != stoppedNote {
+		t.Errorf("returned lesson = %+v, want lesson 1, deleting, its download ended (skipped with the stopped note: no files)", l)
 	}
 	sort.Slice(kill, func(i, j int) bool { return kill[i] < kill[j] })
 	if !reflect.DeepEqual(kill, []int64{canceled, running}) {

@@ -292,15 +292,24 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		}
 	}
 
+	// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
+	// landing mid-resolve reaches either branch below with ctx already
+	// cancelled; both finalize via WithoutCancel (same reasoning as the cancel
+	// branch) so the lesson is not stranded in its prior status with the job
+	// stuck 'running'.
 	lesson, err := w.Resolver.Resolve(id, w.PermIDs)
-	if err != nil || lesson == nil {
-		reason := "could not resolve (gated or missing)"
-		if err != nil {
-			reason = err.Error()
-		}
-		// The reason goes to the log; the lesson and the event get a sentence
-		// written for the user (they reach every client).
-		fmt.Fprintf(w.log(), "  ↳ skipping %d: %s\n", id, reason)
+	if err != nil {
+		// Musora didn't answer, or its answer couldn't be read (hard rule 10:
+		// a shape mismatch must show as a failure). Nothing says the lesson is
+		// gone, so it is not skipped: a failed attempt, which later cycles
+		// retry like any failure.
+		w.failBeforeDownload(ctx, job, "", fmt.Errorf("asking Musora for the lesson: %w", err), failMusora)
+		return
+	}
+	if lesson == nil {
+		// Musora answered with no match: locked for the owner's account, or
+		// removed. The log and the lesson say so; the lesson is skipped.
+		fmt.Fprintf(w.log(), "  ↳ skipping %d: Musora returned no lesson (locked or removed)\n", id)
 		w.progress().Emit(ProgressEvent{
 			Kind:          "lesson_skipped",
 			JobID:         job.ID,
@@ -309,12 +318,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			Err:           msgNotResolved,
 			Time:          time.Now(),
 		})
-		// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
-		// landing mid-resolve reaches here with ctx already cancelled. Finalize via
-		// WithoutCancel (same reasoning as the cancel branch below) so the lesson is
-		// not stranded in its prior status with the job stuck 'running'.
-		finishCtx := context.WithoutCancel(ctx)
-		w.logAbandoned(id, w.Store.SkipDownload(finishCtx, job.ID, id, msgNotResolved))
+		w.logAbandoned(id, w.Store.SkipDownload(context.WithoutCancel(ctx), job.ID, id, msgNotResolved))
 		return
 	}
 
@@ -331,12 +335,12 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// without downloading, and the next cycle tries again.
 	prev, err := w.Store.GetLesson(ctx, id)
 	if err != nil {
-		w.failBeforeDownload(ctx, job, lesson, fmt.Errorf("the lesson's record could not be read: %w", err))
+		w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the lesson's record could not be read: %w", err), failNotStarted)
 		return
 	}
 	// What a download needs to be recorded is checked before it costs one.
 	if err := w.checkBeforeDownload(ctx); err != nil {
-		w.failBeforeDownload(ctx, job, lesson, err)
+		w.failBeforeDownload(ctx, job, lesson.Title, err, failNotStarted)
 		return
 	}
 	index := 1
@@ -458,7 +462,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// keeping all terminal writes uncancellable makes "shutdown never strands a
 	// job" a single, obvious invariant.
 	finishCtx := context.WithoutCancel(ctx)
-	switch ferr := w.Store.FailDownload(finishCtx, job.ID, id, msgDownloadFailed); {
+	switch ferr := w.Store.FailDownload(finishCtx, job.ID, id, failDownload.lesson, failDownload.job); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
 		// A delete or a skip removed the job while it failed: what it wrote goes
 		// as the stopper wants, the same as when it stops mid-download.
@@ -474,11 +478,14 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	}
 }
 
-// failBeforeDownload fails a job whose precondition can not pass, without
-// downloading anything: its reason is logged, reported as a failed attempt,
-// and the lesson is marked failed (the next cycle tries again). The event and
-// the lesson carry a sentence written for the user, not the reason.
-func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, reason error) {
+// failBeforeDownload fails a job that can not start its download (Musora
+// couldn't be asked for the lesson, or a precondition can not pass), without
+// downloading anything: its reason is logged, reported as a failed attempt
+// (the job's one terminal event), and the lesson and job are marked failed
+// with f (the next cycle tries again). The event and the records carry f's
+// sentences, written for the user, not the reason. title is the lesson's, or
+// "" when it is not known.
+func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title string, reason error, f failure) {
 	id := job.RailcontentID
 	fmt.Fprintf(w.log(), "  ✖ %d not downloaded: %v\n", id, reason)
 	w.progress().Emit(ProgressEvent{
@@ -486,13 +493,13 @@ func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, lesso
 		JobID:         job.ID,
 		FollowID:      job.FollowID.Int64,
 		RailcontentID: id,
-		Title:         lesson.Title,
+		Title:         title,
 		Attempt:       1,
 		MaxAttempts:   w.Cfg.MaxAttempts,
-		Err:           msgNotStarted,
+		Err:           f.lesson,
 		Time:          time.Now(),
 	})
-	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, msgNotStarted))
+	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.job))
 }
 
 // ended reports the end of a job that stopped without downloading, failing or
@@ -562,7 +569,7 @@ func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *m
 		FollowID:      job.FollowID.Int64,
 		RailcontentID: id,
 		Title:         lesson.Title,
-		Err:           "canceled",
+		Err:           msgCanceled,
 		Time:          time.Now(),
 	})
 	finishCtx := context.WithoutCancel(ctx)

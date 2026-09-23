@@ -107,8 +107,8 @@ func TestRunMigrationsIdempotent(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	if count != 4 {
-		t.Errorf("schema_migrations has %d rows, want 4", count)
+	if count != 5 {
+		t.Errorf("schema_migrations has %d rows, want 5", count)
 	}
 
 	// Versions are recorded in ascending filename order — the application order
@@ -129,7 +129,7 @@ func TestRunMigrationsIdempotent(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate versions: %v", err)
 	}
-	want := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql", "003_lessons_position.sql", "004_lessons_library_entries.sql"}
+	want := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql", "003_lessons_position.sql", "004_lessons_library_entries.sql", "005_lessons_canceled_note.sql"}
 	if len(versions) != len(want) {
 		t.Fatalf("recorded versions = %v, want %v", versions, want)
 	}
@@ -225,5 +225,50 @@ func TestFollowsPartialUnique(t *testing.T) {
 		"INSERT INTO follows(kind, slug) VALUES('instructor', 'mike-johnston')",
 	); err != nil {
 		t.Fatalf("instructor row insert (should not collide with node): %v", err)
+	}
+}
+
+// TestMigrationGivesOldCanceledNotesASentence proves migration 005 rewrites
+// the bare 'canceled' an older version left on a skipped lesson to the
+// sentence a stopped download leaves now (stoppedNote), and touches nothing
+// else: another skip reason, or the word on a lesson that is not skipped.
+func TestMigrationGivesOldCanceledNotesASentence(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := ensureMigrationsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	old := []string{"001_initial_schema.sql", "002_lessons_follow_id.sql", "003_lessons_position.sql", "004_lessons_library_entries.sql"}
+	if err := applyPendingMigrations(db, old); err != nil {
+		t.Fatalf("apply the migrations before 005: %v", err)
+	}
+	rows := []struct {
+		id            int
+		status, error string
+		want          string
+	}{
+		{1, StatusSkipped, "canceled", stoppedNote},
+		{2, StatusSkipped, "not wanted", "not wanted"},
+		{3, StatusFailed, "canceled", "canceled"},
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(`INSERT INTO lessons(railcontent_id, status, error) VALUES(?, ?, ?)`, r.id, r.status, r.error); err != nil {
+			t.Fatalf("seed lesson %d: %v", r.id, err)
+		}
+	}
+	if err := RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	for _, r := range rows {
+		var got string
+		if err := db.QueryRow(`SELECT error FROM lessons WHERE railcontent_id = ?`, r.id).Scan(&got); err != nil {
+			t.Fatalf("read lesson %d: %v", r.id, err)
+		}
+		if got != r.want {
+			t.Errorf("lesson %d (%s, %q): error = %q, want %q", r.id, r.status, r.error, got, r.want)
+		}
 	}
 }
