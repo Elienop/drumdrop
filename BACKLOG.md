@@ -26,9 +26,77 @@ the code has not changed since) with the command in its Evidence line. Sources: 
 2026-09-23 audit, the lesson tree (`musora-downloader-project.md` and its siblings), the old
 standalone vault's verification findings, and a read-only SonarQube check. The same day's
 review corrected D7, D9, D22 and D29, extended D45, shipped D24, and added D51–D54, each
-checked against the same code._
+checked against the same code. The final review sharpened D7, D52 and D54 and moved D51 and
+D52 into *Next up*._
 
 ## Next up
+
+*Order:* D51 and D52 lead because they leave the owner's files wrong on disk. This order is
+the 2026-09-23 onboarding session's proposal, not an owner ruling; the owner may reorder.
+
+- **D51 · Deleting a song in the plex-tv layout leaves most of its files behind.**
+  - *What:* in the plex-tv layout, delete removes the files in the season folder whose name
+    is the recorded video's name (minus `.mp4`) followed by `.` or `-`
+    (`removeLessonFilesPlexTV` in `internal/server/lessonfiles.go`). A song records its
+    `[Drumless]` video, because it sorts before `[Original]`, so only
+    `<episode> [Drumless].mp4` matches. The `[Original]` video, the `.nfo`, the poster and the
+    song's subfolders all stay. Delete also skips folders entirely, so any plex-tv lesson with
+    `resources/` or `play-along/` files (moved into the season folder as
+    `<episode> resources` and so on since #18) keeps those folders after a delete, songs and
+    ordinary lessons alike.
+  - *Why:* drumdrop records the lesson as deleted while most of it is still on disk, using
+    space and showing in Plex (now with only its Original version). #18 (`11d1fb4`) taught the
+    move about version files and subfolders. The delete was last changed in #13 and never
+    caught up. No test covers a song delete or a subfolder.
+  - *What the fix must guarantee:* a delete removes everything the move put in the season
+    folder for that episode (every version, sidecar and subfolder) and nothing that belongs to
+    a sibling episode. Episode 5 must still never match episode 50.
+  - *Evidence:* `grep -n 'IsDir\|TrimSuffix' internal/server/lessonfiles.go` ·
+    `grep -n 'Drumless\|Original\|resources' internal/server/lessonfiles_test.go` (no match) ·
+    `git log --format='%h %s' -- internal/server/lessonfiles.go` (last change: #13)
+  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 1). Reproduced on 2026-09-23 by
+    running the function, copied unchanged, against a song-shaped folder in a scratch
+    directory.
+
+- **D52 · A library move that fails part-way leaves an untracked copy.**
+  - *What:* this only happens on the copy fallback. That fallback runs when downloads and
+    library are on different filesystems as drumdrop sees them, so the move has to copy and
+    then delete instead of renaming. Nothing on that path is undone when a step fails:
+    - *Copy fails part-way, default layout* (`moveToLibrary`; a full disk, a permission
+      error): a partial lesson folder stays in the library. The whole lesson also stays in
+      downloads and is recorded there, so nothing tracks the partial copy until a
+      re-download replaces it.
+    - *Copy fails part-way, plex-tv* (`moveToLibraryPlexTV`, which moves one file at a
+      time): the files already moved stay in the season folder and the rest stay in
+      scratch, so the lesson is split in two. The worker records the scratch folder, which
+      may no longer hold the video, so the lesson is recorded with no video path, and a
+      later delete does nothing.
+    - *Copy done, source not removed* (a file in downloads that drumdrop can't delete):
+      `moveToLibrary` returns the library folder *and* an error, and the worker keeps the
+      new folder only when there is no error, so it records the downloads folder. A
+      complete copy sits in the library that nothing tracks: Plex shows it, and deleting
+      the lesson never reaches it. plex-tv has the same gap per file: that file ends up in
+      both places, the move stops there and returns no paths, and the lesson is split as
+      above.
+  - *Why:* Plex can show a half-copied lesson, or a complete one drumdrop doesn't track, and
+    the leftovers take space that a delete doesn't reclaim. The worker's comment "a non-empty
+    seasonDir means every file was placed" is true; the case nothing handles is the empty one.
+  - *What the fix must guarantee:* after a failed move, every file of the lesson sits in one
+    place, and that place is the one drumdrop records. A fix that only rolls back a
+    half-finished copy leaves the *copy done* case broken.
+  - *Until then:* the single-parent bind mount (README, *Plex library*) keeps the move a plain
+    rename, which never takes the copy path.
+  - *Evidence:* the `copyTree` and `copyFile` fallbacks in `internal/scheduler/library.go`
+    return on error without removing what they already wrote ·
+    `grep -n 'remove source after copy' internal/scheduler/library.go` (the errors returned
+    after a complete copy) · `grep -n 'moveToLibrary(' internal/scheduler/worker.go` (the
+    default-layout call, which drops the returned folder on any error) ·
+    `grep -n 'seasonDir != ""\|if !recorded' internal/scheduler/worker.go` (what the worker
+    records after a move)
+  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 2). Reproduced on 2026-09-23 with
+    the functions copied into a scratch program, the rename forced to fail and one file made
+    unreadable; the *copy done* case the same way, with a downloads folder whose files can't
+    be deleted. No package test covers either.
 
 - **D1 · Build with a patched Go toolchain.**
   - *What:* `go.mod` pins `go 1.26.3`, and CI and the release binaries build on exactly that
@@ -90,62 +158,7 @@ checked against the same code._
 
 ## Open bugs & hardening
 
-D51, D52 and D54 come first because they touch the owner's files or the API key. D53 waits on
-an owner decision.
-
-- **D51 · Deleting a song in the plex-tv layout leaves most of its files behind.**
-  - *Priority:* high. Files the owner asked to delete stay on disk, and Plex keeps listing
-    the episode.
-  - *What:* in the plex-tv layout, delete removes the files in the season folder whose name
-    is the recorded video's name (minus `.mp4`) followed by `.` or `-`
-    (`removeLessonFilesPlexTV` in `internal/server/lessonfiles.go`). A song records its
-    `[Drumless]` video, because it sorts before `[Original]`, so only
-    `<episode> [Drumless].mp4` matches. The `[Original]` video, the `.nfo`, the poster and the
-    song's subfolders all stay. Delete also skips folders entirely, so any plex-tv lesson with
-    `resources/` or `play-along/` files (moved into the season folder as
-    `<episode> resources` and so on since #18) keeps those folders after a delete, songs and
-    ordinary lessons alike.
-  - *Why:* drumdrop records the lesson as deleted while most of it is still on disk, using
-    space and showing in Plex (now with only its Original version). #18 (`11d1fb4`) taught the
-    move about version files and subfolders. The delete was last changed in #13 and never
-    caught up. No test covers a song delete or a subfolder.
-  - *What the fix must guarantee:* a delete removes everything the move put in the season
-    folder for that episode (every version, sidecar and subfolder) and nothing that belongs to
-    a sibling episode. Episode 5 must still never match episode 50.
-  - *Evidence:* `grep -n 'IsDir\|TrimSuffix' internal/server/lessonfiles.go` ·
-    `grep -n 'Drumless\|Original\|resources' internal/server/lessonfiles_test.go` (no match) ·
-    `git log --format='%h %s' -- internal/server/lessonfiles.go` (last change: #13)
-  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 1). Reproduced on 2026-09-23 by
-    running the function, copied unchanged, against a song-shaped folder in a scratch
-    directory.
-
-- **D52 · A library move that fails part-way leaves an untracked partial copy.**
-  - *Priority:* high. It leaves files that drumdrop doesn't know about and can't delete.
-  - *What:* this only happens on the copy fallback. That fallback runs when downloads and
-    library are on different filesystems as drumdrop sees them, so the move has to copy and
-    then delete instead of renaming. If a copy fails part-way (a full disk, a permission
-    error), the files already written are not undone:
-    - *Default layout* (`moveToLibrary`): a partial lesson folder stays in the library. The
-      whole lesson also stays in downloads and is recorded there, so nothing tracks the
-      partial copy until a re-download replaces it.
-    - *plex-tv* (`moveToLibraryPlexTV`, which moves one file at a time): the files already
-      moved stay in the season folder and the rest stay in scratch, so the lesson is split in
-      two. The worker records the scratch folder, which may no longer hold the video, so the
-      lesson is recorded with no video path, and a later delete does nothing.
-  - *Why:* Plex can show a half-copied lesson, and the leftovers take space that a delete
-    doesn't reclaim. The worker's comment "a non-empty seasonDir means every file was placed" is
-    true; the case nothing handles is the empty one.
-  - *What the fix must guarantee:* after a failed move, every file of the lesson sits in one
-    place, and that place is the one drumdrop records.
-  - *Until then:* the single-parent bind mount (README, *Plex library*) keeps the move a plain
-    rename, which never takes the copy path.
-  - *Evidence:* the `copyTree` and `copyFile` fallbacks in `internal/scheduler/library.go`
-    return on error without removing what they already wrote ·
-    `grep -n 'seasonDir != ""\|if !recorded' internal/scheduler/worker.go` (what the worker
-    records after a move)
-  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 2). Reproduced on 2026-09-23 with
-    the functions copied into a scratch program, the rename forced to fail and one file made
-    unreadable. No package test covers it.
+D53 waits on an owner decision.
 
 - **D54 · Every API route accepts the token in the URL, not only the live-progress stream.**
   - *What:* `requestToken` in `internal/server/auth.go` reads the `Authorization: Bearer`
@@ -159,7 +172,13 @@ an owner decision.
   - *Why:* a URL gets written down in places a header doesn't: a reverse proxy's access log,
     browser history, shell history, a copied link. The token is the one key to the whole API.
     Allowing it in the URL for the one read-only stream that needs it is a narrow, known
-    trade-off; allowing it everywhere widens the ways it can leak for no benefit.
+    trade-off; allowing it everywhere widens the ways it can leak for no benefit. The fix
+    below does not take the stream's own URL out of proxy logs: `sse.tsx` still sends
+    `?access_token` on `/api/events`, the only place drumdrop's own code puts the token in a
+    URL. What the fix buys is defence in depth: no other route accepts a URL token, so
+    scripts and copied links can't come to rely on it. Closing the stream's residual would
+    need the stream to stop carrying the long-lived token (for example a short-lived,
+    single-use stream ticket); whether that gets its own entry is the owner's call.
   - *Fix:* honour the URL token only on `GET /api/events`. Change the test so it proves other
     routes reject a URL token, and that the stream still accepts it.
   - *Evidence:* `grep -n access_token internal/server/auth.go internal/server/auth_test.go web/src/lib/sse.tsx`
@@ -189,11 +208,13 @@ an owner decision.
 - **D7 · `sync --dry-run` ignores `--limit`.**
   - *What:* in `runSync`, the dry-run branch calls `PlanDryRun`, which takes no limit, and
     returns before the limited path.
-  - *Why:* a dry run is supposed to preview the real run. It prints a single count
-    (`[dry-run] N new lesson(s) would be queued`), not a list, and with `--limit 5` it reports
-    the uncapped count instead of the 5 the real run would queue. Low impact.
+  - *Why:* a dry run is supposed to preview the real run. It prints counts, one line per
+    follow plus a total (`[dry-run] N new lesson(s) would be queued`), not a list of lessons,
+    and with `--limit 5` every one of those counts is uncapped instead of reflecting the 5 the
+    real run would queue. Low impact.
   - *Evidence:* `grep -n 'dryRun\|PlanDryRun' cmd/drumdrop/follow.go` ·
-    `grep -n 'func (p \*Planner) PlanDryRun' internal/scheduler/planner.go`
+    `grep -n 'func (p \*Planner) PlanDryRun' internal/scheduler/planner.go` ·
+    `grep -n 'would be queued' internal/scheduler/planner.go cmd/drumdrop/follow.go`
   - *Detail:* `drumdrop-sync-kick-channel.md`, `musora-downloader-project.md`.
 
 - **D8 · The `?status` / `?state` list filters accept any value.**
