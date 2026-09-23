@@ -627,17 +627,17 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
 
 ## Recently shipped
 
-- **D49 · Board and repo hygiene.** The PR from branch `chore/vault-onboarding` (its number
-  isn't known yet) adds this BACKLOG.md. It gitignores `.claude/`, which holds the
-  CLAUDE.md symlink into the owner's vault. It also tracks `sonar-project.properties` with its
+- **D49 · Board and repo hygiene.** PR #20 (branch `chore/vault-onboarding`) adds this
+  BACKLOG.md. It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's
+  vault, and `.mcp.json` (per-machine Claude Code config). It also tracks `sonar-project.properties` with its
   configuration unchanged and a written reason for each exclusion.
-- **D50 · README corrected.** Also in the PR from branch `chore/vault-onboarding`. The
+- **D50 · README corrected.** Also in PR #20. The
   README now says the image is linux/amd64 only, and the Status section no longer calls the
   shipped web UI, queue and scheduler a roadmap. It now covers songs (soundslice → YouTube)
   and their deno and current-yt-dlp requirement, and documents `DRUMDROP_HOST_DOWNLOADS_DIR`.
   The Plex agent advice now matches the owner's live test, in `docker-compose.yml` as well.
-- **D24 · `docker-compose.dev.yml` repeated the old Plex advice.** Also in the PR from branch
-  `chore/vault-onboarding`. Its comment said a TV Shows library needs "the Local Media
+- **D24 · `docker-compose.dev.yml` repeated the old Plex advice.** Also in PR #20. Its
+  comment said a TV Shows library needs "the Local Media
   Assets agent", and that episode titles come from the filenames. The owner's live test on
   2026-06-02 found that the `.nfo`-reading agent (XBMCnfoTVImporter) is what makes episode
   titles show up, and the titles come from the `<episodedetails>` nfo. The dev compose file
