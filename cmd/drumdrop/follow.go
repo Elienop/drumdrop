@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,9 +33,11 @@ type followArgs struct {
 func parseFollowArgs(argv []string) (followArgs, error) {
 	fs := flag.NewFlagSet("drumdrop follow", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	brand := fs.String("brand", "drumeo", "musora brand (drumeo|pianote|guitareo|singeo|playbass)")
+	// brand defaults to "" so an instructor follow can tell a --brand given
+	// from none, when a pasted coach-page link names its own.
+	brand := fs.String("brand", "", "musora brand (drumeo|pianote|guitareo|singeo|playbass); default drumeo, or a coach link's")
 	quality := fs.String("quality", "best", "best|2160|1440|1080|720|480")
-	instructor := fs.String("instructor", "", "follow an instructor by slug")
+	instructor := fs.String("instructor", "", "follow an instructor by name, slug or coach-page link")
 
 	positionals, flags := splitArgs(argv)
 	if err := fs.Parse(flags); err != nil {
@@ -48,21 +51,31 @@ func parseFollowArgs(argv []string) (followArgs, error) {
 	}, nil
 }
 
+// instructorInput returns what was typed for an instructor follow, and whether
+// this is one: --instructor wins, else a leading @ on the first positional.
+// A bare "@" is an instructor follow with nothing typed, which the normaliser
+// refuses, rather than a node follow of "@".
+func instructorInput(args followArgs) (string, bool) {
+	if args.instructor != "" {
+		return args.instructor, true
+	}
+	if len(args.positionals) > 0 && strings.HasPrefix(args.positionals[0], "@") {
+		return strings.TrimPrefix(args.positionals[0], "@"), true
+	}
+	return "", false
+}
+
 // cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
-// (leading @slug, or --instructor slug). Both are idempotent: re-following an
+// (leading @, or --instructor). Both are idempotent: re-following an
 // already-followed target reports "already following" rather than erroring.
 func cmdFollow(argv []string) error {
 	args, err := parseFollowArgs(argv)
 	if err != nil {
 		return err
 	}
-	positionals := args.positionals
-
-	// Determine the slug for an instructor follow: --instructor <slug> wins, else
-	// a leading @slug positional.
-	slug := args.instructor
-	if slug == "" && len(positionals) > 0 && strings.HasPrefix(positionals[0], "@") {
-		slug = strings.TrimPrefix(positionals[0], "@")
+	input, isInstructor := instructorInput(args)
+	if !isInstructor && len(args.positionals) == 0 {
+		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
 	}
 
 	store, err := engine.OpenStore()
@@ -72,19 +85,18 @@ func cmdFollow(argv []string) error {
 	defer store.Close()
 	ctx := context.Background()
 
-	if slug != "" {
-		return followInstructor(ctx, store, slug, args.brand, args.quality)
+	if isInstructor {
+		return followInstructor(ctx, store, input, args.brand, args.quality)
 	}
-
-	if len(positionals) == 0 {
-		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
-	}
-	return followNode(ctx, store, positionals[0], args.brand, args.quality)
+	return followNode(ctx, store, args.positionals[0], args.brand, args.quality)
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is
-// acceptable) and records a node follow.
+// acceptable) and records a node follow. An empty brand is the default.
 func followNode(ctx context.Context, store *database.Store, target, brand, quality string) error {
+	if brand == "" {
+		brand = musora.DefaultBrand
+	}
 	id := engine.ExtractID(target)
 	if id == 0 {
 		return fmt.Errorf("could not parse a content id from: %s", target)
@@ -112,9 +124,18 @@ func followNode(ctx context.Context, store *database.Store, target, brand, quali
 	return nil
 }
 
-// followInstructor validates the slug, looks up the instructor's display name,
-// and records an instructor follow.
-func followInstructor(ctx context.Context, store *database.Store, slug, brand, quality string) error {
+// followInstructor normalises what was typed and settles the brand exactly as
+// the web's preview and add do (musora.NormalizeInstructor), looks up the
+// instructor's display name, and records an instructor follow of the
+// normalised slug.
+func followInstructor(ctx context.Context, store *database.Store, input, brand, quality string) error {
+	slug, brand, err := musora.NormalizeInstructor(input, brand)
+	if errors.Is(err, musora.ErrBadSlug) {
+		return fmt.Errorf("follow: enter an instructor's name, like @'Jared Falk', slug, like @jared-falk, or coach-page link: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("follow: %w", err)
+	}
 	id, name, ok, err := musora.ResolveInstructorID(slug)
 	if err != nil {
 		return err

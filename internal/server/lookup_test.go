@@ -64,12 +64,14 @@ func quoteJSON(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
-// TestAMalformedInstructorNameIs400 (security LOW-4) proves a slug of a shape
-// Musora never uses is the user's to fix: preview and add both answer 400
-// saying what a slug looks like, without asking Musora, and without echoing
-// the input. Before, it came back as 502 "Musora couldn't be reached".
+// TestAMalformedInstructorNameIs400 (security LOW-4) proves instructor input
+// nothing can normalise into a slug is the user's to fix: preview and add both
+// answer 400 saying what's accepted, without asking Musora, and without
+// echoing the input. Before, it came back as 502 "Musora couldn't be reached".
+// A name in any case, like "Jared Falk", is normalised since ruling #70
+// (TestInstructorInputIsNormalisedAlike).
 func TestAMalformedInstructorNameIs400(t *testing.T) {
-	for _, slug := range []string{"Jared-Falk", "jared falk", "https://www.drumeo.com/laravel/public/drumeo/coaches/jared-falk", `x'||true||'`, "a\nb", `say "hi"`} {
+	for _, slug := range []string{"https://www.drumeo.com/laravel/public/drumeo/coaches/jared-falk", `x'||true||'`, "a\nb", `say "hi"`} {
 		t.Run(slug, func(t *testing.T) {
 			calls := countSanity(t, `{"result":[{"_id":"abc","name":"Jane","id":7}]}`)
 			rec := previewSlug(t, slug, "")

@@ -15,8 +15,10 @@ import (
 
 // createFollowRequest is the POST /api/follows body. kind selects the follow
 // type; node follows take an id or url (parsed by engine.ExtractID), instructor
-// follows take a slug. brand and quality are optional and default to the CLI's
-// defaults (drumeo / best).
+// follows take a name, slug or coach-page link in slug (normalised by
+// musora.NormalizeInstructor). brand and quality are optional and default to
+// the CLI's defaults (drumeo / best); an instructor link's brand fills an empty
+// brand.
 type createFollowRequest struct {
 	Kind    string `json:"kind"`
 	ID      string `json:"id"`
@@ -107,10 +109,6 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	brand := req.Brand
-	if brand == "" {
-		brand = "drumeo"
-	}
 	quality := req.Quality
 	if quality == "" {
 		quality = "best"
@@ -119,19 +117,24 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, msgBadQuality)
 		return
 	}
+
 	// The brand is stored with the follow and its lessons, and an instructor
 	// follow's every sync queries by it: one Musora doesn't have is refused
-	// here, not left to fail each sync.
-	if err := musora.ValidateBrand(brand); err != nil {
-		writeLookupErr(w, "add follow", err, msgAddUnreachable)
-		return
-	}
-
+	// here, not left to fail each sync. An instructor follow settles its brand
+	// with its input (a pasted link names one), so it's checked there.
 	switch req.Kind {
 	case "node":
+		brand := req.Brand
+		if brand == "" {
+			brand = musora.DefaultBrand
+		}
+		if err := musora.ValidateBrand(brand); err != nil {
+			writeLookupErr(w, "add follow", err, msgAddUnreachable)
+			return
+		}
 		s.createNodeFollow(w, r, req, brand, quality)
 	case "instructor":
-		s.createInstructorFollow(w, r, req, brand, quality)
+		s.createInstructorFollow(w, r, req, quality)
 	default:
 		writeErr(w, http.StatusBadRequest, msgBadKind)
 	}
@@ -164,16 +167,22 @@ func (s *Server) createNodeFollow(w http.ResponseWriter, r *http.Request, req cr
 	s.writeFollowResult(w, f, err)
 }
 
-// createInstructorFollow handles an instructor follow: validate the slug,
-// resolve the instructor's display name, then AddInstructorFollow. Musora not
-// answering is a 502; a slug of a shape Musora never uses, or one it has no
-// instructor for, is a 400.
-func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, brand, quality string) {
+// createInstructorFollow handles an instructor follow: normalise what was typed
+// and settle the brand exactly as the preview does (musora.NormalizeInstructor),
+// resolve the instructor's display name, then AddInstructorFollow with the
+// normalised slug. Musora not answering is a 502; input or a brand that can't
+// be used, or an instructor Musora doesn't have, is a 400.
+func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, quality string) {
 	if req.Slug == "" {
 		writeErr(w, http.StatusBadRequest, msgSlugRequired)
 		return
 	}
-	id, name, ok, err := musora.ResolveInstructorID(req.Slug)
+	slug, brand, err := musora.NormalizeInstructor(req.Slug, req.Brand)
+	if err != nil {
+		writeLookupErr(w, "add follow", err, msgAddUnreachable)
+		return
+	}
+	id, name, ok, err := musora.ResolveInstructorID(slug)
 	if err != nil {
 		writeLookupErr(w, "add follow: look up instructor", err, msgAddUnreachable)
 		return
@@ -183,7 +192,7 @@ func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	f, err := s.store.AddInstructorFollow(r.Context(), req.Slug, name, brand, quality)
+	f, err := s.store.AddInstructorFollow(r.Context(), slug, name, brand, quality)
 	s.writeFollowResult(w, f, err)
 }
 
