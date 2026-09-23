@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -658,26 +659,41 @@ func lessonDir(outDir string, index int, title string) string {
 }
 
 // cleanupPartials removes leftover partial-download artifacts from a lesson's
-// dir, so a killed download leaves no half-written files behind, and none is
-// moved into the library. Only names of the lesson's own base (the folder's
-// name) in the partial shapes go (isPartialName): a finished subtitle ("<base>.fr.vtt") or
-// a title with dots in it is a kept file, never a partial. A missing dir is
+// dir and its subfolders, so a killed download leaves no half-written files
+// behind, and none is moved into the library. In dir itself only names of the
+// lesson's own base (the folder's name) in the partial shapes go
+// (isPartialName): a finished subtitle ("<base>.fr.vtt") or a title with dots
+// in it is a kept file, never a partial. In a subfolder (resources/,
+// play-along/, sheet-music/) only drumdrop's own temporary files go
+// (isTempName): yt-dlp writes only in dir, and a resource keeps the name
+// Musora gave it, so no other shape there is a partial. The walk and every
+// removal go through dir opened as an os.Root, and a symlink is never
+// followed, so nothing outside dir is read or removed. A missing dir is
 // tolerated (nothing to clean); any other read/remove error is ignored:
 // cleanup is best-effort and must not block the cancel path.
 func cleanupPartials(dir string) {
-	entries, err := os.ReadDir(dir)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return // missing dir or unreadable: nothing to clean
 	}
+	defer root.Close()
 	base := filepath.Base(dir)
-	for _, e := range entries {
-		if !e.Type().IsRegular() {
-			continue
+	_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil // an unreadable subfolder is skipped; the rest goes on
 		}
-		if name := e.Name(); isPartialName(name, base) {
-			_ = os.Remove(filepath.Join(dir, name))
+		name := d.Name()
+		if (p == name && isPartialName(name, base)) || (p != name && isTempName(name)) {
+			_ = root.Remove(filepath.FromSlash(p))
 		}
-	}
+		return nil
+	})
+}
+
+// isTempName reports whether name is a file drumdrop writes before it takes
+// its place (musora's writeInRoot, writeScratchNFO), whatever its base.
+func isTempName(name string) bool {
+	return strings.HasSuffix(name, musora.TempSuffix) || strings.HasSuffix(name, episodeTempSuffix)
 }
 
 // isPartialName reports whether name is one of the partial-download artifacts

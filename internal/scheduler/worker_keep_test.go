@@ -154,17 +154,29 @@ func TestWorkerDiscardStillCleansPartialsWhenTheFolderIsRefused(t *testing.T) {
 	}
 }
 
-// TestWorkerMovesNoPartialFileIntoTheLibrary (security Info 2) proves a
-// finished download's scratch folder loses the partial files an earlier run
-// left there (yt-dlp's ffmpeg ".temp.<ext>" output, drumdrop's own temporary
-// nfo files) before the move, in both layouts, so none lands in the library.
+// TestWorkerMovesNoPartialFileIntoTheLibrary (security Info 2, round-4
+// residual) proves a finished download's scratch folder loses the partial
+// files an earlier run left there (yt-dlp's ffmpeg ".temp.<ext>" output,
+// drumdrop's own temporary files, in the folder and in its resources/,
+// play-along/ and sheet-music/ subfolders) before the move, in both layouts,
+// so none lands in the library; and that the finished files beside them do.
 func TestWorkerMovesNoPartialFileIntoTheLibrary(t *testing.T) {
-	leftovers := []string{"05 - Lesson A.temp.mp4", "05 - Lesson A.nfo.drumdrop-part", "05 - Lesson A.nfo.drumdrop-episode"}
+	folders := []string{"resources/", "play-along/", "sheet-music/"}
+	leftovers := []string{
+		"05 - Lesson A.temp.mp4", "05 - Lesson A.nfo.drumdrop-part", "05 - Lesson A.nfo.drumdrop-episode",
+		"resources/Groove Sheet.pdf.drumdrop-part",
+		"play-along/play-along (drums, click).mp3.drumdrop-part",
+		"sheet-music/01 - Groove.png.drumdrop-part",
+	}
+	finished := []string{"resources/Groove Sheet.pdf", "play-along/play-along (drums, click).mp3", "sheet-music/01 - Groove.png"}
 	for _, layout := range []string{"", LayoutPlexTV} {
 		t.Run("layout="+layout, func(t *testing.T) {
 			w, store, dl, lib, _ := plexWorker(t)
 			w.Cfg.Layout = layout
-			dl.afterWrite = func(dir string) { seedSeason(t, dir, leftovers...) }
+			dl.afterWrite = func(dir string) {
+				seedSeason(t, dir, folders...)
+				seedSeason(t, dir, append(append([]string{}, leftovers...), finished...)...)
+			}
 			if _, err := w.RunOnce(context.Background(), 0); err != nil {
 				t.Fatalf("RunOnce: %v", err)
 			}
@@ -172,6 +184,11 @@ func TestWorkerMovesNoPartialFileIntoTheLibrary(t *testing.T) {
 			for _, n := range leftovers {
 				if p := findContent(t, lib, n); p != "" {
 					t.Errorf("the leftover %q was moved into the library at %q", n, p)
+				}
+			}
+			for _, n := range finished {
+				if findContent(t, lib, n) == "" {
+					t.Errorf("the finished %q did not reach the library", n)
 				}
 			}
 		})

@@ -277,6 +277,44 @@ func TestCleanupPartialsRemovesOnlyPartials(t *testing.T) {
 	assertExist(t, true, paths(dir, kept...)...)
 }
 
+// TestCleanupPartialsReachesSubfolders (round-4 residual) proves the cleanup
+// removes drumdrop's own temporary files inside the lesson's subfolders, at
+// any depth, and nothing else there: a finished resource, and a resource
+// whose name only looks like a yt-dlp partial (yt-dlp never writes in a
+// subfolder), stay. A symlinked subfolder is not followed, so a temporary
+// file it leads to outside the lesson stays too.
+func TestCleanupPartialsReachesSubfolders(t *testing.T) {
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "05 - Five")
+	seedSeason(t, dir, "resources/", "play-along/", "sheet-music/", "resources/nested/")
+	partials := []string{
+		"resources/Groove Sheet.pdf" + musora.TempSuffix,
+		"play-along/play-along (drums, click).mp3" + musora.TempSuffix,
+		"sheet-music/01 - Groove.png" + musora.TempSuffix,
+		"resources/nested/notes.txt" + musora.TempSuffix,
+		"resources/05 - Five.nfo" + episodeTempSuffix,
+	}
+	kept := []string{
+		"resources/Groove Sheet.pdf",
+		"resources/05 - Five.mp4.part",
+		"resources/05 - Five.f137.mp4",
+		"resources/notes.part",
+		"play-along/play-along (drums, click).mp3",
+		"sheet-music/01 - Groove.png",
+		"resources/nested/notes.txt",
+	}
+	seedSeason(t, dir, append(append([]string{}, partials...), kept...)...)
+	outside := filepath.Join(tmp, "elsewhere")
+	seedSeason(t, outside, "x.pdf"+musora.TempSuffix)
+	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	cleanupPartials(dir)
+	assertExist(t, false, paths(dir, partials...)...)
+	assertExist(t, true, paths(dir, kept...)...)
+	assertExist(t, true, filepath.Join(outside, "x.pdf"+musora.TempSuffix))
+}
+
 // TestWorkerPlexDiscardLeavesTheSeasonFolderQuietly (code M2, m19) proves a
 // plex-tv download stopped after its move removes only what it placed: the
 // season folder, and an episode in it no row records, stay, and the discard
