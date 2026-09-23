@@ -1222,6 +1222,39 @@ func TestWorkerCancelRunningSkipsAndCancelsJob(t *testing.T) {
 	}
 }
 
+// TestWorkerKillByADeleteDiscardsWhatItWrote proves a download killed by a
+// delete that removes the lesson's files (its job already removed, with that
+// intent) goes as the delete wants: its lesson folder is removed whole, not
+// just its partial files, and no cancel is recorded.
+func TestWorkerKillByADeleteDiscardsWhatItWrote(t *testing.T) {
+	store := newFakeWorkerStore(queuedJob(1, nodeFollow().ID, 100))
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.gone = map[int64]bool{}
+	dl := newBlockingDownloader()
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "Beginner Course", "01 - Lesson A")
+	seedSeason(t, dir, "01 - Lesson A.mp4.part", "sheet.pdf")
+	w := newTestWorker(store, fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = tmp
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = w.RunOnce(context.Background(), 0)
+		close(done)
+	}()
+	<-dl.started
+	store.gone[1] = true // the delete removed the job, then killed the download
+	if !w.CancelRunning(1) {
+		t.Fatal("CancelRunning(1) = false, want true (job is running)")
+	}
+	<-done
+
+	assertExist(t, false, dir)
+	if len(store.markJobCanceled) != 0 || len(store.markDownloaded) != 0 {
+		t.Errorf("recorded cancel %v, download %+v; want nothing recorded", store.markJobCanceled, store.markDownloaded)
+	}
+}
+
 // TestWorkerCancelDuringShutdownFinalizesWithLiveCtx simulates SIGINT/SIGTERM
 // arriving while a download is in flight: cancelling the OUTER ctx (not just the
 // per-job ctx) makes the download return context.Canceled and runs the cancel-

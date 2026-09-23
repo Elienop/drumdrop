@@ -492,6 +492,39 @@ func TestClearStaleDeletes(t *testing.T) {
 	}
 }
 
+// TestShouldSkipEnqueueWhileDeleting proves the planner's own check skips a
+// pending lesson for as long as a delete of it runs, and only then.
+func TestShouldSkipEnqueueWhileDeleting(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	skip := func() bool {
+		t.Helper()
+		ok, err := s.ShouldSkipEnqueue(ctx, 1)
+		if err != nil {
+			t.Fatalf("ShouldSkipEnqueue: %v", err)
+		}
+		return ok
+	}
+	if skip() {
+		t.Fatal("a pending lesson is skipped before any delete")
+	}
+	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
+	}
+	if !skip() {
+		t.Error("a lesson being deleted is not skipped")
+	}
+	if err := s.EndLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("EndLessonDelete: %v", err)
+	}
+	if skip() {
+		t.Error("a lesson is still skipped after its delete ended")
+	}
+}
+
 // TestTombstoneAndKeepCompareEachColumn proves the delete's final write lands
 // only while the lesson still records exactly the files that were read: a
 // change to any ONE of output_dir, video_path or library_entries is caught on
