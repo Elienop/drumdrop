@@ -14,7 +14,8 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page.
+the highest ID on this page: the next new ID is D55 on 2026-09-23 (*moves*; re-check the
+highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
 it was written; re-run its command before you trust it.
@@ -23,7 +24,9 @@ _Last groomed: 2026-09-23, when this board was created during the vault onboardi
 `chore/vault-onboarding`). Every entry was re-checked against the code at `1c2dbda` (v0.7.1;
 the code has not changed since) with the command in its Evidence line. Sources: the
 2026-09-23 audit, the lesson tree (`musora-downloader-project.md` and its siblings), the old
-standalone vault's verification findings, and a read-only SonarQube check._
+standalone vault's verification findings, and a read-only SonarQube check. The same day's
+review corrected D7, D9, D22 and D29, extended D45, shipped D24, and added D51–D54, each
+checked against the same code._
 
 ## Next up
 
@@ -87,6 +90,81 @@ standalone vault's verification findings, and a read-only SonarQube check._
 
 ## Open bugs & hardening
 
+D51, D52 and D54 come first because they touch the owner's files or the API key. D53 waits on
+an owner decision.
+
+- **D51 · Deleting a song in the plex-tv layout leaves most of its files behind.**
+  - *Priority:* high. Files the owner asked to delete stay on disk, and Plex keeps listing
+    the episode.
+  - *What:* in the plex-tv layout, delete removes the files in the season folder whose name
+    is the recorded video's name (minus `.mp4`) followed by `.` or `-`
+    (`removeLessonFilesPlexTV` in `internal/server/lessonfiles.go`). A song records its
+    `[Drumless]` video, because it sorts before `[Original]`, so only
+    `<episode> [Drumless].mp4` matches. The `[Original]` video, the `.nfo`, the poster and the
+    song's subfolders all stay. Delete also skips folders entirely, so any plex-tv lesson with
+    `resources/` or `play-along/` files (moved into the season folder as
+    `<episode> resources` and so on since #18) keeps those folders after a delete, songs and
+    ordinary lessons alike.
+  - *Why:* drumdrop records the lesson as deleted while most of it is still on disk, using
+    space and showing in Plex (now with only its Original version). #18 (`11d1fb4`) taught the
+    move about version files and subfolders. The delete was last changed in #13 and never
+    caught up. No test covers a song delete or a subfolder.
+  - *What the fix must guarantee:* a delete removes everything the move put in the season
+    folder for that episode (every version, sidecar and subfolder) and nothing that belongs to
+    a sibling episode. Episode 5 must still never match episode 50.
+  - *Evidence:* `grep -n 'IsDir\|TrimSuffix' internal/server/lessonfiles.go` ·
+    `grep -n 'Drumless\|Original\|resources' internal/server/lessonfiles_test.go` (no match) ·
+    `git log --format='%h %s' -- internal/server/lessonfiles.go` (last change: #13)
+  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 1). Reproduced on 2026-09-23 by
+    running the function, copied unchanged, against a song-shaped folder in a scratch
+    directory.
+
+- **D52 · A library move that fails part-way leaves an untracked partial copy.**
+  - *Priority:* high. It leaves files that drumdrop doesn't know about and can't delete.
+  - *What:* this only happens on the copy fallback. That fallback runs when downloads and
+    library are on different filesystems as drumdrop sees them, so the move has to copy and
+    then delete instead of renaming. If a copy fails part-way (a full disk, a permission
+    error), the files already written are not undone:
+    - *Default layout* (`moveToLibrary`): a partial lesson folder stays in the library. The
+      whole lesson also stays in downloads and is recorded there, so nothing tracks the
+      partial copy until a re-download replaces it.
+    - *plex-tv* (`moveToLibraryPlexTV`, which moves one file at a time): the files already
+      moved stay in the season folder and the rest stay in scratch, so the lesson is split in
+      two. The worker records the scratch folder, which may no longer hold the video, so the
+      lesson is recorded with no video path, and a later delete does nothing.
+  - *Why:* Plex can show a half-copied lesson, and the leftovers take space that a delete
+    doesn't reclaim. The worker's comment "a non-empty seasonDir means every file was placed" is
+    true; the case nothing handles is the empty one.
+  - *What the fix must guarantee:* after a failed move, every file of the lesson sits in one
+    place, and that place is the one drumdrop records.
+  - *Until then:* the single-parent bind mount (README, *Plex library*) keeps the move a plain
+    rename, which never takes the copy path.
+  - *Evidence:* the `copyTree` and `copyFile` fallbacks in `internal/scheduler/library.go`
+    return on error without removing what they already wrote ·
+    `grep -n 'seasonDir != ""\|if !recorded' internal/scheduler/worker.go` (what the worker
+    records after a move)
+  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 2). Reproduced on 2026-09-23 with
+    the functions copied into a scratch program, the rename forced to fail and one file made
+    unreadable. No package test covers it.
+
+- **D54 · Every API route accepts the token in the URL, not only the live-progress stream.**
+  - *What:* `requestToken` in `internal/server/auth.go` reads the `Authorization: Bearer`
+    header and, when there isn't one, falls back to `?access_token=` in the URL. It does that
+    for every `/api/*` request, including the ones that change or delete data (POST, PATCH,
+    DELETE). Only the live-progress stream, `GET /api/events`, needs the URL form, because
+    the browser's EventSource can't send headers; `web/src/lib/sse.tsx` is the only code that
+    uses it. `internal/server/auth_test.go` locks the broad behaviour in, on
+    `GET /api/follows?access_token=…`. This used to be D9(b), which described it as the
+    stream only and so understated it.
+  - *Why:* a URL gets written down in places a header doesn't: a reverse proxy's access log,
+    browser history, shell history, a copied link. The token is the one key to the whole API.
+    Allowing it in the URL for the one read-only stream that needs it is a narrow, known
+    trade-off; allowing it everywhere widens the ways it can leak for no benefit.
+  - *Fix:* honour the URL token only on `GET /api/events`. Change the test so it proves other
+    routes reject a URL token, and that the stream still accepts it.
+  - *Evidence:* `grep -n access_token internal/server/auth.go internal/server/auth_test.go web/src/lib/sse.tsx`
+  - *Detail:* vault note drumdrop-auth-posture; `drumdrop-http-api-sse-security.md`.
+
 - **D5 · The CORS preflight doesn't allow PATCH.**
   - *What:* when `DRUMDROP_CORS_ORIGIN` is set, the API answers the browser's preflight with
     `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`. But editing a follow's quality
@@ -111,8 +189,9 @@ standalone vault's verification findings, and a read-only SonarQube check._
 - **D7 · `sync --dry-run` ignores `--limit`.**
   - *What:* in `runSync`, the dry-run branch calls `PlanDryRun`, which takes no limit, and
     returns before the limited path.
-  - *Why:* a dry run is supposed to preview the real run. With `--limit 5` it lists every
-    lesson that would be queued, not the five the real run would download. Low impact.
+  - *Why:* a dry run is supposed to preview the real run. It prints a single count
+    (`[dry-run] N new lesson(s) would be queued`), not a list, and with `--limit 5` it reports
+    the uncapped count instead of the 5 the real run would queue. Low impact.
   - *Evidence:* `grep -n 'dryRun\|PlanDryRun' cmd/drumdrop/follow.go` ·
     `grep -n 'func (p \*Planner) PlanDryRun' internal/scheduler/planner.go`
   - *Detail:* `drumdrop-sync-kick-channel.md`, `musora-downloader-project.md`.
@@ -125,17 +204,16 @@ standalone vault's verification findings, and a read-only SonarQube check._
   - *Evidence:* `grep -n 'Get("status")\|Get("state")' internal/server/*.go`
 
 - **D9 · Small API hardening nits.**
-  - *What:* (a) CORS responses carry no `Vary: Origin`. (b) The live-progress stream (SSE)
-    accepts the token in the URL as `?access_token=`, because the browser's EventSource can't
-    send headers, so the token would end up in a reverse proxy's access log if one is ever
-    added. (c) An invalid `?brand=` on the instructor preview comes back as a 502 instead of
-    a 400. (d) The preview treats only the literal `?whole=true` as true. (e) The SQLite
-    connection string would break on a database path that contains `?`.
-  - *Why:* none of these exposes anything today in a single-user, self-hosted tool. A review
-    agent judged them acceptable, but there's no owner ruling, so they stay listed here
-    instead of under accepted residuals. (b) matters most if drumdrop ever sits behind a
-    proxy.
-  - *Evidence:* `grep -rn Vary internal/server` (no match) · `grep -n access_token internal/server/auth.go` ·
+  - *What:* (a) CORS responses carry no `Vary: Origin`. (b) Moved to its own entry, D54: the
+    token in the URL is accepted on every `/api/*` route, not only the live-progress stream,
+    which is a security item rather than a nit. (c) An invalid `?brand=` on the instructor
+    preview comes back as a 502 instead of a 400. (d) The preview treats only the literal
+    `?whole=true` as true. (e) The SQLite connection string would break on a database path
+    that contains `?`.
+  - *Why:* none of the remaining ones exposes anything today in a single-user, self-hosted
+    tool. A review agent judged them acceptable, but there's no owner ruling, so they stay
+    listed here instead of under accepted residuals.
+  - *Evidence:* `grep -rn Vary internal/server` (no match) ·
     `grep -n StatusBadGateway internal/server/preview.go` · `grep -n 'Get("whole")' internal/server/preview.go` ·
     `grep -n 'dsn :=' internal/database/db.go`
   - *Detail:* `drumdrop-http-api-sse-security.md`; agent memory
@@ -208,6 +286,30 @@ standalone vault's verification findings, and a read-only SonarQube check._
     `grep -n HandleFunc internal/server/server.go`
   - *Detail:* `musora-downloader-project.md`.
 
+- **D53 · Without a token on loopback, any web page in the browser can drive the API.**
+  - *What:* with no `DRUMDROP_API_TOKEN`, a server listening on loopback allows every
+    `/api/*` request (`authorized` in `internal/server/auth.go`). That is the local case:
+    `drumdrop serve` or `make dev-api` on a desktop, which listen on `127.0.0.1:8080` by
+    default. Nothing checks the `Origin` or `Host` header, and the handlers decode a JSON body
+    whatever `Content-Type` it arrives with. A browser sends a "simple" cross-site request (a
+    GET, or a POST with a plain-text body) without asking the server first. So any page open
+    in the owner's browser can make drumdrop act, and through DNS rebinding (the page's own
+    hostname re-pointed at 127.0.0.1) it can also read the follow, lesson and job lists.
+    Checked live on a scratch build on 2026-09-23: a cross-origin `text/plain`
+    `POST /api/pause` returned 200 and really paused it, and a foreign `Host` header was
+    accepted. Deletes and edits are safe: DELETE and PATCH need a preflight, which gets a 404.
+  - *Scope:* the TrueNAS container is not affected. It listens on `0.0.0.0`, so it always has
+    a token, and a foreign page can't attach it. Severity: low.
+  - *Decision needed (owner):* (A) always require a token, even on loopback. (B) keep the
+    tokenless loopback mode, but accept only a loopback `Host` (`localhost`, `127.0.0.1`,
+    `[::1]`) and reject a request whose `Origin` isn't drumdrop's own; MusicDrop's host and
+    origin guards are the worked example. (C) accept it as a residual. The note recommends B:
+    it closes both holes and keeps the zero-setup local run. A is just as sound if drumdrop
+    never runs outside Docker.
+  - *Evidence:* `grep -rn 'Header.Get("Origin")\|r\.Host' --include=*.go internal/server` (no
+    match) · `authorized` and `isLoopbackAddr` in `internal/server/auth.go`
+  - *Detail:* vault note drumdrop-auth-posture, §3.
+
 ## Housekeeping & dependencies
 
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
@@ -278,8 +380,11 @@ standalone vault's verification findings, and a read-only SonarQube check._
   - *What:* this checkout has:
     - a stale 16 MB `./drumdrop` binary, built 2026-05-31 with version `dev`, before 11 later
       commits to `cmd/` and `internal/`;
-    - a stale `web/dist` that predates #11's UI, so a bare `go build -tags webui` would embed
-      an outdated UI (`make build-ui` rebuilds it);
+    - a `web/dist` built on 2026-06-01 at 18:50, while #11 was being finished. Its timestamps
+      make it look older than #11, but the bundle already holds #11's UI ("Edit follow", the
+      `PATCH` call in `updateFollow`), and no web change has landed since
+      (`git log ad6afd6..HEAD -- web/` is empty), so it is probably current. Run
+      `make build-ui` to be sure before relying on a bare `go build -tags webui`;
     - empty `downloads/` and `.claude/worktrees/` folders;
     - five `origin/*` remote-tracking refs for branches that are already deleted on GitHub
       (`git fetch --prune` drops them).
@@ -293,18 +398,10 @@ standalone vault's verification findings, and a read-only SonarQube check._
     `SpenDrop`. Cosmetic: renaming changes only the label on the Sonar server, not the key.
   - *Evidence:* `grep -n projectName sonar-project.properties`
 
-- **D24 · `docker-compose.dev.yml` repeats the old Plex advice.**
-  - *What:* its comment still says a TV Shows library needs "the Local Media Assets agent".
-    The owner's live test on 2026-06-02 found that the `.nfo` importer agent
-    (XBMCnfoTVImporter) is what makes episode titles show up. The README and
-    `docker-compose.yml` were corrected on the vault-onboarding branch; this file was
-    outside that change.
-  - *Evidence:* `grep -n 'Local Media Assets' docker-compose.dev.yml`
-  - *Detail:* vault note drumdrop-plex-library; `musora-downloader-project.md` (the v0.5.0 entry).
-
 ## Open questions (owner decisions)
 
-D3's rebuild choice is also waiting on the owner; it is described in that entry.
+Two choices described in their own entries are also waiting on the owner: D3's yt-dlp rebuild,
+and D53's fix for the tokenless loopback mode (options A, B or C).
 
 - **D25 · The stored password: build automatic re-login, or stop storing it?**
   - *Context:* see D4. The original design (2026-05-29) chose "auth via stored email/password
@@ -357,13 +454,33 @@ D3's rebuild choice is also waiting on the owner; it is described in that entry.
   - *Evidence:* `git config --show-origin --get core.hooksPath` · `ls .git/hooks scripts/hooks`
 
 - **D29 · Keep `web/src/components/ui/**` out of SonarQube?**
-  - *What:* the 13 vendored shadcn primitives are excluded from analysis. By SpenDrop's own
-    test the exclusion holds: every file there has exactly one commit, the one that added it,
-    so none carries drumdrop edits. MusicDrop excludes the folder too. SpenDrop analyses its
-    copy because more than half of its primitives had been edited.
+  - *What:* the 13 vendored shadcn primitives are excluded from analysis. SpenDrop's test is
+    that an edited primitive has become our code and should be analysed. SpenDrop analyses
+    its copy for that reason (more than half of its primitives had been edited); MusicDrop
+    excludes its folder. Here, one file is edited: `sonner.tsx`. In PR #6, commit `5f1541c`
+    removed its theme lookup (next-themes) and hardcoded `theme="dark"`, because the app is
+    dark-only (the comment at the top of the file). In their PRs' own commits the other 12
+    were added once and never changed.
+  - *How to check, and how not to:* `git log` on main can't show an edit like that. PRs are
+    squash-merged, so main has one "added" line per file and hides whatever happened on the
+    PR branch. That is how this board and `sonar-project.properties` first said "none has
+    been edited". Check a PR's own commits instead (below), or diff each file against the
+    shadcn registry. The registry diff is the stronger check, because it also catches an edit
+    made before a file's first commit; it hasn't been run.
+  - *Options:* (a) keep excluding the whole folder, accepting that one edited file goes
+    unanalysed. (b) exclude only the 12 unedited files by name and let Sonar analyse
+    `sonner.tsx`. (c) analyse the whole folder, SpenDrop's choice.
+  - *To weigh:* (b) applies SpenDrop's test exactly, but the list of 12 then has to be updated
+    by hand whenever a primitive is edited or added. (c) needs no list, but under decisions #3
+    every finding in vendored code then has to be fixed, not marked.
   - *Why it's the owner's:* what Sonar sees is the owner's call under decisions #3. The reason
-    is now written in `sonar-project.properties`.
-  - *Evidence:* `git log --name-status -- web/src/components/ui` (only `A` lines)
+    and the check are written in `sonar-project.properties`.
+  - *Evidence:* `gh api repos/elienop/drumdrop/pulls/6/commits --jq '.[].sha'`, then
+    `gh api repos/elienop/drumdrop/commits/<sha> --jq '.files[].filename'` for each; the
+    folder came in through #6, #8 and #11 ·
+    `gh api repos/elienop/drumdrop/commits/5f1541c --jq '.files[] | select(.filename|endswith("sonner.tsx")) | .patch'` ·
+    not `git log -- web/src/components/ui` on main, which shows only `A` lines whatever
+    happened on the PR branches
 
 - **D30 · The 5 SonarQube findings in `web/src/test/`: fix them, or exclude the folder?**
   - *What:* `msw.ts` and `setup.ts` are test infrastructure, but Sonar analyses them as source,
@@ -467,7 +584,14 @@ D3's rebuild choice is also waiting on the owner; it is described in that entry.
   configured only by environment variable today.
 - **D45 · Migrate an existing library to the plex-tv layout.** The layout (#13) and the
   `<episodedetails>` NFOs (#14) apply only to new downloads. Files already in the library
-  keep the old folders and `<movie>` NFOs.
+  keep the old folders and `<movie>` NFOs. A migration should also account for a historical
+  gap: from v0.4.0 until v0.7.0, the plex-tv move skipped each lesson's `resources/` and
+  `play-along/` folders and then deleted them along with the scratch folder, so plex-tv
+  lessons downloaded under v0.4.0–v0.6.x reached the library without them. #18 fixed the
+  move. Confirmed in the code at `9528ad9` (#13) and `6f00851` (#14):
+  `git show 6f00851:internal/scheduler/library.go | grep -n 'ignore any nested dir'`. Whether
+  any lesson in the owner's library is affected is unknown; re-downloading a lesson restores
+  its folders.
 - **D46 · `daemon --dry-run`.** Only `sync` has a dry run.
 - **D47 · Read the permission ids from Musora.** Derive them from
   `GET /content/user/permissions` instead of the `DRUMDROP_PERMISSION_IDS` default of `92`.
@@ -482,15 +606,24 @@ D3's rebuild choice is also waiting on the owner; it is described in that entry.
 
 ## Recently shipped
 
-- **D49 · Board and repo hygiene.** This PR (`chore/vault-onboarding`) adds this BACKLOG.md.
-  It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's vault. It also
-  tracks `sonar-project.properties` with its configuration unchanged and a written reason for
-  each exclusion.
-- **D50 · README corrected.** Also in this PR. The README now says the image is linux/amd64
-  only, and the Status section no longer calls the shipped web UI, queue and scheduler a
-  roadmap. It now covers songs (soundslice → YouTube) and their deno and current-yt-dlp
-  requirement, and documents `DRUMDROP_HOST_DOWNLOADS_DIR`. The Plex agent advice now
-  matches the owner's live test, in `docker-compose.yml` as well.
+- **D49 · Board and repo hygiene.** The PR from branch `chore/vault-onboarding` (its number
+  isn't known yet) adds this BACKLOG.md. It gitignores `.claude/`, which holds the
+  CLAUDE.md symlink into the owner's vault. It also tracks `sonar-project.properties` with its
+  configuration unchanged and a written reason for each exclusion.
+- **D50 · README corrected.** Also in the PR from branch `chore/vault-onboarding`. The
+  README now says the image is linux/amd64 only, and the Status section no longer calls the
+  shipped web UI, queue and scheduler a roadmap. It now covers songs (soundslice → YouTube)
+  and their deno and current-yt-dlp requirement, and documents `DRUMDROP_HOST_DOWNLOADS_DIR`.
+  The Plex agent advice now matches the owner's live test, in `docker-compose.yml` as well.
+- **D24 · `docker-compose.dev.yml` repeated the old Plex advice.** Also in the PR from branch
+  `chore/vault-onboarding`. Its comment said a TV Shows library needs "the Local Media
+  Assets agent", and that episode titles come from the filenames. The owner's live test on
+  2026-06-02 found that the `.nfo`-reading agent (XBMCnfoTVImporter) is what makes episode
+  titles show up, and the titles come from the `<episodedetails>` nfo. The dev compose file
+  now carries the same wording as `docker-compose.yml`.
+  *Evidence:* `grep -n 'Local Media Assets' docker-compose.dev.yml` (only the "not enough"
+  line) · *Detail:* vault note drumdrop-plex-library; `musora-downloader-project.md` (the
+  v0.5.0 entry).
 - **Before this board:** releases v0.0.1 (2026-05-31) to v0.7.1 (2026-06-09), PRs #1–#19.
   Re-derive them with `git tag --sort=creatordate` or `gh release list`. The owner's vault
   note drumdrop-log keeps the release history from before the vault. No changelog is copied
