@@ -477,10 +477,3 @@ func containsOp(ops []string, want string) bool {
 	}
 	return false
 }
-
-func firstOp(ops []string) string {
-	if len(ops) == 0 {
-		return "<none>"
-	}
-	return ops[0]
-}

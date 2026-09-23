@@ -207,7 +207,7 @@ func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(t.Context(), l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson must not fail on aux fetch failure: %v", err)
 	}
 
@@ -468,7 +468,7 @@ func TestDownloadLessonLayout(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(t.Context(), l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson: %v", err)
 	}
 
