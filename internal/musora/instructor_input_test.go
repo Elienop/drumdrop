@@ -72,6 +72,8 @@ func TestNormalizeInstructorRefuses(t *testing.T) {
 		"https://app.musora.com/drumeo/coaches/jared%20falk/31880",
 		"https://app.musora.com/drumeo/coaches/jared%27falk/31880",
 		"https://app.musora.com/x/drumeo/coaches/jared-falk/31880",
+		"https://app.musora.com/drumeo/lessons/jared-falk",
+		"https://app.musora.com/drumeo/coaches/jared%2Dfalk/31880", // decodes to a valid slug
 		"https://app.musora.com//drumeo/coaches/jared-falk",
 		"https://www.drumeo.com/laravel/public/drumeo/coaches/jared-falk",
 		"https:///drumeo/coaches/jared-falk",

@@ -155,6 +155,20 @@ func TestALinkForAnotherBrandIs400(t *testing.T) {
 	}
 }
 
+// TestANodeFollowStillChecksItsBrand proves moving the brand check into the
+// node branch (an instructor settles its brand with its input) kept it: a
+// brand Musora doesn't have is a 400 before Musora is asked.
+func TestANodeFollowStillChecksItsBrand(t *testing.T) {
+	calls := countSanity(t, `{"result":[{"id":5,"title":"A"}]}`)
+	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/follows", strings.NewReader(`{"kind":"node","id":"5","brand":"rockstar"}`)))
+	wantError(t, rec, http.StatusBadRequest, msgBadBrand)
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Musora was asked %d times, want none", n)
+	}
+}
+
 // TestANodePreviewHasNoSlug proves the preview's slug stays off a node
 // preview, where it means nothing.
 func TestANodePreviewHasNoSlug(t *testing.T) {

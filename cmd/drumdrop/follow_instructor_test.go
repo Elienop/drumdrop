@@ -63,6 +63,31 @@ func TestFollowAtNameFollowsTheSlug(t *testing.T) {
 	}
 }
 
+// TestFollowNodeDefaultsToDrumeo proves a node follow without --brand is
+// still stored in drumeo now that the flag defaults to "" (so an instructor
+// link's brand can fill it).
+func TestFollowNodeDefaultsToDrumeo(t *testing.T) {
+	stubInstructorSanity(t)
+	store := newServeTestStore(t)
+	args, err := parseFollowArgs([]string{"409875"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := instructorInput(args); ok {
+		t.Fatal("a bare id was taken for an instructor follow")
+	}
+	if err := followNode(t.Context(), store, args.positionals[0], args.brand, args.quality); err != nil {
+		t.Fatalf("followNode: %v", err)
+	}
+	follows, err := store.ListFollows(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(follows) != 1 || follows[0].Brand != "drumeo" {
+		t.Fatalf("follows = %+v, want one in drumeo", follows)
+	}
+}
+
 // TestFollowRefusesWhatCantBeNormalised proves the CLI refuses what the web
 // refuses, before Musora is asked and before anything is stored; a bare "@"
 // is an instructor follow with nothing typed, not a node follow of "@".

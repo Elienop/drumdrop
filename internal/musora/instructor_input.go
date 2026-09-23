@@ -77,23 +77,22 @@ func isLink(s string) bool {
 	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
 }
 
-// slugFromName lower-cases an ASCII name or slug and turns each run of spaces
-// into one hyphen, then checks the result has Musora's slug form. Only the
-// space is joined: a tab or newline inside a name is refused, as is any
-// non-ASCII byte, which would otherwise let strings.ToLower fold a look-alike
-// such as the Kelvin sign into an ASCII letter.
+// slugFromName lower-cases a name or slug and turns each run of spaces into
+// one hyphen, then checks the result has Musora's slug form. Only the ASCII
+// space is joined, so a tab or newline inside a name is refused. It works on
+// bytes and folds only A-Z: strings.ToLower would fold a look-alike, such as
+// the Kelvin sign, into an ASCII letter that then passes; here every
+// non-ASCII byte is left as it is, for validateSlug to refuse.
 func slugFromName(s string) (string, error) {
 	var b strings.Builder
 	space := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case c >= 0x80:
-			return "", fmt.Errorf("%w: only ASCII names and slugs can be looked up", ErrBadSlug)
-		case c == ' ':
+		if c == ' ' {
 			space = true
 			continue
-		case space:
+		}
+		if space {
 			b.WriteByte('-')
 			space = false
 		}
@@ -111,19 +110,20 @@ func slugFromName(s string) (string, error) {
 
 // slugFromCoachLink takes the slug and brand out of a coach-page link, whose
 // path is "/<brand>/coaches/<slug>" with an optional numeric id and trailing
-// slash; the query and fragment are ignored. The path is read escaped, so a
-// percent-encoded character fails the checks rather than being decoded into
-// one that passes.
+// slash; the query and fragment are ignored. s is an http or https link
+// (isLink), and with a host its path is empty or starts with "/", so parts[0]
+// is always "". The path is read escaped, so a percent-encoded character fails
+// the checks rather than being decoded into one that passes.
 func slugFromCoachLink(s string) (slug, brand string, err error) {
 	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || u.Host == "" {
 		return "", "", fmt.Errorf("%w: not a link that can be read", ErrBadSlug)
 	}
 	parts := strings.Split(strings.TrimSuffix(u.EscapedPath(), "/"), "/")
 	if len(parts) == 5 && isDigits(parts[4]) {
 		parts = parts[:4]
 	}
-	if len(parts) != 4 || parts[0] != "" || parts[2] != coachesSegment {
+	if len(parts) != 4 || parts[2] != coachesSegment {
 		return "", "", fmt.Errorf("%w: not a link to a coach page", ErrBadSlug)
 	}
 	if !allowedBrands[parts[1]] {
