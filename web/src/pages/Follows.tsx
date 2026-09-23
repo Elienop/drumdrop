@@ -53,22 +53,45 @@ export function Follows() {
     if (!removing) setDeleteFiles(false)
   }, [removing])
 
+  // The server first removes the follow's queued and running jobs (killing its
+  // running downloads); with ?files=true it then deletes each lesson's files
+  // and tombstones every lesson whose files are all gone, and only then drops
+  // the follow. A 500 or 409 keeps the follow, but by then the jobs are gone
+  // and some lessons may already be tombstoned. So the refresh runs on FAILURE
+  // too (onSettled): follows, summary, jobs, and the raw ["lessons"] prefix for
+  // every keyed Lessons view. Returned, so isPending holds until they land.
   const remove = useMutation({
     mutationFn: ({ id, files }: { id: number; files: boolean }) =>
       api.unfollow(id, { deleteFiles: files }),
     onSuccess: () => {
       toast.success("Follow removed")
-      qc.invalidateQueries({ queryKey: qk.follows })
-      qc.invalidateQueries({ queryKey: qk.summary })
-      // A cascade unfollow drops the follow's lesson rows, so refresh any live
-      // Lessons view (raw prefix covers every keyed variant).
-      qc.invalidateQueries({ queryKey: ["lessons"] })
       setRemoving(null)
     },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Remove failed")
-    },
+    onSettled: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: qk.follows }),
+        qc.invalidateQueries({ queryKey: qk.summary }),
+        qc.invalidateQueries({ queryKey: qk.jobs() }),
+        qc.invalidateQueries({ queryKey: ["lessons"] }),
+      ]),
   })
+
+  // The dialog stays open on failure: the server's answer shows next to the
+  // follow it is about, and the "also delete files" choice is kept for a retry
+  // (closing resets it, so a retry from a fresh dialog could silently drop the
+  // files half of the request). It cannot be dismissed mid-request, or the
+  // answer would land in a closed dialog and be lost. Closing clears it.
+  const removeErrorId = React.useId()
+  const removeError = remove.isError
+    ? remove.error instanceof ApiHttpError
+      ? remove.error.message
+      : "Remove failed"
+    : null
+  const closeRemove = () => {
+    if (remove.isPending) return
+    setRemoving(null)
+    remove.reset()
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -171,7 +194,7 @@ export function Follows() {
       <Dialog
         open={removing !== null}
         onOpenChange={(open) => {
-          if (!open) setRemoving(null)
+          if (!open) closeRemove()
         }}
       >
         <DialogContent>
@@ -192,13 +215,20 @@ export function Follows() {
             Also delete downloaded files
           </Label>
 
+          {removeError !== null && (
+            <p id={removeErrorId} role="alert" className="text-sm text-destructive">
+              {removeError}
+            </p>
+          )}
+
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoving(null)}>
+            <Button variant="outline" disabled={remove.isPending} onClick={closeRemove}>
               Cancel
             </Button>
             <Button
               variant="destructive"
               disabled={remove.isPending}
+              aria-describedby={removeError !== null ? removeErrorId : undefined}
               onClick={() => {
                 if (removing) remove.mutate({ id: removing.id, files: deleteFiles })
               }}

@@ -33,6 +33,7 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -55,6 +56,21 @@ const STATUS_TABS: LessonStatus[] = [
   "skipped",
 ]
 const PAGE_SIZE = 50
+
+// hasRecordedFiles reports whether the server still records files for the
+// lesson, whatever its status: a canceled or failed re-download, or a delete
+// that removed the lesson's job but not its files, leaves a skipped, failed or
+// pending lesson that still owns its earlier files (BACKLOG D63).
+//
+// The server's own predicate is `output_dir IS NOT NULL OR library_entries IS
+// NOT NULL`, and the DTO carries only output_dir. That is enough today because
+// every writer that sets library_entries also sets output_dir (FinishDownload),
+// and every writer that clears output_dir clears library_entries with it
+// (TombstoneLesson). A server change that breaks that pairing needs a field
+// on LessonDTO, not a wider guess here.
+function hasRecordedFiles(lesson: LessonDTO): boolean {
+  return lesson.output_dir !== null
+}
 
 export function Lessons() {
   const qc = useQueryClient()
@@ -157,23 +173,47 @@ export function Lessons() {
     },
   })
 
-  // Per-lesson delete removes both file copies then tombstone-skips the row
-  // (status downloaded -> skipped, paths cleared). Invalidate the raw ["lessons"]
-  // prefix so every keyed/live variant refetches, plus summary (the per-status
-  // counts shift) and jobs (history mutation, mirrors skip/unskip).
+  // Per-lesson delete: the server first removes the lesson's queued and running
+  // jobs (killing a running download), then removes its recorded files and
+  // tombstone-skips the row (skipped, paths cleared).
+  //
+  // The refresh runs on FAILURE too (onSettled, not onSuccess): a 500 or 409
+  // arrives after the jobs were already removed, so the lesson's status and the
+  // jobs list changed even though the files were kept. The raw ["lessons"]
+  // prefix covers every keyed/live variant, summary the per-status counts.
+  // Returned, so isPending (and the disabled Delete) holds until the refreshed
+  // lists have landed, and a failure's message appears together with them.
+  //
+  // A failure is shown inside the dialog, not as a toast: see the dialog below.
   const deleteLesson = useMutation({
     mutationFn: (id: number) => api.deleteLesson(id),
     onSuccess: () => {
       toast.success("Lesson deleted")
       setDeleting(null)
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
     },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Delete failed")
-    },
+    onSettled: () =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: qk.jobs() }),
+        qc.invalidateQueries({ queryKey: ["lessons"] }),
+        qc.invalidateQueries({ queryKey: qk.summary }),
+      ]),
   })
+
+  // The dialog stays open on failure, so the user reads the server's answer
+  // next to the lesson it is about and can retry (a 409 asks for exactly that)
+  // or cancel. It cannot be dismissed mid-request, or the answer would land in
+  // a closed dialog and be lost. Closing clears the answer.
+  const deleteErrorId = React.useId()
+  const deleteError = deleteLesson.isError
+    ? deleteLesson.error instanceof ApiHttpError
+      ? deleteLesson.error.message
+      : "Delete failed"
+    : null
+  const closeDelete = () => {
+    if (deleteLesson.isPending) return
+    setDeleting(null)
+    deleteLesson.reset()
+  }
 
   const copyPath = (lesson: LessonDTO) => {
     const path = lesson.video_path ?? lesson.output_dir
@@ -328,15 +368,7 @@ export function Lessons() {
                                     </DropdownMenuItem>
                                   )
                                 })()
-                              ) : lesson.status === "downloaded" ? (
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onSelect={() => setDeleting(lesson)}
-                                >
-                                  <Trash2 />
-                                  Delete
-                                </DropdownMenuItem>
-                              ) : (
+                              ) : lesson.status === "downloaded" ? null : (
                                 <>
                                   {lesson.status === "skipped" && (
                                     <DropdownMenuItem
@@ -368,6 +400,20 @@ export function Lessons() {
                                 Copy path
                               </DropdownMenuItem>
                             </DropdownMenuGroup>
+                            {hasRecordedFiles(lesson) && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuGroup>
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={() => setDeleting(lesson)}
+                                  >
+                                    <Trash2 />
+                                    Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuGroup>
+                              </>
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </TableCell>
@@ -431,7 +477,7 @@ export function Lessons() {
       <Dialog
         open={deleting !== null}
         onOpenChange={(open) => {
-          if (!open) setDeleting(null)
+          if (!open) closeDelete()
         }}
       >
         <DialogContent>
@@ -440,17 +486,28 @@ export function Lessons() {
               {deleting ? `Delete "${deleting.title}"?` : "Delete lesson?"}
             </DialogTitle>
             <DialogDescription>
-              This removes the downloaded files (downloads + library). The lesson
-              is marked skipped so it is not re-downloaded; un-skip to restore it.
+              This removes the downloaded files (downloads + library) and cancels
+              any queued or running download of it. The lesson is marked skipped
+              so it is not re-downloaded; un-skip to restore it.
             </DialogDescription>
           </DialogHeader>
+          {deleteError !== null && (
+            <p id={deleteErrorId} role="alert" className="text-sm text-destructive">
+              {deleteError}
+            </p>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
+            <Button
+              variant="outline"
+              disabled={deleteLesson.isPending}
+              onClick={closeDelete}
+            >
               Cancel
             </Button>
             <Button
               variant="destructive"
               disabled={deleteLesson.isPending}
+              aria-describedby={deleteError !== null ? deleteErrorId : undefined}
               onClick={() => {
                 if (deleting) deleteLesson.mutate(deleting.railcontent_id)
               }}

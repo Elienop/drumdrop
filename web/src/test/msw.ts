@@ -52,14 +52,24 @@ if (typeof globalThis.EventSource === "undefined") {
 
 // renderWithProviders wraps the UI in the providers the pages rely on:
 // QueryClientProvider (fresh, retry-off so error states settle deterministically),
-// SSEProvider (useSSE), and a MemoryRouter.
-export function renderWithProviders(ui: ReactElement) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+// SSEProvider (useSSE), and a MemoryRouter. Pass `client` to seed or inspect
+// the cache from the test (e.g. whether a key the page does not mount was
+// invalidated); it is returned as `qc` either way.
+export function newTestQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
+}
+
+export function renderWithProviders(
+  ui: ReactElement,
+  { client }: { client?: QueryClient } = {},
+) {
+  const qc = client ?? newTestQueryClient()
+  const result = render(
     createElement(
       QueryClientProvider,
       { client: qc },
       createElement(SSEProvider, null, createElement(MemoryRouter, null, ui)),
     ),
   )
+  return { ...result, qc }
 }

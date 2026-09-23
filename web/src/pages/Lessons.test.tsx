@@ -1,8 +1,9 @@
-import { beforeAll, expect, it } from "vitest"
+import { beforeAll, describe, expect, it } from "vitest"
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { http, HttpResponse } from "msw"
-import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { delay, http, HttpResponse } from "msw"
+import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import type { JobDTO, LessonDTO } from "@/types"
 import { Lessons } from "./Lessons"
@@ -276,4 +277,213 @@ it("deletes a downloaded lesson via DELETE /api/lessons/{id}, confirms, and inva
   expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
   // The invalidate refetched the list (dropped ["lessons"] invalidate stays at 1).
   await waitFor(() => expect(listFetches).toBe(2))
+})
+
+// --- Delete: failure paths, and which lessons can be deleted ----------------
+
+// The server's fixed 500 when a lesson's files could not all be removed.
+const FILES_KEPT =
+  "could not delete the lesson's files; the lesson was kept (see the server log)"
+// The server's 409 when a download recorded new files during the delete.
+const CHANGED = "the lesson was downloaded again while it was being deleted; try again"
+
+// A re-download in flight: status downloading, but its earlier download's
+// files are still on record (output_dir set).
+const redownloading: LessonDTO = {
+  ...lessons[0],
+  railcontent_id: 500,
+  title: "Moeller Method",
+  status: "downloading",
+}
+
+function renderLessons() {
+  const qc = newTestQueryClient()
+  // Seed the summary: the Lessons page does not mount it, but the top bar and
+  // the dashboard do, so a delete must mark it stale.
+  qc.setQueryData(qk.summary, { follows: 0, lessons: {}, jobs: {}, paused: false })
+  renderWithProviders(
+    <>
+      <Lessons />
+      <Toaster />
+    </>,
+    { client: qc },
+  )
+  return qc
+}
+
+async function openDelete(user: ReturnType<typeof userEvent.setup>, title: string) {
+  await user.click(await screen.findByRole("button", { name: `Actions for ${title}` }))
+  await user.click(await screen.findByRole("menuitem", { name: /delete/i }))
+  return screen.findByRole("dialog")
+}
+
+it("a failed delete (500) keeps the dialog open with the server's message and refreshes lessons, jobs and summary", async () => {
+  // Before the delete the lesson is re-downloading. The server removes its job
+  // first, so after the failed file removal it reads skipped/canceled; the
+  // list must show that, not the stale "downloading" row.
+  let listFetches = 0
+  let jobFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, async () => {
+      listFetches++
+      if (listFetches === 1) return HttpResponse.json([redownloading])
+      await delay(20) // the refetch lands after the DELETE answers, as in a browser
+      return HttpResponse.json([{ ...redownloading, status: "skipped", error: "canceled" }])
+    }),
+    http.get(`${ORIGIN}/api/jobs`, () => {
+      jobFetches++
+      return HttpResponse.json([])
+    }),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () =>
+      HttpResponse.json({ error: FILES_KEPT }, { status: 500 }),
+    ),
+  )
+  const user = userEvent.setup()
+  const qc = renderLessons()
+
+  const table = await screen.findByRole("table")
+  expect(within(table).getByText("downloading")).toBeInTheDocument()
+  await waitFor(() => expect(jobFetches).toBe(1))
+  expect(qc.getQueryState(qk.summary)?.isInvalidated).toBe(false)
+
+  const dialog = await openDelete(user, "Moeller Method")
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+
+  // The server's own words, inside the dialog that is still open, and they
+  // arrive together with the refreshed list (getBy, not findBy: no alert
+  // beside a row that still reads "downloading").
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FILES_KEPT)
+  expect(within(table).getByText("skipped")).toBeInTheDocument()
+  expect(screen.getByRole("dialog")).toBe(dialog)
+  expect(
+    within(dialog).getByRole("button", { name: /^delete$/i }),
+  ).toHaveAccessibleDescription(FILES_KEPT)
+  expect(screen.queryByText(/lesson deleted/i)).not.toBeInTheDocument()
+
+  // Every view reflects the server again.
+  expect(within(table).queryByText("downloading")).not.toBeInTheDocument()
+  expect(listFetches).toBe(2)
+  expect(jobFetches).toBe(2)
+  expect(qc.getQueryState(qk.summary)?.isInvalidated).toBe(true)
+})
+
+it("a 409 shows the server's message and the same dialog retries the delete", async () => {
+  let deletes = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () => {
+      deletes++
+      if (deletes === 1) return HttpResponse.json({ error: CHANGED }, { status: 409 })
+      return HttpResponse.json({ ...lessons[0], status: "skipped", output_dir: null })
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const dialog = await openDelete(user, "Single Stroke Roll")
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(CHANGED)
+
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+  expect(deletes).toBe(2)
+})
+
+it("the delete dialog cannot be dismissed while the request is in flight", async () => {
+  let answer: (r: Response) => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(
+      `${ORIGIN}/api/lessons/:id`,
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    ),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const dialog = await openDelete(user, "Single Stroke Roll")
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+  expect(within(dialog).getByRole("button", { name: /^cancel$/i })).toBeDisabled()
+  await user.keyboard("{Escape}")
+  expect(screen.getByRole("dialog")).toBe(dialog)
+
+  // The answer then lands where the user can read it.
+  answer(HttpResponse.json({ error: FILES_KEPT }, { status: 500 }))
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FILES_KEPT)
+})
+
+it("closing the dialog after a failure clears the message", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () =>
+      HttpResponse.json({ error: FILES_KEPT }, { status: 500 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  let dialog = await openDelete(user, "Single Stroke Roll")
+  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+  await within(dialog).findByRole("alert")
+  await user.click(within(dialog).getByRole("button", { name: /^cancel$/i }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  dialog = await openDelete(user, "Single Stroke Roll")
+  expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument()
+})
+
+describe("Delete is offered exactly when the lesson still records files, whatever its status", () => {
+  const withFiles = (status: LessonDTO["status"], error: string | null): LessonDTO => ({
+    ...lessons[0],
+    railcontent_id: 600,
+    title: `Has files (${status}, ${error ?? "no error"})`,
+    status,
+    error,
+  })
+  const noFiles = (status: LessonDTO["status"]): LessonDTO => ({
+    ...lessons[1],
+    railcontent_id: 700,
+    title: `No files (${status})`,
+    status,
+  })
+
+  it.each([
+    withFiles("skipped", "canceled"), // a canceled re-download (D63)
+    withFiles("skipped", "locked"), // a re-download SkipDownload marked skipped
+    withFiles("failed", "yt-dlp exited 1"), // a failed re-download
+    withFiles("pending", null), // a retried job reset the lesson to pending
+    withFiles("downloading", null), // a re-download under way
+    withFiles("downloaded", null),
+  ])("offers Delete for $title and sends DELETE for it", async (lesson) => {
+    let deletedId: string | null = null
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lesson])),
+      http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
+        deletedId = params.id as string
+        return HttpResponse.json({ ...lesson, status: "skipped", output_dir: null })
+      }),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    const dialog = await openDelete(user, lesson.title)
+    await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+    await waitFor(() => expect(deletedId).toBe("600"))
+  })
+
+  it.each([noFiles("skipped"), noFiles("pending"), noFiles("failed"), noFiles("downloading")])(
+    "does not offer Delete for $title",
+    async (lesson) => {
+      server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lesson])))
+      const user = userEvent.setup()
+      renderLessons()
+
+      await user.click(
+        await screen.findByRole("button", { name: `Actions for ${lesson.title}` }),
+      )
+      await screen.findByRole("menuitem", { name: /copy path/i })
+      expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument()
+    },
+  )
 })

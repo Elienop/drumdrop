@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { http, HttpResponse } from "msw"
-import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { delay, http, HttpResponse } from "msw"
+import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import type { CreateFollowRequest, FollowDTO } from "@/types"
 import { Follows } from "./Follows"
@@ -247,4 +248,97 @@ it("unfollows with ?files=true when 'Also delete downloaded files' is checked", 
 
   await waitFor(() => expect(deletedUrl).not.toBeNull())
   expect(new URL(deletedUrl!).searchParams.get("files")).toBe("true")
+})
+
+// The server's fixed 500 when some lesson's files could not be removed. By
+// then it has removed the follow's jobs and tombstoned every lesson whose
+// files did go, so lessons, jobs and summary all changed although the follow
+// was kept.
+const FOLLOW_KEPT =
+  "could not delete every lesson's files; the follow was kept (see the server log)"
+
+it("a failed unfollow (500) keeps the dialog open with the server's message and the files choice, and refreshes follows, lessons, jobs and summary", async () => {
+  let listFetches = 0
+  const deletedUrls: string[] = []
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, async () => {
+      listFetches++
+      if (listFetches > 1) await delay(20) // lands after the DELETE, as in a browser
+      return HttpResponse.json(follows)
+    }),
+    http.delete(`${ORIGIN}/api/follows/:id`, ({ request }) => {
+      deletedUrls.push(request.url)
+      return HttpResponse.json({ error: FOLLOW_KEPT }, { status: 500 })
+    }),
+  )
+  // Seed the keys other pages mount (Lessons, Queue, Dashboard, the top bar):
+  // not active here, so the oracle is that each is marked stale.
+  const qc = newTestQueryClient()
+  qc.setQueryData(qk.lessons(), [])
+  qc.setQueryData(qk.jobs({ limit: 10 }), [])
+  qc.setQueryData(qk.summary, { follows: 2, lessons: {}, jobs: {}, paused: false })
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Follows />
+      <Toaster />
+    </>,
+    { client: qc },
+  )
+
+  await user.click(await screen.findByRole("button", { name: /remove stick control/i }))
+  await waitFor(() => expect(listFetches).toBe(1))
+  const dialog = await screen.findByRole("dialog")
+  const files = within(dialog).getByRole("checkbox", { name: /also delete downloaded files/i })
+  await user.click(files)
+  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FOLLOW_KEPT)
+  // The message arrives together with the refreshed list, not before it.
+  expect(qc.getQueryState(qk.follows)?.fetchStatus).toBe("idle")
+  expect(screen.getByRole("dialog")).toBe(dialog)
+  expect(
+    within(dialog).getByRole("button", { name: /^remove$/i }),
+  ).toHaveAccessibleDescription(FOLLOW_KEPT)
+  expect(screen.queryByText(/follow removed/i)).not.toBeInTheDocument()
+
+  expect(listFetches).toBe(2)
+  expect(qc.getQueryState(qk.lessons())?.isInvalidated).toBe(true)
+  expect(qc.getQueryState(qk.jobs({ limit: 10 }))?.isInvalidated).toBe(true)
+  expect(qc.getQueryState(qk.summary)?.isInvalidated).toBe(true)
+
+  // The files choice survives the failure, so a retry asks for the same thing.
+  expect(files).toBeChecked()
+  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+  await waitFor(() => expect(deletedUrls).toHaveLength(2))
+  expect(new URL(deletedUrls[1]).searchParams.get("files")).toBe("true")
+})
+
+it("the unfollow dialog cannot be dismissed while the request is in flight, and closing it clears a failure", async () => {
+  let answer: (r: Response) => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)),
+    http.delete(
+      `${ORIGIN}/api/follows/:id`,
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(<Follows />)
+
+  await user.click(await screen.findByRole("button", { name: /remove stick control/i }))
+  let dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+  expect(within(dialog).getByRole("button", { name: /^cancel$/i })).toBeDisabled()
+  await user.keyboard("{Escape}")
+  expect(screen.getByRole("dialog")).toBe(dialog)
+
+  answer(HttpResponse.json({ error: FOLLOW_KEPT }, { status: 500 }))
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FOLLOW_KEPT)
+
+  await user.click(within(dialog).getByRole("button", { name: /^cancel$/i }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+  await user.click(screen.getByRole("button", { name: /remove stick control/i }))
+  dialog = await screen.findByRole("dialog")
+  expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument()
 })
