@@ -236,10 +236,11 @@ func TestWorkerCancelOfARequeuedJobCleansPartials(t *testing.T) {
 	assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"))
 }
 
-// TestCleanupPartialsRemovesOnlyPartials (security I4) proves the partial-file
-// cleanup takes only yt-dlp's partial shapes of the lesson's own base: a
-// finished subtitle, a title with dots in it, and another base's partials
-// stay.
+// TestCleanupPartialsRemovesOnlyPartials (security I4, Info 2) proves the
+// partial-file cleanup takes only the partial shapes of the lesson's own base,
+// yt-dlp's (its ffmpeg ".temp.<ext>" output included) and drumdrop's own
+// temporary files: a finished subtitle, a title with dots in it, and another
+// base's partials stay.
 func TestCleanupPartialsRemovesOnlyPartials(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "05 - Five")
 	partials := []string{
@@ -249,6 +250,11 @@ func TestCleanupPartialsRemovesOnlyPartials(t *testing.T) {
 		"05 - Five.mp4.ytdl",
 		"05 - Five.f137.mp4.part-Frag12",
 		"05 - Five [Original].f399.mp4",
+		"05 - Five.temp.mp4",
+		"05 - Five [Drumless].temp.mp4",
+		"05 - Five.nfo" + musora.TempSuffix,
+		"05 - Five-poster.jpg" + musora.TempSuffix,
+		"05 - Five.nfo" + episodeTempSuffix,
 	}
 	kept := []string{
 		"05 - Five.mp4",
@@ -258,8 +264,12 @@ func TestCleanupPartialsRemovesOnlyPartials(t *testing.T) {
 		"05 - Five [Original].mp4",
 		"05 - Five.f137",
 		"05 - Five.fx1.mp4",
+		"05 - Five.temp",
+		"05 - Five.temporal.mp4",
+		"05 - Five.temp.en.vtt",
 		"Fill.for.fun.mp4",
 		"06 - Six.mp4.part",
+		"06 - Six.temp.mp4",
 	}
 	seedSeason(t, dir, append(append([]string{}, partials...), kept...)...)
 	cleanupPartials(dir)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/library"
@@ -20,14 +22,19 @@ import (
 // It returns the recorded byte count, and ok=false when nothing was recorded:
 // a delete or a skip removed the job or lesson meanwhile (what this download
 // wrote then goes as the stopper wants, see discardAbandoned), or the job was
-// requeued by someone else (it runs again; nothing is reported). err is a
-// failed attempt: the move needs every other lesson's claims, and when they
-// can not be read it does not move, nor record the lesson in scratch (a lesson
-// moved before the record existed would lose track of its library copy); and a
-// download FinishDownload could not record is not reported as done. Either is
-// retried.
-func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, dir string) (bytes int64, ok bool, err error) {
+// requeued by someone else (it runs again). Either way it reports the job's
+// end itself (lesson_skipped). err is a failed attempt: the move needs every
+// other lesson's claims, and when they can not be read it does not move, nor
+// record the lesson in scratch (a lesson moved before the record existed would
+// lose track of its library copy); and a download FinishDownload could not
+// record is not reported as done. Either is retried.
+//
+// Before a move, the lesson's partial files (isPartialName: yt-dlp's, and
+// drumdrop's own temporary files, left by an earlier run that died) are
+// removed from the scratch folder, so none of them lands in the library.
+func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, folder lessonFolder) (bytes int64, ok bool, err error) {
 	id := job.RailcontentID
+	dir := folder.path
 	// A download that does not move into a season folder keeps the lesson's
 	// library record as it is (LibraryEntries nil): those entries are still on
 	// disk and still the lesson's.
@@ -39,6 +46,7 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 		if claims, err = w.claims(ctx); err != nil {
 			return 0, false, fmt.Errorf("not moved to the library: %w", err)
 		}
+		cleanupPartials(dir)
 	}
 	switch {
 	case w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "":
@@ -103,12 +111,14 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 	ferr := w.Store.FinishDownload(finishCtx, job.ID, id, rec)
 	switch {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
-		w.discardAbandoned(finishCtx, id, dir, placed, ferr)
+		w.ended(job, lesson, msgStopped)
+		w.discardAbandoned(finishCtx, id, dir, placed, folder, ferr)
 		return 0, false, nil
 	case errors.Is(ferr, database.ErrDownloadCanceled):
 		// The job is neither running nor canceled: another process requeued it
 		// (a retry, or a startup recovery), so it runs again and replaces this.
 		fmt.Fprintf(w.log(), "  ⚠ record download %d: not recorded, its job was requeued meanwhile: %v\n", id, ferr)
+		w.ended(job, lesson, msgRequeued)
 		return 0, false, nil
 	case ferr != nil:
 		return 0, false, fmt.Errorf("the download could not be recorded: %w", ferr)
@@ -146,12 +156,51 @@ func (w *Worker) roots() []string {
 	return library.Roots(w.Cfg.LibraryDir, w.Cfg.DownloadsDir)
 }
 
+// lessonFolder is the scratch lesson folder a job downloads into, and what
+// was there before the job's first attempt. What was in it then is not this
+// job's to remove (owner ruling #66): a folder kept when a follow was removed
+// with its files kept, an archive a fresh database was pointed at, or a copy
+// an earlier failed move left in downloads. Without a library (or with the
+// library the downloads folder) this folder is the lesson's permanent home.
+type lessonFolder struct {
+	path string
+	// existed: something was at path before the first attempt, or whether it
+	// was could not be read. A failed or stopped download then removes nothing
+	// in it but yt-dlp's partial files, and nothing a move placed from it.
+	existed bool
+	// recorded: the lesson's own row named path as its folder then. A delete
+	// of the lesson's files takes that folder as the lesson's (the delete
+	// removes it too), so existed does not keep it from that delete.
+	recorded bool
+}
+
+// newLessonFolder reads what is at path before a job's first attempt; prev is
+// the lesson's row as the job read it.
+func newLessonFolder(path string, prev database.Lesson) lessonFolder {
+	_, err := os.Lstat(path)
+	return lessonFolder{
+		path:     path,
+		existed:  !errors.Is(err, fs.ErrNotExist),
+		recorded: prev.OutputDir.Valid && filepath.Clean(prev.OutputDir.String) == filepath.Clean(path),
+	}
+}
+
+// keeps reports whether what the job found in the folder stays, for a stopper
+// whose answer is cause.
+func (f lessonFolder) keeps(cause error) bool {
+	return f.existed && !(f.recorded && errors.Is(cause, database.ErrLessonDeleted))
+}
+
 // discardAbandoned is what happens to what a download wrote once a delete or a
 // skip removed its job or lesson (cause, from the guarded write, says what the
-// stopper wanted):
+// stopper wanted). dir is where the lesson's files are now: folder's scratch
+// path, or the library folder a default-layout move put them in.
 //   - a stopper that keeps the files (a follow removed without its files), or
 //     one whose intent is unknown: nothing the download finished is removed,
 //     only yt-dlp's partial files in its lesson folder;
+//   - a lesson folder that held files before this job (folder.keeps): the
+//     same, and nothing a move placed is removed either, since what it placed
+//     includes what the folder held (logged);
 //   - one that discards them (a skip): the library entries this download
 //     placed, and its lesson folder dir (scratch, or the folder it moved into),
 //     are removed, except anything a lesson row records now (read fresh),
@@ -162,12 +211,19 @@ func (w *Worker) roots() []string {
 //
 // A season folder is never removed, nor a folder not named like a lesson
 // folder. If the rows can not be read, nothing is removed.
-func (w *Worker) discardAbandoned(ctx context.Context, id int, dir string, placed []string, cause error) {
+func (w *Worker) discardAbandoned(ctx context.Context, id int, dir string, placed []string, folder lessonFolder, cause error) {
 	if !errors.Is(cause, database.ErrDiscardDownload) {
 		if !library.IsSeasonDir(dir) {
 			cleanupPartials(dir)
 		}
 		fmt.Fprintf(w.log(), "  ⊗ %d was removed while downloading; its files were kept, as asked\n", id)
+		return
+	}
+	if folder.keeps(cause) {
+		if !library.IsSeasonDir(dir) {
+			cleanupPartials(dir)
+		}
+		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while downloading; %q held files before this download, so only partial files were removed (kept in the library: %q)\n", id, folder.path, placed)
 		return
 	}
 	c, err := w.claims(ctx)
@@ -201,12 +257,19 @@ func (w *Worker) discardAbandoned(ctx context.Context, id int, dir string, place
 }
 
 // dropFailedDownload removes what a download that failed every attempt left in
-// its scratch lesson folder dir, so no copy stays in downloads that no lesson
-// records: the whole folder, unless a lesson row (this lesson's included)
-// records something in it, as when its earlier download is recorded there;
-// then only yt-dlp's partial files go. If the rows can not be read, only the
-// partial files go.
-func (w *Worker) dropFailedDownload(ctx context.Context, id int, dir string) {
+// its scratch lesson folder, so no copy stays in downloads that no lesson
+// records: the whole folder, when this job created it and no lesson row (this
+// lesson's included) records something in it. A folder that held files before
+// this job (see lessonFolder), one a row records something in (as when the
+// lesson's earlier download is recorded there), or one whose rows can not be
+// read, loses only yt-dlp's partial files.
+func (w *Worker) dropFailedDownload(ctx context.Context, id int, folder lessonFolder) {
+	dir := folder.path
+	if folder.existed {
+		cleanupPartials(dir)
+		fmt.Fprintf(w.log(), "  ⊗ %d failed; %q held files before this download, so only partial files were removed\n", id, dir)
+		return
+	}
 	c, err := w.claims(ctx)
 	if err != nil {
 		cleanupPartials(dir)
