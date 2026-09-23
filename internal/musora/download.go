@@ -137,8 +137,11 @@ func Sanitize(name string) string {
 // fetchToFile downloads url to dest, a path inside the open folder root. The
 // media/asset URLs are open-read and need no auth: a User-Agent header is
 // enough, no session cookie is attached.
-func fetchToFile(url string, root *os.Root, dest string) error {
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+func fetchToFile(ctx context.Context, url string, root *os.Root, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
 	req.Header.Set("User-Agent", browserUA)
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -201,10 +204,11 @@ type DownloadProgress struct {
 type DownloadOpts struct {
 	Dir string
 	// Root, when set, is the folder the lesson's files must stay inside (the
-	// worker passes the downloads folder): Dir must be inside it, and every
-	// file DrumDrop itself writes (poster, resources, play-along, sheet music,
-	// the nfo) goes through it (os.Root), never through a symlink out of it.
-	// Empty means Dir. yt-dlp writes its video by path: see DownloadLesson.
+	// worker passes the job's private folder, which is also Dir): Dir must be
+	// inside it, and every file DrumDrop itself writes (poster, resources,
+	// play-along, sheet music, the nfo) goes through it (os.Root), never
+	// through a symlink out of it. Empty means Dir. yt-dlp writes its video by
+	// path: see DownloadLesson.
 	Root    string
 	Index   int
 	Quality string
@@ -292,8 +296,9 @@ type auxFailure struct {
 // resources, mp3 play-along stems, sheet-music) into dir, a folder inside the
 // open folder root, and returns the list of (artifact, url, error) failures.
 // It does not return early on failure: it attempts all artifacts so a single
-// bad URL never hides the rest.
-func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure {
+// bad URL never hides the rest. ctx cancels every fetch: once the download is
+// stopped, each remaining one fails at once instead of writing on.
+func fetchAuxArtifacts(ctx context.Context, l *Lesson, root *os.Root, dir, base string) []auxFailure {
 	var failures []auxFailure
 	record := func(artifact, url string, err error) {
 		if err != nil {
@@ -302,7 +307,7 @@ func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure 
 	}
 
 	if thumb := firstNonEmpty(l.Thumbnail, l.Video.PosterImageURL); thumb != "" {
-		record("poster", thumb, fetchToFile(thumb, root, filepath.Join(dir, base+"-poster.jpg")))
+		record("poster", thumb, fetchToFile(ctx, thumb, root, filepath.Join(dir, base+"-poster.jpg")))
 	}
 	for _, r := range l.Resources {
 		if r.URL != "" {
@@ -311,7 +316,7 @@ func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure 
 			if name == "" {
 				name = urlBasename(r.URL)
 			}
-			record("resource", r.URL, fetchToFile(r.URL, root, filepath.Join(dir, "resources", Sanitize(name))))
+			record("resource", r.URL, fetchToFile(ctx, r.URL, root, filepath.Join(dir, "resources", Sanitize(name))))
 		}
 	}
 	mp3s := map[string]string{
@@ -322,7 +327,7 @@ func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure 
 	}
 	for name, u := range mp3s {
 		if u != "" {
-			record("mp3", u, fetchToFile(u, root, filepath.Join(dir, "play-along", name)))
+			record("mp3", u, fetchToFile(ctx, u, root, filepath.Join(dir, "play-along", name)))
 		}
 	}
 	sheetNo := 0
@@ -348,7 +353,7 @@ func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure 
 			if len(pages) > 1 {
 				name = fmt.Sprintf("%02d - %s (p%d).%s", sheetNo, Sanitize(title), pi+1, ext)
 			}
-			record("sheet-music", u, fetchToFile(u, root, filepath.Join(dir, "sheet-music", name)))
+			record("sheet-music", u, fetchToFile(ctx, u, root, filepath.Join(dir, "sheet-music", name)))
 		}
 	}
 	return failures
@@ -363,7 +368,8 @@ func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure 
 //
 // ctx cancels the yt-dlp run: the command runs under exec.CommandContext and is
 // killed by process group (SIGKILL to -pid) so yt-dlp and its ffmpeg child both
-// die. A nil ctx is treated as context.Background(), preserving the original CLI
+// die. It cancels the auxiliary fetches too, and a download canceled before its
+// nfo is written returns ctx's error. A nil ctx is treated as context.Background(), preserving the original CLI
 // behaviour byte-for-byte (the run is never canceled out from under it).
 //
 // The lesson folder and every file DownloadLesson writes itself go through the
@@ -438,8 +444,13 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 			// recs empty -> the song honestly has no video; not an error.
 		}
 	}
-	for _, f := range fetchAuxArtifacts(l, root, rel, base) {
+	for _, f := range fetchAuxArtifacts(ctx, l, root, rel, base) {
 		fmt.Fprintf(os.Stderr, "drumdrop: lesson %d: failed to fetch %s %s: %v\n", l.ID, f.Artifact, f.URL, f.Err)
+	}
+	// A download stopped during the fetches is not finished, whatever they
+	// wrote: it says so, and writes nothing more.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return writeInRoot(root, filepath.Join(rel, base+".nfo"), strings.NewReader(BuildNFO(l)))
 }
