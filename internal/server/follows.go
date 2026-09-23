@@ -236,20 +236,21 @@ func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 // wrapped sql.ErrNoRows).
 //
 // Order of operations:
-//  1. Cancel the follow's running job(s) so a live download actually stops
-//     (mirrors handleCancelJob: deps.CancelRunning kills the yt-dlp process; the
-//     worker finalizes the job/lesson asynchronously). nil-safe when no worker.
-//  2. With ?files=true, remove the follow's downloaded lessons' files (the
-//     downloads copy AND the library mirror) BEFORE the rows are deleted, since
-//     the lesson rows carry the on-disk paths. Default (?files absent/false)
-//     keeps the files — delete is opt-in.
-//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx).
-//
-// The cancel→files→cascade ordering is best-effort: the worker's async
-// canceled/skipped finalization may still be in flight, so a file delete can
-// race a worker still writing the lesson dir, and the cascade's job delete makes
-// the worker's later MarkJobCanceled a benign 0-row no-op. The handler does not
-// block on the worker (mirroring handleCancelJob).
+//  1. Remove the queued and running jobs of the follow and its lessons
+//     (BeginFollowDelete), and kill the running downloads (deps.CancelRunning,
+//     nil-safe when no worker is attached). From here on no download that was
+//     under way can record anything (see database.ErrDownloadAbandoned).
+//  2. With ?files=true, remove the files of every lesson that records any
+//     (whatever its status), following each lesson's record exactly as the
+//     lesson delete does, and tombstone each lesson whose files are all gone.
+//     If a lesson's files could not all be removed, that lesson keeps its
+//     record of what is left, the follow and every lesson row are kept, the
+//     detail is logged, and the client gets a fixed 500: deleting the rows would
+//     leave those files tracked by nothing. Default (?files absent/false) keeps
+//     the files — delete is opt-in.
+//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx). With
+//     ?files=true the cascade refuses (409) if a lesson records files again by
+//     then (a download that started after step 1 finished meanwhile).
 func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
@@ -260,44 +261,89 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Cancel any running job(s) for this follow so a live download stops. No
-	// by-follow jobs query exists, so list running jobs and filter by follow_id.
-	if s.deps.CancelRunning != nil {
-		running, err := s.store.ListJobsByStatus(r.Context(), database.JobRunning)
-		if err != nil {
-			writeStoreErr(w, err, "follow not found")
+	// 1. Stop every download of this follow, for good.
+	lessons, running, err := s.store.BeginFollowDelete(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, "follow not found")
+		return
+	}
+	s.killRunning(running)
+
+	if !deleteFilesRequested(r) {
+		// 3. Records only; the files stay where they are.
+		if err := s.store.RemoveFollowCascade(r.Context(), id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "could not delete follow")
 			return
 		}
-		for _, j := range running {
-			if j.FollowID.Valid && j.FollowID.Int64 == id {
-				s.deps.CancelRunning(j.ID)
-			}
-		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
-	// 2. With ?files=true, remove the downloaded lessons' files before the rows go.
-	if deleteFilesRequested(r) {
-		lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
-		if err != nil {
-			writeStoreErr(w, err, "follow not found")
-			return
-		}
-		for _, l := range lessons {
-			if l.Status == database.StatusDownloaded && l.OutputDir.Valid {
-				// Best-effort: use the RAW stored container path (not the host-mapped
-				// DTO). A failure is logged-by-being-ignored — file cleanup must not
-				// block removing the follow records.
-				_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
-			}
-		}
+	// 2. Remove every lesson's files, then its paths.
+	if !s.deleteFollowFiles(w, r, lessons) {
+		return
 	}
-
-	// 3. Cascade-delete jobs + lessons + the follow.
-	if err := s.store.RemoveFollowCascade(r.Context(), id); err != nil {
+	// 3. Cascade, unless a lesson records files again by now.
+	switch err := s.store.RemoveFilelessFollowCascade(r.Context(), id); {
+	case errors.Is(err, database.ErrFollowHasFiles):
+		writeErr(w, http.StatusConflict, "a lesson of this follow was downloaded while it was being deleted; try again")
+		return
+	case err != nil:
 		writeErr(w, http.StatusInternalServerError, "could not delete follow")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteFollowFiles removes the files of every lesson that records any, and
+// tombstones each one whose files are all gone. It writes the error response
+// and returns false when any lesson's files could not all be removed (that
+// lesson keeps its record) or a store step failed.
+func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lessons []database.Lesson) bool {
+	others, err := s.store.ListLessonsWithFiles(r.Context())
+	if err != nil {
+		writeStoreErr(w, err, "follow not found")
+		return false
+	}
+	kept, changed := 0, 0
+	for i, l := range lessons {
+		if !l.OutputDir.Valid && !l.LibraryEntries.Valid {
+			continue // no files recorded: the cascade removes the row
+		}
+		switch err := s.deleteLessonFiles(r.Context(), l, others); {
+		case errors.Is(err, errFilesKept):
+			kept++
+		case errors.Is(err, database.ErrLessonChanged):
+			changed++
+		case err != nil:
+			writeStoreErr(w, err, "follow not found")
+			return false
+		default:
+			// Its files are gone: it claims nothing any more, so the next
+			// lesson's ownership checks must not count it.
+			others = withoutLesson(others, lessons[i].RailcontentID)
+		}
+	}
+	switch {
+	case kept > 0:
+		writeErr(w, http.StatusInternalServerError, "could not delete every lesson's files; the follow was kept (see the server log)")
+		return false
+	case changed > 0:
+		writeErr(w, http.StatusConflict, "a lesson of this follow was downloaded while it was being deleted; try again")
+		return false
+	}
+	return true
+}
+
+// withoutLesson returns lessons minus the row with railcontent id id.
+func withoutLesson(lessons []database.Lesson, id int) []database.Lesson {
+	out := lessons[:0:0]
+	for _, l := range lessons {
+		if l.RailcontentID != id {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // deleteFilesRequested reports whether the request asked to also delete on-disk

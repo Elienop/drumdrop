@@ -102,26 +102,23 @@ func (s *fakePlannerStore) GetLesson(ctx context.Context, id int) (database.Less
 func (s *fakePlannerStore) MarkJobRunning(ctx context.Context, id int64) error {
 	panic("MarkJobRunning: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkJobDone(ctx context.Context, id int64) error {
-	panic("MarkJobDone: not expected from Planner")
+func (s *fakePlannerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	panic("ListLessonsWithFiles: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
-	panic("MarkJobFailed: not expected from Planner")
+func (s *fakePlannerStore) StartDownload(ctx context.Context, jobID int64, id int) error {
+	panic("StartDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkJobCanceled(ctx context.Context, id int64) error {
-	panic("MarkJobCanceled: not expected from Planner")
+func (s *fakePlannerStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
+	panic("FinishDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkDownloading(ctx context.Context, id int) error {
-	panic("MarkDownloading: not expected from Planner")
+func (s *fakePlannerStore) FailDownload(ctx context.Context, jobID int64, id int, msg string) error {
+	panic("FailDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
-	panic("MarkDownloaded: not expected from Planner")
+func (s *fakePlannerStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
+	panic("SkipDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) MarkFailed(ctx context.Context, id int, errMsg string) error {
-	panic("MarkFailed: not expected from Planner")
-}
-func (s *fakePlannerStore) MarkSkipped(ctx context.Context, id int, reason string) error {
-	panic("MarkSkipped: not expected from Planner")
+func (s *fakePlannerStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
+	panic("CancelDownload: not expected from Planner")
 }
 func (s *fakePlannerStore) RequeueStaleRunning(ctx context.Context) (int, error) {
 	panic("RequeueStaleRunning: not expected from Planner")

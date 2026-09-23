@@ -226,11 +226,21 @@ services:
 
 Point Plex at `/mnt/pool/media/library`. Two **separate** binds (e.g. `./downloads:/downloads`
 and `./library:/library`) cross filesystems inside the container, so the move falls back
-to a copy-then-delete (correct, just not instant). A move failure is non-fatal: the
+to a copy-then-delete (correct, just not instant). A copied file is flushed to disk before
+the downloads copy is removed. A move failure is non-fatal: the
 download still succeeds, and the lesson is recorded wherever its one complete copy is. A
 copy that fails part-way is taken back out of the library, so the lesson stays whole in the
 downloads dir; if the copy finished but the downloads copy can't be removed, the library
 copy is kept and recorded. Anything drumdrop could not clean up is logged with its path.
+
+Deleting a lesson (or a follow with its files) only ever removes files inside the downloads
+and library dirs. A path that reaches outside them through a symlinked folder is refused,
+and so is the root of either dir. The trade-off: a symlink you placed inside the library on
+purpose, pointing at another disk, is refused too, so lessons behind it can't be deleted
+from drumdrop. If a file can't be removed, the lesson is kept (still downloaded, and
+recording only what is left), the delete answers with an error, and the detail goes to the
+server log. Deleting a follow with its files keeps the follow and all its lessons in that
+case, so no file is left that drumdrop no longer tracks.
 
 #### Plex TV layout
 
@@ -252,12 +262,26 @@ Each course becomes one *show*, each lesson an *episode*:
   (the same `NN` used in the default layout). Files are flat in the season folder; a
   lesson's `resources/`, `play-along/` and `sheet-music/` folders move in as
   `<episode> resources` and so on.
-- **Deleting** a lesson removes every file and folder of that episode (both versions of a
-  song included) and nothing of any other episode; the season folder stays.
+- drumdrop **records the exact files and folders** each move places in the season folder,
+  and acts on that record. Two lessons can share an episode number in one show, and one
+  title can extend another (`Five` and `Five [Live]`), so a name alone can't say whose a file
+  is.
+- **Deleting** a lesson removes exactly what it recorded, even if its title has changed
+  since; the season folder and every other lesson's files stay. A lesson moved by a version
+  before the record existed is matched by name instead: `<episode>.mp4`, `.nfo`,
+  `-poster.jpg`, subtitles, song versions `<episode> [Label].mp4`, and the `resources`,
+  `play-along` and `sheet-music` folders. Anything another lesson also claims is kept and
+  logged, and if drumdrop can't tell which episode name is the lesson's, the delete is
+  refused rather than guessed.
+- A **re-download** replaces what the lesson's previous download recorded. It never
+  overwrites or removes another lesson's file: if one of its names is taken by another
+  lesson, the move is refused and the lesson stays whole in downloads (logged). A file at one
+  of its names that no lesson claims (say, one kept when a follow was deleted without its
+  files) is replaced, and that is logged. A name too long for the filesystem (255 bytes)
+  has its title shortened; if even that can't fit, the move is refused.
 - It shapes **only** the library move: downloads still happen in the usual scratch layout,
   and a move failure is non-fatal, as above (a half-done move is undone, so the lesson stays
-  whole in downloads). A re-download replaces the episode's previous files. With no
-  `DRUMDROP_LIBRARY_DIR` the setting does nothing.
+  whole in downloads). With no `DRUMDROP_LIBRARY_DIR` the setting does nothing.
 - The `.nfo` written here is a Kodi/Plex **`<episodedetails>`** doc (not the default
   `<movie>`): it carries the episode `<title>`, `<showtitle>`, `<season>`/`<episode>`,
   `<aired>` (publish date), the instructor `<actor>`, and the lesson plot/runtime. Writing

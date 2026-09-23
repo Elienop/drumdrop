@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // handleListLessons serves GET /api/lessons. With ?status it returns every
@@ -167,29 +169,40 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 // otherwise re-discover and re-download it — ShouldSkipEnqueue already skips
 // 'skipped', and un-skip can bring it back later.
 //
-// It reads the lesson first so an unknown id maps cleanly to 404 (mirroring
-// handleSkipLesson; UpdateLessonDeleted's own miss is a benign no-op). File
-// removal uses the RAW stored output_dir (the container path under DownloadsDir),
-// NOT the host-mapped DTO value, and is best-effort. A non-integer id is a 400.
+// It first removes the lesson's queued and running jobs (BeginLessonDelete)
+// and kills a running download, so no step of a download already under way can
+// record anything once the delete answers. File removal uses the RAW stored
+// paths (container paths), NOT the host-mapped DTO values, and follows the
+// lesson's record (see removeLessonFiles). An unknown id is a 404, a
+// non-integer id a 400. When a file could not be removed, the lesson is kept
+// with its record of what is left, the detail goes to the server log, and the
+// client gets a fixed 500; when a download recorded new files meanwhile, a 409.
 func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
 		return
 	}
 
-	l, err := s.store.GetLesson(r.Context(), id)
+	l, running, err := s.store.BeginLessonDelete(r.Context(), id)
 	if err != nil {
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
+	s.killRunning(running)
 
-	// Best-effort file removal before clearing the paths; a failure must not block
-	// the tombstone (the row would otherwise keep claiming a path we tried to drop).
-	if l.OutputDir.Valid {
-		_ = removeLessonFiles(s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
+	others, err := s.store.ListLessonsWithFiles(r.Context())
+	if err != nil {
+		writeStoreErr(w, err, "lesson not found")
+		return
 	}
-
-	if err := s.store.UpdateLessonDeleted(r.Context(), id); err != nil {
+	switch err := s.deleteLessonFiles(r.Context(), l, others); {
+	case errors.Is(err, errFilesKept):
+		writeErr(w, http.StatusInternalServerError, "could not delete the lesson's files; the lesson was kept (see the server log)")
+		return
+	case errors.Is(err, database.ErrLessonChanged):
+		writeErr(w, http.StatusConflict, "the lesson was downloaded again while it was being deleted; try again")
+		return
+	case err != nil:
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}

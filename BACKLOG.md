@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D57 on 2026-09-23 (*moves*; re-check the
+the highest ID on this page: the next new ID is D65 on 2026-09-23 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -97,22 +97,80 @@ onboarding session's proposal, not an owner ruling; the owner may reorder.
 
 D53 waits on an owner decision.
 
-- **D55 · A plex-tv lesson with no video can't be deleted from the library.**
-  - *What:* in a plex-tv season folder, the delete finds an episode's entries from its
-    recorded video's name. A lesson recorded without one (`--resources-only`, or a song
-    whose soundslice score has no recordings) has an empty `video_path`, so the delete is a
-    no-op and its nfo, poster and folders stay in the library, untracked.
-  - *Why:* the same leftovers D51 fixed, for the lessons that have no video. It needs the
-    episode name recorded some other way (e.g. a column), which is a schema decision.
-  - *Evidence:* `grep -n 'videoPath == ""' internal/server/lessonfiles.go` ·
-    `grep -n 'ResourcesOnly' internal/scheduler/worker.go`
-- **D56 · Deleting a lesson's files discards every error.**
-  - *What:* both delete paths call `_ = removeLessonFiles(...)` (`handleDeleteLesson`, and
-    `?files=true` on follow delete). A refusal or a file that can't be removed is neither
-    logged nor returned, so the lesson reads as deleted while its files stay.
-  - *Why:* invisible leftovers, the same symptom as D51. The server has no logger today, so
-    the fix is to pick where these go (stderr like the worker, or the response).
-  - *Evidence:* `grep -n '_ = removeLessonFiles' internal/server/*.go`
+- **D58 · A re-download whose folder changes leaves the old one behind, untracked.**
+  - *What:* a re-download records its new location and nothing removes the old one when
+    the path differs: a default-layout lesson whose title changed (`05 - Old` stays next to
+    `05 - New`), a switch from the default layout to plex-tv (the `Course/NN - Lesson`
+    folder stays), and a plex-tv lesson moved before the library record existed
+    (`library_entries` NULL) that is re-downloaded after a switch to the default layout, or
+    while the other lessons' records can't be read, or whose previous episode name is
+    ambiguous (the move logs "the previous download's library files are not known"). A
+    legacy lesson with no video whose title has changed is not found by the name fallback
+    either.
+  - *Why:* Plex shows the old copy too, and no delete will ever remove it. A lesson that
+    already has a record carries it across these cases, so this is the legacy rows and the
+    default layout's folder.
+  - *Evidence:* `grep -n 'carriedEntries\|previous download.s library files are not known' internal/scheduler/*.go`
+    · `grep -n 'func moveToLibrary' -A30 internal/scheduler/library.go` (only the new
+    destination is cleared).
+- **D59 · A long title in a multibyte script can't be downloaded.**
+  - *What:* `musora.Sanitize` caps a title at 150 *runes*, but file names are capped at 255
+    *bytes*. The scratch folder `NN - <title>` and its `<title>.mp4` hold the whole title,
+    so 150 runes of CJK text (3 bytes each) is about 450 bytes and the download fails. The
+    plex-tv move shortens the episode name to fit (`fitEpisodeBase`), but the download
+    never gets that far.
+  - *Why:* such a lesson fails every attempt.
+  - *Evidence:* `grep -n 'len(r) > 150' internal/musora/download.go` ·
+    `grep -n 'func lessonDir' -A3 internal/scheduler/worker.go`
+- **D60 · A download a delete overtakes can still leave or lose files in two cases.**
+  - *What:* once a delete answers, no step of an earlier download records anything (its
+    writes are guarded by its job, which the delete removed), and the worker removes what
+    it wrote. Two gaps remain. (a) With no `DRUMDROP_LIBRARY_DIR`, the lesson folder is
+    also the lesson's permanent home, so the worker leaves it alone: files written after a
+    lesson delete removed that folder stay, untracked. (b) With a library, a follow
+    deleted *without* its files while one of its lessons is being re-downloaded: the
+    re-download may already have replaced the lesson's library copy, and it is then
+    discarded, so the files the owner chose to keep are gone.
+  - *Why:* (a) is an untracked leftover, (b) a lost copy. Both need the worker to know
+    which kind of delete overtook it (a lesson delete tombstones the row; a follow delete
+    removes it).
+  - *Evidence:* `grep -n 'func (w \*Worker) discardAbandoned' -A8 internal/scheduler/worker_record.go`
+- **D61 · A job canceled between two attempts is briefly re-marked running.**
+  - *What:* `MarkJobRunning` re-stamps a job by id whatever its status, so a cancel that
+    lands between a failed attempt and the next one is overwritten with `running` (and one
+    more attempt counted) before the canceled attempt ends it again.
+  - *Why:* a wrong attempt count and a job that reads as running for a moment. The download
+    itself does stop.
+  - *Evidence:* `grep -n 'passes an empty guard' internal/database/jobs.go`
+- **D62 · Plex can see half-copied files during a cross-filesystem move.**
+  - *What:* on the copy fallback (downloads and library on different filesystems) the
+    entries are copied into place under their final names, so a Plex scan during the copy
+    sees partial files. Copying under a hidden staging name and renaming would close it,
+    but whether Plex skips hidden entries is unverified. (Moved here from D52's *Left
+    open*.)
+  - *Why:* Plex may index a truncated file until its next scan.
+  - *Evidence:* `grep -n 'func copyTree\|func copyFile' internal/scheduler/plexmove.go`
+- **D63 · A lesson whose re-download was canceled or deleted keeps its files as "skipped".**
+  - *What:* canceling a lesson's re-download (or a delete that removes its running job,
+    then can't remove its files) leaves the row `skipped` / `canceled` while it still
+    records its earlier files. The Lessons page offers *Delete* only for `downloaded`, so
+    those files can't be deleted from the UI until the lesson is un-skipped and downloaded
+    again.
+  - *Why:* files the UI can't reach. The API delete still works.
+  - *Evidence:* `grep -n "StatusSkipped, rcID, StatusDownloading\|func (s \*Store) CancelDownload" internal/database/downloads.go`
+    · `grep -n 'lesson.status === "downloaded"' web/src/pages/Lessons.tsx`
+- **D64 · The store still exports the unguarded download writers.**
+  - *What:* the worker now records through the job-guarded writers (`StartDownload`,
+    `FinishDownload`, `FailDownload`, `SkipDownload`, `CancelDownload`), and a delete
+    through `BeginLessonDelete` / `TombstoneLesson`. The old writers (`MarkDownloaded`,
+    `MarkDownloading`, `MarkFailed`, `MarkJobDone`, `MarkJobFailed`, `MarkJobCanceled`,
+    `UpdateLessonDeleted`) have no production caller left, only tests that use them as
+    fixtures.
+  - *Why:* a new caller of one of them would bypass the guard that stops an earlier
+    download from recording after a delete. Remove them, moving the tests onto the guarded
+    writers or a test-only seed helper.
+  - *Evidence:* `grep -rn '\.MarkDownloaded(\|\.MarkJobDone(\|\.UpdateLessonDeleted(' --include=*.go . | grep -v _test.go`
+    (prints nothing).
 
 - **D54 · Every API route accepts the token in the URL, not only the live-progress stream.**
   - *What:* `requestToken` in `internal/server/auth.go` reads the `Authorization: Bearer`
@@ -378,6 +436,21 @@ D53 waits on an owner decision.
 Two choices described in their own entries are also waiting on the owner: D3's yt-dlp rebuild,
 and D53's fix for the tokenless loopback mode (options A, B or C).
 
+- **D57 · Two lessons can share an episode number in one show. Keep the numbering?**
+  - *Context:* a lesson's episode number is its position in the expansion of the follow
+    that first found it (`UpsertLesson` keeps the first write). The plex-tv show is the
+    course, so lessons that reached one course through different follows (a node follow of
+    the course, and an instructor follow, say) can get the same `s01eNN`, and a lesson with
+    no position is numbered 1. Since this branch drumdrop tells their files apart by record,
+    so a delete or a re-download never touches the other lesson's files; how Plex shows two
+    files with one episode number in one season is unverified.
+  - *Options:* (a) keep it: ownership is by record, and the names stay as they are. (b)
+    Number episodes by the lesson's place in its course. (c) Give a colliding lesson the
+    next free number. (b) and (c) rename files in the owner's library, which is why this is
+    the owner's call.
+  - *Evidence:* `grep -n 'COALESCE(lessons.position' internal/database/lessons.go` ·
+    `grep -n 'position := sql.NullInt64' internal/scheduler/planner.go`
+
 - **D25 · The stored password: build automatic re-login, or stop storing it?**
   - *Context:* see D4. The original design (2026-05-29) chose "auth via stored email/password
     (encrypted)" so drumdrop could log in again when the session cookie expires (it slides,
@@ -591,19 +664,21 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     folder the move returned and recorded downloads, so Plex showed an untracked copy.
   - *Now:* whatever fails, one complete copy is left and that is what gets recorded. A copy
     that fails part-way is taken back out of the library (plex-tv renames already-moved
-    entries back into scratch), and the lesson is recorded whole in downloads. A finished
-    copy whose downloads folder can't be removed is recorded in the library, in both
-    layouts. Anything that can't be cleaned up is logged with its path (`⚠ move to
-    library`). A plex-tv re-download clears the episode's previous entries first, like the
-    default layout clears its folder. The move stays non-fatal; library == downloads is
-    still a no-op.
-  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|ReplacesAPrevious'
+    entries back into scratch; a partly copied entry is removed, and only what is really
+    left is reported), and the lesson is recorded whole in downloads. A finished copy whose
+    downloads folder can't be removed is recorded in the library, in both layouts. Copied
+    files, and the folders the copy creates, are flushed to disk before the downloads copy
+    is removed, and the copy refuses a symlinked lesson folder instead of following it.
+    Library == downloads is decided by identity, not spelling: the move is a no-op for an
+    alias (a symlink, or one folder bound twice) too. A plex-tv re-download first removes exactly what
+    the lesson's previous download recorded (D51), and stops, recording what is left, if
+    that fails. Anything that can't be cleaned up is logged with its path (`⚠ move to
+    library`). The move stays non-fatal.
+  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared'
     ./internal/scheduler/` (the permission-based ones skip as root).
   - *Left open:* if the OS refuses both the move and its undo (a renamed entry can't be
-    renamed back), the lesson stays split and the log names every path. While a
-    cross-filesystem copy is running, Plex can see the half-copied files (it happened before
-    too); copying to a hidden staging name first would close that, but whether Plex skips
-    hidden folders is unverified.
+    renamed back), the lesson stays split and the log names every path. Plex seeing
+    half-copied files is D62.
 - **D51 · A plex-tv delete left most of a song, and every lesson's folders, behind.** This
   branch (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* the delete matched the recorded video's name minus `.mp4` followed by `.` or `-`.
@@ -612,16 +687,50 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     Separately, the delete chose its method from today's `DRUMDROP_LAYOUT`, so switching the
     layout back to default and deleting one plex-tv lesson would have removed its whole
     shared season folder.
-  - *Now:* the delete removes every entry the move placed for the episode, through
-    `scheduler.PlexEpisodeMatcher`, and the move refuses (writing nothing) to place any name
-    that matcher would not recognise, so the two cannot drift apart again. The delete picks
-    its method from where the lesson was recorded (`scheduler.IsPlexSeasonDir`), not from the
-    layout setting: a season folder loses one episode's entries, any other folder is removed
-    whole. Episode 5 still never matches episode 50, nor a title that extends its own.
-  - *Evidence:* `go test -count=1 -run 'RemoveLessonFiles|PlexEpisode|PlexSeason|RefusesAName'
-    ./internal/server/ ./internal/scheduler/`
-  - *Left open:* D55 (a plex-tv lesson with no video can't be deleted), D56 (delete errors
-    are discarded).
+  - *Now:* files are known by record (owner ruling #66). The plex-tv move records the exact
+    season-folder entries it placed with the lesson (`lessons.library_entries`, migration
+    004), and a delete or a re-download acts on exactly those, whatever the title is now:
+    both versions of a song, its nfo, poster and folders go, and nothing another lesson
+    recorded, even at the same episode number or under a title that extends this one
+    (`Five`, `Five [Live]`, `Five-Part Fill`, `Five.5`). A lesson moved before the record
+    existed falls back to name matching (`scheduler.PlanLessonEntries`): only the names the
+    move produces, skipping (and logging) anything another lesson claims, and refusing
+    rather than guessing when its episode name is ambiguous. The move never overwrites or
+    removes an entry another lesson claims (it refuses, writing nothing), and it accepts any
+    title, brackets included. The delete picks its method from where the lesson was recorded
+    (`scheduler.IsPlexSeasonDir`), not from the layout setting, and removes through
+    `os.Root`, so it stays inside the downloads and library dirs.
+  - *Evidence:* `go test -count=1 -run 'RemoveLessonFiles|DeleteLesson|DeleteFollow|PlanLessonEntries|LegacyEpisode|MoveToLibraryPlexTV|WorkerPlexTv|Migration004'
+    ./internal/server/ ./internal/scheduler/ ./internal/database/`
+  - *Left open:* D57 (two lessons can share an episode number), D58 (a legacy lesson's
+    previous files can be left behind when its folder changes).
+- **D55 · A plex-tv lesson with no video couldn't be deleted from the library.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the delete found an episode's entries from its recorded video's name, so a
+    lesson recorded without one (`--resources-only`, or a song whose score has no
+    recordings) was a no-op, and its nfo, poster and folders stayed, untracked.
+  - *Now:* the lesson's record names its entries, video or not. A no-video lesson moved
+    before the record existed falls back to the episode name built from its title and
+    position (if the title has changed since, see D58).
+  - *Evidence:* `go test -count=1 -run 'NoVideoLessonByRecord|SeasonFolderIsNeverWiped' ./internal/server/`
+- **D56 · Deleting a lesson's files discarded every error.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* both delete paths called `_ = removeLessonFiles(...)`, so a refusal or a file that
+    couldn't be removed was neither logged nor returned, and the lesson read as deleted
+    while its files stayed.
+  - *Now:* a lesson whose files could not all be removed keeps its paths and records
+    exactly what is left, and the caller is told: a fixed 500 message, with the detail on
+    the server's stderr (never in the response). Deleting a follow with its files keeps the
+    follow and every lesson row in that case, so no file loses its row. A delete first
+    removes the lesson's queued and running jobs and kills the running download; every
+    write the worker makes is guarded by its job, so once a delete answers, no step of an
+    earlier download can record anything, and the worker removes what it wrote. A download
+    started after the delete began that records files before it finishes gets a 409, and
+    its record stands.
+  - *Evidence:* `go test -count=1 -run 'CannotBeRemoved|ReportsWhatRemains|StopsItsDownload|Meanwhile|Abandoned|StopsWhenDeleted|WorkerWritesAreAbandoned|TombstoneAndKeep|BeginLessonDelete|BeginFollowDelete'
+    ./internal/server/ ./internal/scheduler/ ./internal/database/`
+  - *Left open:* D60 (two cases a delete still can't cover), D63 (a canceled re-download
+    leaves files the UI can't delete).
 - **D49 · Board and repo hygiene.** PR #20 (branch `chore/vault-onboarding`) adds this
   BACKLOG.md. It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's
   vault, and `.mcp.json` (per-machine Claude Code config). It also tracks `sonar-project.properties` with its

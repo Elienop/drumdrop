@@ -47,6 +47,12 @@ type fakeWorkerStore struct {
 	// Optional fault injection.
 	claimErr     error
 	getFollowErr error
+	// gone marks jobs a delete removed: every guarded write for them returns
+	// database.ErrDownloadAbandoned and records nothing.
+	gone map[int64]bool
+	// withFiles is what ListLessonsWithFiles returns (or withFilesErr).
+	withFiles    []database.Lesson
+	withFilesErr error
 }
 
 type markDownloadedCall struct {
@@ -55,6 +61,7 @@ type markDownloadedCall struct {
 	outputDir string
 	videoPath string
 	bytes     int64
+	entries   []string
 }
 
 func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
@@ -115,61 +122,93 @@ func (s *fakeWorkerStore) MarkJobRunning(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *fakeWorkerStore) MarkJobDone(ctx context.Context, id int64) error {
+func (s *fakeWorkerStore) markJobDone(id int64) {
 	s.markDone = append(s.markDone, id)
 	j := s.jobs[id]
 	j.Status = database.JobDone
 	s.jobs[id] = j
-	return nil
 }
 
-func (s *fakeWorkerStore) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
+func (s *fakeWorkerStore) markJobFailedAs(id int64, errMsg string) {
 	s.markJobFailed = append(s.markJobFailed, id)
 	j := s.jobs[id]
 	j.Status = database.JobFailed
 	j.Error = sql.NullString{String: errMsg, Valid: true}
 	s.jobs[id] = j
-	return nil
 }
 
-// MarkJobCanceled mirrors the store's guarded cancel: it only transitions a
-// running job and is a benign no-op otherwise, so worker cancel-branch tests
-// see the same status semantics as production.
-func (s *fakeWorkerStore) MarkJobCanceled(ctx context.Context, id int64) error {
-	s.markJobCanceled = append(s.markJobCanceled, id)
-	s.markJobCanceledCtxErr = append(s.markJobCanceledCtxErr, ctx.Err())
-	j := s.jobs[id]
-	if j.Status == database.JobRunning {
-		j.Status = database.JobCanceled
-		s.jobs[id] = j
+// abandoned mirrors the store's job guard: a job a delete removed takes no
+// write.
+func (s *fakeWorkerStore) abandoned(jobID int64) error {
+	if s.gone[jobID] {
+		return fmt.Errorf("job %d: %w", jobID, database.ErrDownloadAbandoned)
 	}
 	return nil
 }
 
-func (s *fakeWorkerStore) MarkDownloading(ctx context.Context, id int) error {
+func (s *fakeWorkerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	return s.withFiles, s.withFilesErr
+}
+
+func (s *fakeWorkerStore) StartDownload(ctx context.Context, jobID int64, id int) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
 	s.markDownloadng = append(s.markDownloadng, id)
 	return nil
 }
 
-func (s *fakeWorkerStore) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
+func (s *fakeWorkerStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
 	s.markDownloaded = append(s.markDownloaded, markDownloadedCall{
 		id:        id,
-		quality:   quality,
-		outputDir: outputDir,
-		videoPath: videoPath,
-		bytes:     bytes,
+		quality:   rec.Quality,
+		outputDir: rec.OutputDir,
+		videoPath: rec.VideoPath,
+		bytes:     rec.Bytes,
+		entries:   rec.LibraryEntries,
 	})
+	s.markJobDone(jobID)
 	return nil
 }
 
-func (s *fakeWorkerStore) MarkFailed(ctx context.Context, id int, errMsg string) error {
+func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, errMsg string) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
 	s.markFailed = append(s.markFailed, id)
+	s.markJobFailedAs(jobID, errMsg)
 	return nil
 }
 
-func (s *fakeWorkerStore) MarkSkipped(ctx context.Context, id int, reason string) error {
+func (s *fakeWorkerStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
 	s.markSkipped = append(s.markSkipped, id)
 	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
+	s.markJobFailedAs(jobID, reason)
+	return nil
+}
+
+// CancelDownload mirrors the store's guarded cancel: it only transitions a
+// running job and is a benign no-op otherwise, so worker cancel-branch tests
+// see the same status semantics as production.
+func (s *fakeWorkerStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
+	s.markSkipped = append(s.markSkipped, id)
+	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
+	s.markJobCanceled = append(s.markJobCanceled, jobID)
+	s.markJobCanceledCtxErr = append(s.markJobCanceledCtxErr, ctx.Err())
+	j := s.jobs[jobID]
+	if j.Status == database.JobRunning {
+		j.Status = database.JobCanceled
+		s.jobs[jobID] = j
+	}
 	return nil
 }
 
@@ -293,8 +332,14 @@ func (d *fakeDownloader) Download(_ context.Context, l *musora.Lesson, o musora.
 			if err := os.WriteFile(filepath.Join(dir, "resources", "song.pdf"), []byte("pdf-bytes"), 0o644); err != nil {
 				return err
 			}
-		} else if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
-			return err
+		} else {
+			if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
+				return err
+			}
+			// DownloadLesson always writes the <movie> nfo last.
+			if err := os.WriteFile(filepath.Join(dir, base+".nfo"), []byte("<movie/>"), 0o644); err != nil {
+				return err
+			}
 		}
 		if d.afterWrite != nil {
 			d.afterWrite(dir)
@@ -1867,7 +1912,7 @@ func TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 	}
 	assertRecordedWhole(t, rec, "05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4", "resources/song.pdf")
 	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
-	if !strings.Contains(logBuf.String(), srcDir) {
+	if !strings.Contains(logBuf.String(), fmt.Sprintf("leftover at %q", srcDir)) {
 		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
 	}
 }
@@ -1913,7 +1958,7 @@ func TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
 	base := "Beginner Course - s01e05 - Even Flow"
 	assertRecordedWhole(t, rec, base+" [Drumless].mp4", base+" [Original].mp4", base+" resources/song.pdf")
 	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
-	if !strings.Contains(logBuf.String(), srcDir) {
+	if !strings.Contains(logBuf.String(), fmt.Sprintf("leftover at %q", srcDir)) {
 		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
 	}
 }

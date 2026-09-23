@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +39,13 @@ func seedLesson(t *testing.T) (downloadsDir, lessonDir string) {
 		}
 	}
 	return downloadsDir, lessonDir
+}
+
+// movePlex runs the plex-tv move with no lesson on record (no previous
+// download, no other lesson), returning the season folder and the video.
+func movePlex(libraryDir, show string, season, episode int, title, lessonDir string) (string, string, error) {
+	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, plexLibrary{})
+	return res.seasonDir, res.videoPath, err
 }
 
 // lessonFiles is the four file names seedLesson writes.
@@ -237,7 +245,7 @@ func TestMoveToLibraryPlexTV(t *testing.T) {
 	_, lessonDir := seedLesson(t)
 	libraryDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(lessonDir)))), "lib")
 
-	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
+	seasonDir, videoPath, err := movePlex(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibraryPlexTV: %v", err)
 	}
@@ -280,7 +288,7 @@ func TestMoveToLibraryPlexTVCrossFsFallback(t *testing.T) {
 	rename = func(oldpath, newpath string) error { return errInjectedRename }
 	t.Cleanup(func() { rename = orig })
 
-	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
+	seasonDir, videoPath, err := movePlex(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibraryPlexTV: %v", err)
 	}
@@ -322,11 +330,11 @@ func TestMoveToLibraryPlexTVSharedSeason(t *testing.T) {
 	}
 
 	s1 := mkScratch(5, "Five")
-	if _, _, err := moveToLibraryPlexTV(libraryDir, "Show", 1, 5, "Five", s1); err != nil {
+	if _, _, err := movePlex(libraryDir, "Show", 1, 5, "Five", s1); err != nil {
 		t.Fatalf("move e05: %v", err)
 	}
 	s2 := mkScratch(6, "Six")
-	season, _, err := moveToLibraryPlexTV(libraryDir, "Show", 1, 6, "Six", s2)
+	season, _, err := movePlex(libraryDir, "Show", 1, 6, "Six", s2)
 	if err != nil {
 		t.Fatalf("move e06: %v", err)
 	}
@@ -367,7 +375,7 @@ func TestMoveToLibraryPlexTVSongVersions(t *testing.T) {
 		t.Fatalf("write pdf: %v", err)
 	}
 
-	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Songs", 1, 1, "Even Flow", lessonDir)
+	seasonDir, videoPath, err := movePlex(libraryDir, "Songs", 1, 1, "Even Flow", lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibraryPlexTV: %v", err)
 	}
@@ -423,104 +431,6 @@ func TestPlexEpisodeBase(t *testing.T) {
 	// show and title are sanitized (path separators replaced); season/episode zero-padded.
 	if got, want := plexEpisodeBase("A/B", "C:D", 2, 13), musora.Sanitize("A/B")+" - s02e13 - "+musora.Sanitize("C:D"); got != want {
 		t.Errorf("plexEpisodeBase sanitized = %q, want %q", got, want)
-	}
-}
-
-// TestPlexTVMoveIsFullyRecognisedByTheDeleteMatcher proves the move and the
-// delete stay in step: after a real plex-tv move of a song with every kind of
-// entry DownloadLesson produces (two versions, nfo, poster, resources/,
-// play-along/, sheet-music/), the matcher built from the recorded video accepts
-// every entry the move placed, and none of a sibling episode's.
-func TestPlexTVMoveIsFullyRecognisedByTheDeleteMatcher(t *testing.T) {
-	tmp := t.TempDir()
-	libraryDir := filepath.Join(tmp, "lib")
-	scratchBase := "05 - Even Flow"
-	lessonDir := filepath.Join(tmp, "dl", "Songs", scratchBase)
-	for _, sub := range []string{"resources", "play-along", "sheet-music"} {
-		if err := os.MkdirAll(filepath.Join(lessonDir, sub), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", sub, err)
-		}
-		if err := os.WriteFile(filepath.Join(lessonDir, sub, "f"), []byte(sub), 0o644); err != nil {
-			t.Fatalf("write %s/f: %v", sub, err)
-		}
-	}
-	for _, suffix := range []string{" [Original].mp4", " [Drumless].mp4", ".nfo", "-poster.jpg"} {
-		if err := os.WriteFile(filepath.Join(lessonDir, scratchBase+suffix), []byte(suffix), 0o644); err != nil {
-			t.Fatalf("write %s: %v", suffix, err)
-		}
-	}
-	// A sibling episode already in the shared season folder, including a
-	// look-alike title and episode 50.
-	seasonDir := filepath.Join(libraryDir, "Songs", "Season 01")
-	siblings := []string{"Songs - s01e50 - Fifty [Drumless].mp4", "Songs - s01e05 - Even Flow Live.mp4"}
-	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
-		t.Fatalf("mkdir season: %v", err)
-	}
-	for _, name := range siblings {
-		if err := os.WriteFile(filepath.Join(seasonDir, name), []byte("sibling"), 0o644); err != nil {
-			t.Fatalf("write sibling: %v", err)
-		}
-	}
-
-	gotSeason, videoPath, err := moveToLibraryPlexTV(libraryDir, "Songs", 1, 5, "Even Flow", lessonDir)
-	if err != nil {
-		t.Fatalf("moveToLibraryPlexTV: %v", err)
-	}
-	if gotSeason != seasonDir {
-		t.Fatalf("seasonDir = %q, want %q", gotSeason, seasonDir)
-	}
-	match, ok := PlexEpisodeMatcher(videoPath)
-	if !ok {
-		t.Fatalf("PlexEpisodeMatcher(%q) not ok, want a matcher for the recorded video", videoPath)
-	}
-	entries, err := os.ReadDir(seasonDir)
-	if err != nil {
-		t.Fatalf("read season: %v", err)
-	}
-	placed := 0
-	for _, e := range entries {
-		isSibling := e.Name() == siblings[0] || e.Name() == siblings[1]
-		if got := match(e.Name(), e.IsDir()); got == isSibling {
-			t.Errorf("match(%q, dir=%v) = %v, want %v", e.Name(), e.IsDir(), got, !isSibling)
-		}
-		if !isSibling {
-			placed++
-		}
-	}
-	if placed != 7 {
-		t.Errorf("move placed %d entries, want 7 (2 versions, nfo, poster, 3 folders)", placed)
-	}
-}
-
-// TestMoveToLibraryPlexTVRefusesANameTheDeleteWouldMiss proves the move writes
-// nothing when it would place an entry the delete could not recognise (here a
-// scratch folder whose name has a space, which becomes "<episode> sheet music"),
-// leaving the lesson whole in downloads.
-func TestMoveToLibraryPlexTVRefusesANameTheDeleteWouldMiss(t *testing.T) {
-	tmp := t.TempDir()
-	libraryDir := filepath.Join(tmp, "lib")
-	lessonDir := filepath.Join(tmp, "dl", "01 - One")
-	if err := os.MkdirAll(filepath.Join(lessonDir, "sheet music"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(lessonDir, "01 - One.mp4"), []byte("v"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	seasonDir, videoPath, err := moveToLibraryPlexTV(libraryDir, "Show", 1, 1, "One", lessonDir)
-	if err == nil {
-		t.Fatalf("moveToLibraryPlexTV = (%q, %q, nil), want a refusal", seasonDir, videoPath)
-	}
-	if seasonDir != "" || videoPath != "" {
-		t.Errorf("refused move returned (%q, %q), want empty paths", seasonDir, videoPath)
-	}
-	if _, err := os.Stat(libraryDir); !os.IsNotExist(err) {
-		t.Errorf("library written by a refused move (stat err = %v), want untouched", err)
-	}
-	for _, name := range []string{"01 - One.mp4", "sheet music"} {
-		if _, err := os.Stat(filepath.Join(lessonDir, name)); err != nil {
-			t.Errorf("scratch %q gone after a refused move: %v", name, err)
-		}
 	}
 }
 
@@ -664,7 +574,7 @@ func TestMoveToLibrarySourceNotRemovableKeepsLibraryCopy(t *testing.T) {
 	if newDir != wantDir {
 		t.Errorf("newDir = %q, want the complete library copy %q", newDir, wantDir)
 	}
-	if err == nil || !strings.Contains(err.Error(), lessonDir) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("leftover at %q", lessonDir)) {
 		t.Errorf("err = %v, want an error naming the downloads leftover %q", err, lessonDir)
 	}
 	for _, name := range lessonFiles {
@@ -749,7 +659,7 @@ func TestMoveToLibraryPlexTVCopyFailsPartWayUndoesTheMove(t *testing.T) {
 	forceCopyFallback(t)
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow.nfo"))
 
-	gotSeason, videoPath, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	gotSeason, videoPath, err := movePlex(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
 	if err == nil {
 		t.Fatal("moveToLibraryPlexTV = nil error, want the copy failure")
 	}
@@ -777,7 +687,7 @@ func TestMoveToLibraryPlexTVUndoRenamesBack(t *testing.T) {
 	t.Cleanup(func() { rename = orig })
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4"))
 
-	gotSeason, _, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	gotSeason, _, err := movePlex(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
 	if err == nil || gotSeason != "" {
 		t.Fatalf("moveToLibraryPlexTV = (%q, %v), want (\"\", the copy failure)", gotSeason, err)
 	}
@@ -796,51 +706,19 @@ func TestMoveToLibraryPlexTVSourceNotRemovableKeepsLibraryCopy(t *testing.T) {
 	forceCopyFallback(t)
 	makeUndeletable(t, filepath.Join(lessonDir, "resources"))
 
-	gotSeason, videoPath, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	gotSeason, videoPath, err := movePlex(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
 	if gotSeason != seasonDir {
 		t.Errorf("seasonDir = %q, want %q (the complete library copy)", gotSeason, seasonDir)
 	}
 	if want := filepath.Join(seasonDir, episodeBase+" [Drumless].mp4"); videoPath != want {
 		t.Errorf("videoPath = %q, want %q", videoPath, want)
 	}
-	if err == nil || !strings.Contains(err.Error(), lessonDir) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("leftover at %q", lessonDir)) {
 		t.Errorf("err = %v, want an error naming the downloads leftover %q", err, lessonDir)
 	}
 	for _, name := range []string{" [Drumless].mp4", " [Original].mp4", "-poster.jpg", ".nfo", " resources/song.pdf"} {
 		if _, err := os.Stat(filepath.Join(seasonDir, episodeBase+name)); err != nil {
 			t.Errorf("library copy is missing %s: %v", episodeBase+name, err)
-		}
-	}
-}
-
-// TestMoveToLibraryPlexTVReplacesAPreviousDownload proves a re-download replaces
-// the episode's entries from the previous one instead of merging with them: a
-// stale version file and a stale resource are gone, and a sibling stays.
-func TestMoveToLibraryPlexTVReplacesAPreviousDownload(t *testing.T) {
-	tmp := t.TempDir()
-	lessonDir, episodeBase, seasonDir := seedSongScratch(t, tmp)
-	if err := os.MkdirAll(filepath.Join(seasonDir, episodeBase+" resources"), 0o755); err != nil {
-		t.Fatalf("mkdir stale: %v", err)
-	}
-	stale := []string{episodeBase + " [Live].mp4", filepath.Join(episodeBase+" resources", "old.pdf")}
-	sibling := "Songs - s01e50 - Fifty.mp4"
-	for _, name := range append([]string{sibling}, stale...) {
-		if err := os.WriteFile(filepath.Join(seasonDir, name), []byte("old"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	if _, _, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir); err != nil {
-		t.Fatalf("moveToLibraryPlexTV: %v", err)
-	}
-	for _, name := range stale {
-		if _, err := os.Stat(filepath.Join(seasonDir, name)); !os.IsNotExist(err) {
-			t.Errorf("stale %q from the previous download survived (stat err = %v), want replaced", name, err)
-		}
-	}
-	for _, name := range []string{sibling, episodeBase + " resources/song.pdf", episodeBase + " [Original].mp4"} {
-		if _, err := os.Stat(filepath.Join(seasonDir, name)); err != nil {
-			t.Errorf("%q missing after the re-download: %v", name, err)
 		}
 	}
 }

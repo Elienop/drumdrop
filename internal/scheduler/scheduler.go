@@ -59,14 +59,16 @@ type Store interface {
 	ClaimNextJob(ctx context.Context) (database.Job, bool, error)
 	GetFollow(ctx context.Context, id int64) (database.Follow, error)
 	GetLesson(ctx context.Context, id int) (database.Lesson, error)
+	ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error)
 	MarkJobRunning(ctx context.Context, id int64) error
-	MarkJobDone(ctx context.Context, id int64) error
-	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
-	MarkJobCanceled(ctx context.Context, id int64) error
-	MarkDownloading(ctx context.Context, id int) error
-	MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error
-	MarkFailed(ctx context.Context, id int, errMsg string) error
-	MarkSkipped(ctx context.Context, id int, reason string) error
+	// The worker's writes about a job land only while the job and its lesson
+	// still exist (database.ErrDownloadAbandoned otherwise), so nothing a
+	// download does can land after a delete removed them.
+	StartDownload(ctx context.Context, jobID int64, id int) error
+	FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error
+	FailDownload(ctx context.Context, jobID int64, id int, msg string) error
+	SkipDownload(ctx context.Context, jobID int64, id int, reason string) error
+	CancelDownload(ctx context.Context, jobID int64, id int) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
 }
 

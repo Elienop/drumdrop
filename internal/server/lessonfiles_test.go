@@ -1,10 +1,15 @@
 package server
 
 import (
+	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // mkLessonDir creates root/<rel> with a sample video file and returns the lesson
@@ -21,66 +26,85 @@ func mkLessonDir(t *testing.T, root, rel string) string {
 	return dir
 }
 
-// TestRemoveLessonFilesLibraryRooted asserts a library-rooted output_dir (the
-// stored location when the library is on, post-move) is removed.
-func TestRemoveLessonFilesLibraryRooted(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-
-	outputDir := mkLessonDir(t, library, "Inst/Course/01 - Lesson")
-
-	if err := removeLessonFiles(downloads, library, outputDir, ""); err != nil {
-		t.Fatalf("removeLessonFiles: %v", err)
-	}
-	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
-		t.Errorf("library-rooted output_dir still present (err=%v)", err)
+// dirLesson is a lesson recorded in its own folder (the default layout, or a
+// plex-tv lesson whose move failed).
+func dirLesson(id int, outputDir string) database.Lesson {
+	return database.Lesson{
+		RailcontentID: id,
+		Status:        database.StatusDownloaded,
+		OutputDir:     sql.NullString{String: outputDir, Valid: true},
 	}
 }
 
-// TestRemoveLessonFilesDownloadsRooted asserts a downloads-rooted output_dir (the
-// no-library case) is removed.
-func TestRemoveLessonFilesDownloadsRooted(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-
-	outputDir := mkLessonDir(t, downloads, "01 - Lesson")
-
-	if err := removeLessonFiles(downloads, library, outputDir, ""); err != nil {
-		t.Fatalf("removeLessonFiles: %v", err)
+// recordedLesson is a plex-tv lesson whose record names exactly names in season.
+func recordedLesson(id int, season string, names ...string) database.Lesson {
+	l := dirLesson(id, season)
+	var entries []string
+	for _, n := range names {
+		entries = append(entries, filepath.Join(season, strings.TrimSuffix(n, "/")))
 	}
-	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
-		t.Errorf("downloads-rooted output_dir still present (err=%v)", err)
-	}
+	l.LibraryEntries = database.EncodeLibraryEntries(entries)
+	return l
 }
 
-// TestRemoveLessonFilesEmptyLibraryRemovesDownloads asserts that with an empty
-// libraryDir a downloads-rooted output_dir is still removed (and no error).
-func TestRemoveLessonFilesEmptyLibraryRemovesDownloads(t *testing.T) {
-	downloads := t.TempDir()
-
-	outputDir := mkLessonDir(t, downloads, "03 - Lesson")
-
-	if err := removeLessonFiles(downloads, "", outputDir, ""); err != nil {
-		t.Fatalf("removeLessonFiles: %v", err)
+// legacyLesson is a plex-tv lesson moved before the record existed: only its
+// title, position and video (video "" for none).
+func legacyLesson(id int, title string, position int, season, video string) database.Lesson {
+	l := dirLesson(id, season)
+	l.Title = title
+	l.Position = sql.NullInt64{Int64: int64(position), Valid: true}
+	if video != "" {
+		l.VideoPath = sql.NullString{String: filepath.Join(season, video), Valid: true}
 	}
-	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
-		t.Errorf("downloads copy still present (err=%v)", err)
+	return l
+}
+
+// captureLog points logOut at a buffer for the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := logOut
+	logOut = &buf
+	t.Cleanup(func() { logOut = old })
+	return &buf
+}
+
+// TestRemoveLessonFilesOwnFolder covers a lesson recorded in its own folder:
+// the folder goes whole, whether it sits in the library or in downloads, and
+// with no library configured.
+func TestRemoveLessonFilesOwnFolder(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inLib   bool
+		library bool
+	}{{"library", true, true}, {"downloads", false, true}, {"no library", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			downloads, library := t.TempDir(), t.TempDir()
+			root := downloads
+			if tc.inLib {
+				root = library
+			}
+			if !tc.library {
+				library = ""
+			}
+			outputDir := mkLessonDir(t, root, "Inst/Course/01 - Lesson")
+			if _, err := removeLessonFiles(downloads, library, dirLesson(1, outputDir), nil); err != nil {
+				t.Fatalf("removeLessonFiles: %v", err)
+			}
+			if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+				t.Errorf("output_dir still present (err=%v)", err)
+			}
+			assertPresent(t, root, "Inst/Course/")
+		})
 	}
 }
 
 // TestRemoveLessonFilesRejectsOutsideBothRoots asserts an output_dir under
 // NEITHER downloadsDir nor libraryDir is rejected with an error and NOT removed.
 func TestRemoveLessonFilesRejectsOutsideBothRoots(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-	outside := t.TempDir() // a third temp dir, under neither root
-
-	victim := filepath.Join(outside, "keep")
-	if err := os.MkdirAll(victim, 0o755); err != nil {
-		t.Fatalf("MkdirAll victim: %v", err)
-	}
-
-	if err := removeLessonFiles(downloads, library, victim, ""); err == nil {
+	downloads, library, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	victim := mkLessonDir(t, outside, "keep")
+	if _, err := removeLessonFiles(downloads, library, dirLesson(1, victim), nil); err == nil {
 		t.Error("removeLessonFiles on a path under neither root returned nil, want error")
 	}
 	if _, err := os.Stat(victim); err != nil {
@@ -88,171 +112,218 @@ func TestRemoveLessonFilesRejectsOutsideBothRoots(t *testing.T) {
 	}
 }
 
-// TestRemoveLessonFilesRejectsRootEqual asserts that an output_dir equal to the
-// downloads root OR the library root (filepath.Rel returns ".") is refused —
-// guarding the catastrophic RemoveAll that would otherwise wipe an entire root —
-// and removes nothing.
+// TestRemoveLessonFilesRejectsRootEqual asserts an output_dir equal to the
+// downloads root OR the library root is refused, guarding the RemoveAll that
+// would otherwise wipe an entire root, and removes nothing.
 func TestRemoveLessonFilesRejectsRootEqual(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-
-	// Sentinels in both roots that must survive a refused delete.
-	if err := os.WriteFile(filepath.Join(downloads, "keep.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write downloads sentinel: %v", err)
+	downloads, library := t.TempDir(), t.TempDir()
+	seedEntries(t, downloads, "keep.txt")
+	seedEntries(t, library, "keep.txt")
+	for _, root := range []string{downloads, library} {
+		if _, err := removeLessonFiles(downloads, library, dirLesson(1, root), nil); err == nil {
+			t.Errorf("removeLessonFiles(output_dir == %q) returned nil, want error (would wipe the root)", root)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(library, "keep.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("write library sentinel: %v", err)
-	}
-
-	// output_dir == downloads root.
-	if err := removeLessonFiles(downloads, library, downloads, ""); err == nil {
-		t.Error("removeLessonFiles(outputDir==downloadsDir) returned nil, want error (would wipe the root)")
-	}
-	// output_dir == library root.
-	if err := removeLessonFiles(downloads, library, library, ""); err == nil {
-		t.Error("removeLessonFiles(outputDir==libraryDir) returned nil, want error (would wipe the root)")
-	}
-
-	if _, err := os.Stat(filepath.Join(downloads, "keep.txt")); err != nil {
-		t.Errorf("downloads root was wiped (err=%v), want intact", err)
-	}
-	if _, err := os.Stat(filepath.Join(library, "keep.txt")); err != nil {
-		t.Errorf("library root was wiped (err=%v), want intact", err)
-	}
+	assertPresent(t, downloads, "keep.txt")
+	assertPresent(t, library, "keep.txt")
 }
 
 // TestRemoveLessonFilesMissingTolerated asserts an already-removed path under
-// either root is a benign no-op (os.RemoveAll treats a missing path as success).
+// either root is a benign no-op.
 func TestRemoveLessonFilesMissingTolerated(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-
-	// A never-created path under downloads.
-	if err := removeLessonFiles(downloads, library, filepath.Join(downloads, "04 - Gone"), ""); err != nil {
-		t.Errorf("removeLessonFiles on a missing downloads dir = %v, want nil (best-effort)", err)
-	}
-	// A never-created path under the library.
-	if err := removeLessonFiles(downloads, library, filepath.Join(library, "Inst/05 - Gone"), ""); err != nil {
-		t.Errorf("removeLessonFiles on a missing library dir = %v, want nil (best-effort)", err)
-	}
-}
-
-// TestRemoveLessonFilesPlexTvRemovesOnlyEpisode proves the plex-tv delete removes
-// ONLY the target episode's files from a SHARED season folder: a sibling episode's
-// files and the season folder itself survive, and the folder is never RemoveAll'd.
-// It exercises the suffix grammar (scheduler.isPlexEpisodeSuffix: a file's
-// suffix starts with '.' or '-') with a sibling whose name is a genuine
-// SUPERSTRING of the target base past a non-boundary rune ("Show - s01e05 - Five Bonus.mp4") — that file passes the
-// HasPrefix gate yet must survive; deleting the boundary check turns it RED. The e50
-// "Fifty" entry is a separate non-prefix sibling (HasPrefix already false).
-func TestRemoveLessonFilesPlexTvRemovesOnlyEpisode(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Show", "Season 01")
-	if err := os.MkdirAll(season, 0o755); err != nil {
-		t.Fatalf("mkdir season: %v", err)
-	}
-	// e05 (the target) sidecars + video, e06 sibling, an e50 non-prefix sibling, and
-	// "Five Bonus" — a true superstring of the target base "Show - s01e05 - Five"
-	// whose next rune (' ') is NOT a boundary char, so it must NOT be removed. That
-	// last file is what actually exercises the boundary-rune guard.
-	files := []string{
-		"Show - s01e05 - Five.mp4",
-		"Show - s01e05 - Five.nfo",
-		"Show - s01e05 - Five.en.vtt",
-		"Show - s01e05 - Five-poster.jpg",
-		"Show - s01e06 - Six.mp4",
-		"Show - s01e06 - Six.nfo",
-		"Show - s01e50 - Fifty.mp4",      // non-prefix sibling: "...e05" is NOT a prefix
-		"Show - s01e05 - Five Bonus.mp4", // superstring of the base past a non-boundary rune
-	}
-	for _, name := range files {
-		if err := os.WriteFile(filepath.Join(season, name), []byte("x"), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	videoPath := filepath.Join(season, "Show - s01e05 - Five.mp4")
-	if err := removeLessonFiles(downloads, library, season, videoPath); err != nil {
-		t.Fatalf("removeLessonFiles(plex-tv): %v", err)
-	}
-
-	// All e05 files gone.
-	for _, name := range []string{
-		"Show - s01e05 - Five.mp4",
-		"Show - s01e05 - Five.nfo",
-		"Show - s01e05 - Five.en.vtt",
-		"Show - s01e05 - Five-poster.jpg",
+	for _, l := range []database.Lesson{
+		dirLesson(1, filepath.Join(downloads, "04 - Gone")),
+		dirLesson(2, filepath.Join(library, "Inst/05 - Gone")),
+		recordedLesson(3, season, "Show - s01e05 - Gone.mp4"),
 	} {
-		if _, err := os.Stat(filepath.Join(season, name)); !os.IsNotExist(err) {
-			t.Errorf("e05 file %q survived (stat err=%v), want removed", name, err)
+		if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+			t.Errorf("lesson %d: removeLessonFiles on a missing path = %v, want nil", l.RailcontentID, err)
 		}
-	}
-	// Sibling e06, the e50 non-prefix sibling, the boundary-check superstring, and the
-	// season folder all intact.
-	for _, name := range []string{
-		"Show - s01e06 - Six.mp4",
-		"Show - s01e06 - Six.nfo",
-		"Show - s01e50 - Fifty.mp4",
-		"Show - s01e05 - Five Bonus.mp4",
-	} {
-		if _, err := os.Stat(filepath.Join(season, name)); err != nil {
-			t.Errorf("sibling/superstring file %q was removed (err=%v), want intact", name, err)
-		}
-	}
-	if _, err := os.Stat(season); err != nil {
-		t.Errorf("season folder was removed (err=%v), want never RemoveAll'd", err)
 	}
 }
 
-// TestRemoveLessonFilesPlexTvEmptyVideoPathNoOp proves plex-tv with no video_path
-// is a no-op (an undownloaded/ResourcesOnly lesson has no episode files to target).
-func TestRemoveLessonFilesPlexTvEmptyVideoPathNoOp(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// fiveLookAlikes are four lessons at episode 5 of one show, each title the
+// first plus a tag or a suffix: the collision a name matcher can not tell apart.
+var fiveLookAlikes = map[string][]string{
+	"Five":           {"Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e05 - Five-poster.jpg", "Show - s01e05 - Five resources/"},
+	"Five [Live]":    {"Show - s01e05 - Five [Live].mp4", "Show - s01e05 - Five [Live].nfo", "Show - s01e05 - Five [Live]-poster.jpg", "Show - s01e05 - Five [Live] resources/"},
+	"Five-Part Fill": {"Show - s01e05 - Five-Part Fill.mp4", "Show - s01e05 - Five-Part Fill.nfo", "Show - s01e05 - Five-Part Fill resources/"},
+	"Five.5":         {"Show - s01e05 - Five.5.mp4", "Show - s01e05 - Five.5.nfo", "Show - s01e05 - Five.5.en.vtt"},
+}
+
+var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}
+
+// TestRemoveLessonFilesCollisionsInEveryDirection proves the owner's ruling on
+// look-alike titles at one episode number: deleting any one of the four
+// removes exactly its own entries and leaves the other three's, whether the
+// lessons carry a record or are legacy rows matched by name. Each title
+// extends the first, so both directions of the collision are covered.
+func TestRemoveLessonFilesCollisionsInEveryDirection(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for i, title := range fiveTitles {
+			t.Run(map[bool]string{false: "record", true: "legacy"}[legacy]+"/"+title, func(t *testing.T) {
+				downloads, library := t.TempDir(), t.TempDir()
+				season := filepath.Join(library, "Show", "Season 01")
+				var rows []database.Lesson
+				for j, tt := range fiveTitles {
+					seedEntries(t, season, fiveLookAlikes[tt]...)
+					if legacy {
+						rows = append(rows, legacyLesson(j+1, tt, 5, season, fiveLookAlikes[tt][0]))
+					} else {
+						rows = append(rows, recordedLesson(j+1, season, fiveLookAlikes[tt]...))
+					}
+				}
+				if _, err := removeLessonFiles(downloads, library, rows[i], rows); err != nil {
+					t.Fatalf("removeLessonFiles(%s): %v", title, err)
+				}
+				assertGone(t, season, fiveLookAlikes[title]...)
+				for _, other := range fiveTitles {
+					if other != title {
+						assertPresent(t, season, fiveLookAlikes[other]...)
+					}
+				}
+				assertPresent(t, library, "Show/Season 01/")
+			})
+		}
+	}
+}
+
+// TestRemoveLessonFilesByRecordAfterATitleChange proves a recorded lesson
+// loses exactly its recorded entries even though its title (and so any name a
+// matcher would derive) has changed since, and that another episode's entries
+// in the folder are left.
+func TestRemoveLessonFilesByRecordAfterATitleChange(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Show", "Season 01")
-	if err := os.MkdirAll(season, 0o755); err != nil {
-		t.Fatalf("mkdir season: %v", err)
+	mine := []string{"Show - s01e05 - Old Name.mp4", "Show - s01e05 - Old Name.nfo", "Show - s01e05 - Old Name play-along/"}
+	seedEntries(t, season, mine...)
+	seedEntries(t, season, "Show - s01e05 - New Name.mp4", "Show - s01e06 - Six.mp4")
+	l := recordedLesson(1, season, mine...)
+	l.Title = "New Name"
+	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
-	keep := filepath.Join(season, "Show - s01e05 - Five.mp4")
-	if err := os.WriteFile(keep, []byte("x"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+	assertGone(t, season, mine...)
+	assertPresent(t, season, "Show - s01e05 - New Name.mp4", "Show - s01e06 - Six.mp4")
+}
+
+// TestRemoveLessonFilesNoVideoLessonByRecord (D55) proves a plex-tv lesson with
+// no video (resources only) is deleted by its record: its folders go, the
+// season folder and the other episodes stay.
+func TestRemoveLessonFilesNoVideoLessonByRecord(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	mine := []string{"Show - s01e04 - Sheets.nfo", "Show - s01e04 - Sheets resources/", "Show - s01e04 - Sheets sheet-music/"}
+	seedEntries(t, season, mine...)
+	seedEntries(t, season, "Show - s01e05 - Five.mp4")
+	if _, err := removeLessonFiles(downloads, library, recordedLesson(1, season, mine...), nil); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
-	if err := removeLessonFiles(downloads, library, season, ""); err != nil {
-		t.Errorf("removeLessonFiles(plex-tv, empty video_path) = %v, want nil (no-op)", err)
+	assertGone(t, season, mine...)
+	assertPresent(t, season, "Show - s01e05 - Five.mp4")
+}
+
+// TestRemoveLessonFilesKeepsAnEntryTwoRecordsName proves an entry two records
+// name is kept (and logged) rather than removed from under the other lesson.
+func TestRemoveLessonFilesKeepsAnEntryTwoRecordsName(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	seedEntries(t, season, "Show - s01e05 - Same.mp4", "Show - s01e05 - Same.nfo")
+	log := captureLog(t)
+	a := recordedLesson(1, season, "Show - s01e05 - Same.mp4", "Show - s01e05 - Same.nfo")
+	b := recordedLesson(2, season, "Show - s01e05 - Same.mp4")
+	if _, err := removeLessonFiles(downloads, library, a, []database.Lesson{a, b}); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Errorf("file removed despite empty video_path (err=%v), want intact", err)
+	assertGone(t, season, "Show - s01e05 - Same.nfo")
+	assertPresent(t, season, "Show - s01e05 - Same.mp4")
+	if want := `kept "` + filepath.Join(season, "Show - s01e05 - Same.mp4") + `", which another lesson also claims`; !strings.Contains(log.String(), want) {
+		t.Errorf("log %q does not report the kept entry", log.String())
 	}
 }
 
-// TestRemoveLessonFilesPlexTvRejectsOutsideRoots proves the under-root guard still
-// applies in plex-tv mode: a video_path dir under neither root is refused.
-func TestRemoveLessonFilesPlexTvRejectsOutsideRoots(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-	outside := t.TempDir()
+// TestRemoveLessonFilesRefusesADamagedRecord proves a record naming anything
+// but an entry of a season folder is refused before anything is removed.
+func TestRemoveLessonFilesRefusesADamagedRecord(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	seedEntries(t, season, "Show - s01e05 - Five.mp4")
+	l := dirLesson(1, season)
+	l.LibraryEntries = database.EncodeLibraryEntries([]string{filepath.Join(season, "Show - s01e05 - Five.mp4"), library})
+	if _, err := removeLessonFiles(downloads, library, l, nil); err == nil {
+		t.Error("removeLessonFiles(record naming the library root) = nil, want a refusal")
+	}
+	assertPresent(t, season, "Show - s01e05 - Five.mp4")
+	assertPresent(t, library, "Show/")
+}
 
-	season := filepath.Join(outside, "Show", "Season 01")
-	if err := os.MkdirAll(season, 0o755); err != nil {
-		t.Fatalf("mkdir outside season: %v", err)
+// TestRemoveLessonFilesRefusesASymlinkedSeasonFolder proves the removal is
+// confined to its root: a season folder that is a symlink to a folder outside
+// the library is refused, and what it points at is untouched. (The trade-off
+// the README states: an operator's deliberate symlink is refused too.)
+func TestRemoveLessonFilesRefusesASymlinkedSeasonFolder(t *testing.T) {
+	downloads, library, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	seedEntries(t, outside, "Show - s01e05 - Five.mp4")
+	if err := os.MkdirAll(filepath.Join(library, "Show"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	victim := filepath.Join(season, "Show - s01e05 - Five.mp4")
-	if err := os.WriteFile(victim, []byte("x"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+	season := filepath.Join(library, "Show", "Season 01")
+	if err := os.Symlink(outside, season); err != nil {
+		t.Fatal(err)
 	}
-	if err := removeLessonFiles(downloads, library, season, victim); err == nil {
-		t.Error("removeLessonFiles(plex-tv outside both roots) = nil, want error")
+	if _, err := removeLessonFiles(downloads, library, recordedLesson(1, season, "Show - s01e05 - Five.mp4"), nil); err == nil {
+		t.Error("removeLessonFiles through a symlinked season folder = nil, want a refusal")
 	}
-	if _, err := os.Stat(victim); err != nil {
-		t.Errorf("victim outside both roots was removed (err=%v), want intact", err)
+	assertPresent(t, outside, "Show - s01e05 - Five.mp4")
+}
+
+// lockedEntry seeds a folder entry name in dir whose contents can not be
+// removed (a read-only subfolder holding a file), and restores the mode at
+// cleanup. It skips as root, where permissions do not bind.
+func lockedEntry(t *testing.T, dir, name string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind as root")
+	}
+	locked := filepath.Join(dir, name, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+}
+
+// TestRemoveLessonFilesReportsWhatRemains proves a removal that fails partway
+// keeps going (every other entry is removed), returns the error, and returns as
+// remaining exactly the recorded entries still on disk.
+func TestRemoveLessonFilesReportsWhatRemains(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	stuck := "Show - s01e05 - Five resources"
+	lockedEntry(t, season, stuck)
+	seedEntries(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	l := recordedLesson(1, season, stuck, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+
+	remaining, err := removeLessonFiles(downloads, library, l, nil)
+	if err == nil {
+		t.Fatal("removeLessonFiles = nil, want the removal error")
+	}
+	assertGone(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	if want := []string{filepath.Join(season, stuck)}; !reflect.DeepEqual(remaining, want) {
+		t.Errorf("remaining = %v, want %v", remaining, want)
 	}
 }
 
 // seedEntries creates each name under dir: a name ending in "/" is a folder
 // (holding one file, so a non-recursive delete would fail on it), anything else
-// a file.
+// a file whose content is its name.
 func seedEntries(t *testing.T, dir string, names ...string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -266,7 +337,7 @@ func seedEntries(t *testing.T, dir string, names ...string) {
 			}
 			p = filepath.Join(dir, folder, "inside.bin")
 		}
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
@@ -292,17 +363,15 @@ func assertPresent(t *testing.T, dir string, names ...string) {
 	}
 }
 
-// TestRemoveLessonFilesPlexTvSong proves deleting a song in the plex-tv layout
-// removes everything the move placed for it: both versions (the recorded one is
-// [Drumless], so matching on the recorded name alone missed [Original]), the nfo,
-// the poster and every subfolder. Episode 50, a sibling song (both versions and
-// its folder), a look-alike title that extends this one (as a file and as a
-// folder), the season folder and the show folder all survive.
-func TestRemoveLessonFilesPlexTvSong(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// TestRemoveLessonFilesLegacySong (D51) proves deleting a song moved before
+// the record existed removes everything the move placed for it: both versions
+// (the recorded one is [Drumless], so matching on the recorded name alone
+// missed [Original]), the nfo, the poster and every subfolder. Episode 50, a
+// sibling song, a look-alike title that extends this one, the season folder
+// and the show folder all survive.
+func TestRemoveLessonFilesLegacySong(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Songs", "Season 01")
-
 	target := []string{
 		"Songs - s01e05 - Five [Drumless].mp4",
 		"Songs - s01e05 - Five [Original].mp4",
@@ -326,27 +395,24 @@ func TestRemoveLessonFilesPlexTvSong(t *testing.T) {
 	}
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
-	videoPath := filepath.Join(season, "Songs - s01e05 - Five [Drumless].mp4")
-	if err := removeLessonFiles(downloads, library, season, videoPath); err != nil {
+	l := legacyLesson(1, "Five", 5, season, "Songs - s01e05 - Five [Drumless].mp4")
+	if _, err := removeLessonFiles(downloads, library, l, []database.Lesson{l}); err != nil {
 		t.Fatalf("removeLessonFiles(song): %v", err)
 	}
-
 	assertGone(t, season, target...)
 	assertPresent(t, season, siblings...)
 	assertPresent(t, library, "Songs/Season 01/", "Songs/")
 }
 
-// TestRemoveLessonFilesPlexTvLessonWithSubfolders proves an ordinary plex-tv
-// lesson's resources/ and play-along/ folders (moved in as "<episode> resources"
-// and so on) go with it, while episode 30's own folders stay.
-func TestRemoveLessonFilesPlexTvLessonWithSubfolders(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// TestRemoveLessonFilesLegacyLessonWithSubfolders proves an ordinary legacy
+// plex-tv lesson's folders go with it, while episode 30's stay.
+func TestRemoveLessonFilesLegacyLessonWithSubfolders(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Course", "Season 01")
-
 	target := []string{
 		"Course - s01e03 - Three.mp4",
 		"Course - s01e03 - Three.nfo",
+		"Course - s01e03 - Three.en.vtt",
 		"Course - s01e03 - Three-poster.jpg",
 		"Course - s01e03 - Three resources/",
 		"Course - s01e03 - Three play-along/",
@@ -359,24 +425,21 @@ func TestRemoveLessonFilesPlexTvLessonWithSubfolders(t *testing.T) {
 	}
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
-	videoPath := filepath.Join(season, "Course - s01e03 - Three.mp4")
-	if err := removeLessonFiles(downloads, library, season, videoPath); err != nil {
-		t.Fatalf("removeLessonFiles(lesson with subfolders): %v", err)
+	l := legacyLesson(1, "Three", 3, season, "Course - s01e03 - Three.mp4")
+	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
-
 	assertGone(t, season, target...)
 	assertPresent(t, season, siblings...)
 	assertPresent(t, library, "Course/Season 01/")
 }
 
-// TestRemoveLessonFilesPlexTvTitleEndingInTag proves a lesson whose own title
-// ends in a bracketed tag (so its video name looks like a song version) still
-// loses every one of its files and folders.
-func TestRemoveLessonFilesPlexTvTitleEndingInTag(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// TestRemoveLessonFilesLegacyTitleEndingInTag proves a legacy lesson whose own
+// title ends in a bracketed tag (so its video name looks like a song version)
+// still loses every one of its files and folders.
+func TestRemoveLessonFilesLegacyTitleEndingInTag(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Show", "Season 01")
-
 	target := []string{
 		"Show - s01e07 - Groove [Live].mp4",
 		"Show - s01e07 - Groove [Live].nfo",
@@ -386,63 +449,59 @@ func TestRemoveLessonFilesPlexTvTitleEndingInTag(t *testing.T) {
 	siblings := []string{"Show - s01e70 - Seventy.mp4", "Show - s01e08 - Groove [Live].mp4"}
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
-	if err := removeLessonFiles(downloads, library, season, filepath.Join(season, target[0])); err != nil {
-		t.Fatalf("removeLessonFiles(title ending in tag): %v", err)
+	l := legacyLesson(1, "Groove [Live]", 7, season, target[0])
+	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, target...)
 	assertPresent(t, season, siblings...)
 }
 
-// TestRemoveLessonFilesSeasonFolderIsNeverWipedWhenLayoutChanged proves the
-// delete follows the recorded location, not DRUMDROP_LAYOUT: a lesson recorded in
-// a plex-tv season folder loses only its own entries even when the video path is
-// missing or the layout has since been switched back to default. (Keyed on the
-// layout setting, the default branch RemoveAll'd the whole season folder.)
-func TestRemoveLessonFilesSeasonFolderIsNeverWipedWhenLayoutChanged(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// TestRemoveLessonFilesSeasonFolderIsNeverWiped proves the delete follows the
+// recorded location, not DRUMDROP_LAYOUT: a lesson recorded in a season folder
+// loses only its own entries, with or without a video path, and the season
+// folder itself is never removed.
+func TestRemoveLessonFilesSeasonFolderIsNeverWiped(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Show", "Season 01")
-	seedEntries(t, season, "Show - s01e01 - One.mp4", "Show - s01e02 - Two.mp4")
+	seedEntries(t, season, "Show - s01e01 - One.mp4", "Show - s01e01 - One.nfo", "Show - s01e02 - Two.mp4")
 
-	if err := removeLessonFiles(downloads, library, season, ""); err != nil {
+	if _, err := removeLessonFiles(downloads, library, legacyLesson(1, "One", 1, season, ""), nil); err != nil {
 		t.Fatalf("removeLessonFiles(season, no video): %v", err)
 	}
-	if err := removeLessonFiles(downloads, library, season, filepath.Join(season, "Show - s01e01 - One.mp4")); err != nil {
-		t.Fatalf("removeLessonFiles(season, e01): %v", err)
-	}
-	assertGone(t, season, "Show - s01e01 - One.mp4")
+	assertGone(t, season, "Show - s01e01 - One.mp4", "Show - s01e01 - One.nfo")
 	assertPresent(t, season, "Show - s01e02 - Two.mp4")
 }
 
-// TestRemoveLessonFilesPlexTvLessonLeftInDownloads proves a plex-tv lesson whose
-// library move failed (recorded in its own downloads folder, not a season
-// folder) is removed whole, subfolders included, like a default-layout lesson.
-func TestRemoveLessonFilesPlexTvLessonLeftInDownloads(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
+// TestRemoveLessonFilesLegacyRefusesToGuess proves a legacy lesson whose
+// episode name can not be told apart from a look-alike is refused, not
+// guessed: nothing is removed.
+func TestRemoveLessonFilesLegacyRefusesToGuess(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	// "Five [A] [B].mp4" with neither "Five.nfo" nor "Five [A].nfo": the video
+	// could be Five's [A] [B] version, or Five [A]'s [B] version.
+	names := []string{"Show - s01e05 - Five [A] [B].mp4", "Show - s01e05 - Five [A] [B]-poster.jpg"}
+	seedEntries(t, season, names...)
+	l := legacyLesson(1, "Retitled", 5, season, names[0])
+	if _, err := removeLessonFiles(downloads, library, l, nil); err == nil {
+		t.Error("removeLessonFiles(ambiguous legacy lesson) = nil, want a refusal")
+	}
+	assertPresent(t, season, names...)
+}
+
+// TestRemoveLessonFilesLegacyLeftInDownloads proves a lesson whose library
+// move failed (recorded in its own downloads folder, not a season folder) is
+// removed whole, subfolders included.
+func TestRemoveLessonFilesLegacyLeftInDownloads(t *testing.T) {
+	downloads, library := t.TempDir(), t.TempDir()
 	lessonDir := filepath.Join(downloads, "Course", "03 - Three")
 	seedEntries(t, lessonDir, "03 - Three.mp4", "03 - Three.nfo", "resources/", "play-along/")
-
-	if err := removeLessonFiles(downloads, library, lessonDir, filepath.Join(lessonDir, "03 - Three.mp4")); err != nil {
-		t.Fatalf("removeLessonFiles(plex-tv lesson left in downloads): %v", err)
+	l := dirLesson(1, lessonDir)
+	l.VideoPath = sql.NullString{String: filepath.Join(lessonDir, "03 - Three.mp4"), Valid: true}
+	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, downloads, "Course/03 - Three/")
 	assertPresent(t, downloads, "Course/")
-}
-
-// TestRemoveLessonFilesPlexTvRefusesNonEpisodeVideo proves a recorded video in
-// a season folder that is not an episode of that show and season is refused
-// rather than used as a guessed prefix.
-func TestRemoveLessonFilesPlexTvRefusesNonEpisodeVideo(t *testing.T) {
-	downloads := t.TempDir()
-	library := t.TempDir()
-	season := filepath.Join(library, "Show", "Season 01")
-	seedEntries(t, season, "x.mp4", "x.nfo", "Other - s01e01 - One.mp4")
-
-	for _, video := range []string{"x.mp4", "Other - s01e01 - One.mp4"} {
-		if err := removeLessonFiles(downloads, library, season, filepath.Join(season, video)); err == nil {
-			t.Errorf("removeLessonFiles(%q) = nil, want a refusal", video)
-		}
-	}
-	assertPresent(t, season, "x.mp4", "x.nfo", "Other - s01e01 - One.mp4")
 }

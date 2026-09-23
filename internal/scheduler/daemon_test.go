@@ -101,18 +101,21 @@ func (s *fakeDaemonStore) GetLesson(ctx context.Context, id int) (database.Lesso
 	return database.Lesson{}, nil
 }
 func (s *fakeDaemonStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
-func (s *fakeDaemonStore) MarkJobDone(ctx context.Context, id int64) error {
+func (s *fakeDaemonStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	return nil, nil
+}
+func (s *fakeDaemonStore) StartDownload(ctx context.Context, jobID int64, id int) error { return nil }
+func (s *fakeDaemonStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
 	s.record("job-done")
 	return nil
 }
-func (s *fakeDaemonStore) MarkJobFailed(ctx context.Context, id int64, m string) error { return nil }
-func (s *fakeDaemonStore) MarkJobCanceled(ctx context.Context, id int64) error         { return nil }
-func (s *fakeDaemonStore) MarkDownloading(ctx context.Context, id int) error           { return nil }
-func (s *fakeDaemonStore) MarkDownloaded(ctx context.Context, id int, q, o, v string, b int64) error {
+func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, m string) error {
 	return nil
 }
-func (s *fakeDaemonStore) MarkFailed(ctx context.Context, id int, m string) error  { return nil }
-func (s *fakeDaemonStore) MarkSkipped(ctx context.Context, id int, r string) error { return nil }
+func (s *fakeDaemonStore) SkipDownload(ctx context.Context, jobID int64, id int, r string) error {
+	return nil
+}
+func (s *fakeDaemonStore) CancelDownload(ctx context.Context, jobID int64, id int) error { return nil }
 
 // --- planner-side ---
 

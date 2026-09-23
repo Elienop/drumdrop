@@ -310,8 +310,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		// WithoutCancel (same reasoning as the cancel branch below) so the lesson is
 		// not stranded in its prior status with the job stuck 'running'.
 		finishCtx := context.WithoutCancel(ctx)
-		_ = w.Store.MarkSkipped(finishCtx, id, reason)
-		_ = w.Store.MarkJobFailed(finishCtx, job.ID, reason)
+		w.logAbandoned(id, w.Store.SkipDownload(finishCtx, job.ID, id, reason))
 		return
 	}
 
@@ -321,12 +320,17 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// sort the way they appear in the course; fall back to 1 when the position is
 	// unknown. The download and the worker's lessonDir MUST share this value so
 	// producedVideo and cleanupPartials target the exact folder DownloadLesson
-	// writes to. GetLesson failure is non-fatal: keep the default index 1.
+	// writes to. GetLesson failure is non-fatal: keep the default index 1. The
+	// row also says what the lesson's previous download left in the library,
+	// which a plex-tv move replaces. A delete can not change it while this job
+	// runs without removing the job (and then nothing here is recorded).
 	index := 1
-	if l, err := w.Store.GetLesson(ctx, id); err != nil {
+	prev, err := w.Store.GetLesson(ctx, id)
+	if err != nil {
 		fmt.Fprintf(w.log(), "  ⚠ get lesson %d position: %v\n", id, err)
-	} else if l.Position.Valid {
-		index = int(l.Position.Int64)
+		prev = database.Lesson{RailcontentID: id}
+	} else if prev.Position.Valid {
+		index = int(prev.Position.Int64)
 	}
 	dir := lessonDir(outDir, index, lesson.Title)
 
@@ -362,7 +366,11 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			}
 		}
 
-		if err := w.Store.MarkDownloading(ctx, id); err != nil {
+		if err := w.Store.StartDownload(ctx, job.ID, id); errors.Is(err, database.ErrDownloadAbandoned) {
+			// Deleted between attempts: nothing of this job may be recorded.
+			w.discardAbandoned(id, dir, nil)
+			return
+		} else if err != nil {
 			fmt.Fprintf(w.log(), "  ⚠ mark downloading %d: %v\n", id, err)
 		}
 
@@ -411,84 +419,19 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 				Time:          time.Now(),
 			})
 			finishCtx := context.WithoutCancel(ctx)
-			_ = w.Store.MarkSkipped(finishCtx, id, "canceled")
-			_ = w.Store.MarkJobCanceled(finishCtx, job.ID)
+			if err := w.Store.CancelDownload(finishCtx, job.ID, id); errors.Is(err, database.ErrDownloadAbandoned) {
+				// A delete killed it: what the attempt wrote is tracked by no row.
+				w.discardAbandoned(id, dir, nil)
+			} else if err != nil {
+				fmt.Fprintf(w.log(), "  ⚠ record cancel %d: %v\n", id, err)
+			}
 			return
 		}
 
 		if derr == nil {
-			// Move the finished lesson into the library (single location) when
-			// configured, BEFORE producedVideo/MarkDownloaded so they record the
-			// LIBRARY path. Non-fatal in either layout: a move error is logged (it
-			// names any leftover it could not remove) and the lesson is recorded
-			// where the move says its one complete copy is: the library folder it
-			// returned, or else the scratch downloads path. The move must never turn
-			// a successful download into a failure.
-			videoPath, bytes := "", int64(0)
-			recorded := false
-			if w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "" {
-				// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
-				// the lesson + sidecars to the episode base. output_dir = the season
-				// folder; video_path = the moved episode .mp4 (stat for bytes). The
-				// move returns the .mp4 path directly, so producedVideo's
-				// "<dir>/<base>.mp4" assumption (which no longer holds once the file is
-				// renamed and flat) is bypassed here.
-				show := plexShow(follow, job, lesson)
-				seasonDir, vp, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir)
-				if err != nil {
-					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
-				}
-				// A non-empty seasonDir means every file was placed in the library; the
-				// only error that can accompany it is a scratch folder that could not be
-				// fully removed (logged above), which leaves the files correctly in place.
-				// Record the library paths in that case so we never fall back to
-				// producedVideo's emptied scratch dir. A failed move returns an empty
-				// seasonDir after undoing what it placed, so the lesson is whole in the
-				// scratch dir and the producedVideo fallback below records it there.
-				if seasonDir != "" {
-					dir = seasonDir
-					videoPath = vp
-					if !w.Cfg.ResourcesOnly && vp != "" {
-						if info, serr := os.Stat(vp); serr == nil {
-							bytes = info.Size()
-						}
-					}
-					recorded = true
-					// Overwrite the moved <movie> nfo with an <episodedetails> nfo so a
-					// Plex TV-Shows library (which can't match Drumeo to TheTVDB) gets the
-					// real episode title/season/episode from local metadata. Same path the
-					// move renamed the download-time nfo to (plexEpisodeBase). Non-fatal:
-					// the .mp4 + move already landed, so a write error just logs and the job
-					// still succeeds — like the aux-artifact fetches.
-					nfoPath := filepath.Join(seasonDir, plexEpisodeBase(show, lesson.Title, 1, index)+".nfo")
-					if err := os.WriteFile(nfoPath, []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)), 0o644); err != nil {
-						fmt.Fprintf(w.log(), "  ⚠ episode nfo %d: %v\n", id, err)
-					}
-				}
-			} else if w.Cfg.LibraryDir != "" {
-				// Default layout: move the whole "NN - title" leaf into the library at
-				// the same path relative to DownloadsDir. The rename preserves the leaf,
-				// so producedVideo still finds <base>.mp4 at the new dir. A non-empty
-				// newDir holds the whole lesson even when an error came with it (the
-				// downloads copy could not be fully removed), so record it either way.
-				newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir)
-				if err != nil {
-					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
-				}
-				if newDir != "" {
-					dir = newDir
-				}
-			}
-			// For the default layout (and for a plex-tv move that FAILED, leaving the
-			// file at the scratch dir) derive the video from the dir's "<base>.mp4".
-			if !recorded {
-				videoPath, bytes = w.producedVideo(dir)
-			}
-			if err := w.Store.MarkDownloaded(ctx, id, quality, dir, videoPath, bytes); err != nil {
-				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
-			}
-			if err := w.Store.MarkJobDone(ctx, job.ID); err != nil {
-				fmt.Fprintf(w.log(), "  ⚠ mark job done %d: %v\n", job.ID, err)
+			bytes, ok := w.recordDownload(ctx, job, lesson, follow, prev, quality, index, dir)
+			if !ok {
+				return
 			}
 			fmt.Fprintf(w.log(), "  ✓ %d\n", id)
 			w.progress().Emit(ProgressEvent{
@@ -532,8 +475,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// keeping all terminal writes uncancellable makes "shutdown never strands a
 	// job" a single, obvious invariant.
 	finishCtx := context.WithoutCancel(ctx)
-	_ = w.Store.MarkFailed(finishCtx, id, msg)
-	_ = w.Store.MarkJobFailed(finishCtx, job.ID, msg)
+	w.logAbandoned(id, w.Store.FailDownload(finishCtx, job.ID, id, msg))
 }
 
 // outDir is the single source of truth for a job's output directory. An

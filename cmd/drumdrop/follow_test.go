@@ -159,35 +159,36 @@ func (s *cliStore) GetLesson(ctx context.Context, id int) (database.Lesson, erro
 	return database.Lesson{}, nil
 }
 func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
-func (s *cliStore) MarkJobDone(ctx context.Context, id int64) error {
+func (s *cliStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	return nil, nil
+}
+func (s *cliStore) setJobStatus(id int64, status string) {
 	j := s.jobs[id]
-	j.Status = database.JobDone
+	j.Status = status
 	s.jobs[id] = j
+}
+func (s *cliStore) StartDownload(ctx context.Context, jobID int64, id int) error { return nil }
+func (s *cliStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
+	s.markedDLed = append(s.markedDLed, id)
+	s.downloaded[id] = true
+	s.setJobStatus(jobID, database.JobDone)
 	return nil
 }
-func (s *cliStore) MarkJobFailed(ctx context.Context, id int64, msg string) error {
-	j := s.jobs[id]
-	j.Status = database.JobFailed
-	s.jobs[id] = j
+func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, msg string) error {
+	s.setJobStatus(jobID, database.JobFailed)
 	return nil
 }
-func (s *cliStore) MarkJobCanceled(ctx context.Context, id int64) error {
-	j := s.jobs[id]
-	if j.Status == database.JobRunning {
-		j.Status = database.JobCanceled
-		s.jobs[id] = j
+func (s *cliStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
+	s.setJobStatus(jobID, database.JobFailed)
+	return nil
+}
+func (s *cliStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
+	if s.jobs[jobID].Status == database.JobRunning {
+		s.setJobStatus(jobID, database.JobCanceled)
 	}
 	return nil
 }
-func (s *cliStore) MarkDownloading(ctx context.Context, id int) error { return nil }
-func (s *cliStore) MarkDownloaded(ctx context.Context, id int, q, dir, vp string, b int64) error {
-	s.markedDLed = append(s.markedDLed, id)
-	s.downloaded[id] = true
-	return nil
-}
-func (s *cliStore) MarkFailed(ctx context.Context, id int, msg string) error     { return nil }
-func (s *cliStore) MarkSkipped(ctx context.Context, id int, reason string) error { return nil }
-func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error)         { return 0, nil }
+func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error) { return 0, nil }
 
 // cliExpander returns a fixed id list per follow id.
 type cliExpander struct{ ids map[int64][]int }
