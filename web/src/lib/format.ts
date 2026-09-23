@@ -33,14 +33,15 @@ export function formatDuration(seconds: number): string {
 // one reads it through brandName, so the Add follow preview and the Follows
 // and Lessons tables all say "Pianote". A brand not listed here (playbass,
 // whose casing is unconfirmed) shows as the server sent it, not as a guessed
-// capitalisation.
-const BRAND_NAMES: Readonly<Record<string, string>> = {
-  drumeo: "Drumeo",
-  pianote: "Pianote",
-  guitareo: "Guitareo",
-  singeo: "Singeo",
-}
+// capitalisation. A Map, not an object literal: an object would answer
+// "constructor" or "toString" with Object's own functions.
+const BRAND_NAMES: ReadonlyMap<string, string> = new Map([
+  ["drumeo", "Drumeo"],
+  ["pianote", "Pianote"],
+  ["guitareo", "Guitareo"],
+  ["singeo", "Singeo"],
+])
 
 export function brandName(brand: string): string {
-  return Object.hasOwn(BRAND_NAMES, brand) ? BRAND_NAMES[brand] : brand
+  return BRAND_NAMES.get(brand) ?? brand
 }

@@ -45,9 +45,10 @@ describe("brandName", () => {
   it("shows any other brand as sent, playbass included (its casing is unconfirmed)", () => {
     expect(brandName("playbass")).toBe("playbass")
     expect(brandName("")).toBe("")
-    // Only the lookup's own entries count: `names[brand] ?? brand` would
-    // show Object's own function for these.
-    expect(brandName("constructor")).toBe("constructor")
-    expect(brandName("toString")).toBe("toString")
+    // Only the lookup's own entries count: an object literal's
+    // `names[brand] ?? brand` would give Object's own functions for these.
+    for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+      expect(brandName(key)).toBe(key)
+    }
   })
 })
