@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event"
 import { toast } from "sonner"
 import { Toaster } from "@/components/ui/sonner"
 import { ApiHttpError } from "@/lib/api"
+import { finishClosing, holdClosingOverlays } from "@/test/closing"
 import { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog"
 
 // A request the test settles by hand.
@@ -168,12 +169,50 @@ it("confirming re-anchors the dialog by its bottom edge where it already is, so 
   await act(async () => req.resolve())
 })
 
-it("centred, the dialog is capped to the viewport and scrolls, so a short screen never clips its title", async () => {
+it("re-anchoring is instant: the dialog transitions nothing, so the footer does not glide on confirm", async () => {
+  // The primitive's duration-200 with transition-property's initial value
+  // (all) animated top, bottom, the translate and max-height for 200ms when
+  // the dialog was re-anchored. jsdom computes no Tailwind CSS: this pins the
+  // class the browser check measured (the enter/exit fade and zoom are CSS
+  // animations, which transition-none does not touch).
+  const req = deferred()
   const user = userEvent.setup()
-  render(<Harness onConfirm={() => Promise.resolve()} />)
+  render(<Harness onConfirm={() => req.promise} />)
   await user.click(screen.getByRole("button", { name: "Open" }))
   const dialog = await screen.findByRole("alertdialog")
-  expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]", "overflow-y-auto")
+  expect(dialog).toHaveClass("transition-none")
+  await user.click(within(dialog).getByRole("button", { name: "Delete" }))
+  expect(dialog).toHaveAttribute("data-anchored", "bottom")
+  expect(dialog).toHaveClass("transition-none")
+  expect(dialog.className).not.toMatch(/(^|\s)transition(-all|-\[|\s|$)/)
+  await act(async () => req.resolve())
+})
+
+it("capped by the viewport, only the body scrolls: the message and the buttons stay outside it, the title inside", async () => {
+  // jsdom cannot measure layout: this pins the structure. With the scroll on
+  // the whole dialog, growth past the cap spilled the footer out of view.
+  const req = deferred()
+  const user = userEvent.setup()
+  render(<Harness onConfirm={() => req.promise} />)
+  await user.click(screen.getByRole("button", { name: "Open" }))
+  const dialog = await screen.findByRole("alertdialog")
+  expect(dialog).toHaveClass("max-h-[calc(100dvh-2rem)]")
+  expect(dialog).not.toHaveClass("overflow-y-auto")
+  expect(dialog).not.toHaveClass("overflow-auto")
+
+  const scrollers = [...dialog.querySelectorAll<HTMLElement>(".overflow-y-auto, .overflow-auto")]
+  expect(scrollers).toHaveLength(1)
+  const body = scrollers[0]
+  // It can shrink below its content, so it gives way before anything else.
+  expect(body).toHaveClass("min-h-0")
+  expect(body).toContainElement(within(dialog).getByRole("heading", { name: "Delete “Thing”?" }))
+  expect(body).toContainElement(within(dialog).getByText("It goes away."))
+
+  await user.click(within(dialog).getByRole("button", { name: "Delete" }))
+  await act(async () => req.reject(new ApiHttpError(500, "could not delete the files")))
+  expect(body).not.toContainElement(within(dialog).getByRole("alert"))
+  expect(body).not.toContainElement(within(dialog).getByRole("button", { name: "Close" }))
+  expect(body).not.toContainElement(within(dialog).getByRole("button", { name: "Delete" }))
 })
 
 it("the dialog body is a flex column, so an empty message region collapses into the gap before it", async () => {
@@ -190,7 +229,7 @@ it("the dialog body is a flex column, so an empty message region collapses into 
   expect(within(dialog).getByRole("status")).toHaveClass("empty:-mt-4")
 })
 
-it("the error icon is inline with the message, so it stays beside the first word at any width or alignment", async () => {
+it("the error icon is inline with the message, and the message is left-aligned at every width", async () => {
   const req = deferred()
   const user = userEvent.setup()
   render(<Harness onConfirm={() => req.promise} />)
@@ -206,6 +245,10 @@ it("the error icon is inline with the message, so it stays beside the first word
   const icon = message.firstElementChild
   expect(icon?.tagName.toLowerCase()).toBe("svg")
   expect(icon).toHaveClass("inline-block")
+  // Never centred, not even below `sm`: several centred lines of uneven
+  // length are hard to read.
+  expect(message).toHaveClass("text-left")
+  expect(message.className).not.toMatch(/text-center/)
 })
 
 it("labels are stacked: the buttons keep their width through pending and failure", async () => {
@@ -262,39 +305,9 @@ it("while a retry runs, the last failure is muted and no longer describes the co
 
 // --- Closing animation -------------------------------------------------------
 //
-// With tw-animate-css loaded, Radix keeps a closing dialog mounted until its
-// exit animation ends. jsdom loads no stylesheet, so Presence sees
-// animationName "none" and unmounts at once: every test above would pass
-// whatever the dialog shows while closing. holdClosingOverlays reproduces
-// Radix's condition by stubbing exactly that one property from data-state.
-function holdClosingOverlays() {
-  const real = globalThis.getComputedStyle.bind(globalThis)
-  vi.stubGlobal("getComputedStyle", (el: Element, pseudo?: string | null) => {
-    const style = real(el, pseudo ?? undefined)
-    const state = el.getAttribute?.("data-state")
-    if (state !== "open" && state !== "closed") return style
-    // A live Proxy: Presence keeps the declaration from mount and reads it
-    // again at close.
-    return new Proxy(style, {
-      get(target, prop) {
-        if (prop === "animationName") {
-          return el.getAttribute("data-state") === "closed" ? "x-out" : "x-in"
-        }
-        const value: unknown = Reflect.get(target, prop)
-        return typeof value === "function" ? (value as () => unknown).bind(target) : value
-      },
-    })
-  })
-  // Presence matches the animationend's name with CSS.escape; jsdom has no CSS.
-  vi.stubGlobal("CSS", { escape: (s: string) => s })
-}
-
-// finishClosing ends the exit animation of every closing overlay.
-function finishClosing() {
-  for (const el of document.querySelectorAll('[data-state="closed"]')) {
-    fireEvent(el, Object.assign(new Event("animationend"), { animationName: "x-out" }))
-  }
-}
+// Every test above would pass whatever the dialog shows while closing: jsdom
+// unmounts it at once. holdClosingOverlays (test/closing.ts) keeps it mounted
+// as Radix does in a browser.
 
 // A page as the real ones are: it clears the item as the dialog closes, and
 // resets the slot's checkbox then.

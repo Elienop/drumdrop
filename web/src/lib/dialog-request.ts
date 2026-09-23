@@ -1,6 +1,5 @@
 import * as React from "react"
-import { toast } from "sonner"
-import { errorMessage } from "@/lib/errors"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { focusFirst, type FocusTarget } from "@/lib/focus"
 import { useOpenedNow } from "@/lib/use-held"
 
@@ -109,13 +108,7 @@ export function useDialogRequest({
       } catch (err) {
         const message = errorMessage(err, opts.fallback)
         if (mine !== session.current) {
-          if (!opts.keepOpen) {
-            toast.error(opts.failure, {
-              description: message,
-              duration: Infinity,
-              closeButton: true,
-            })
-          }
+          if (!opts.keepOpen) failureToast(opts.failure, message)
           return
         }
         inFlight.current = null
@@ -146,5 +139,9 @@ export function useDialogRequest({
     [],
   )
 
-  return { pending, error, run, onCloseAutoFocus }
+  // dismissError drops the failure shown inline, for a dialog whose input
+  // changed after it: the message was about what was sent, not what is shown.
+  const dismissError = React.useCallback(() => setError(null), [])
+
+  return { pending, error, run, onCloseAutoFocus, dismissError }
 }

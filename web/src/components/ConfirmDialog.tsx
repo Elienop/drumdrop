@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils"
 export const RELEASE_AFTER_MS = 10_000
 
 // VIEWPORT_MARGIN_PX keeps a dialog pinned by its bottom edge this far from the
-// top of the viewport: past it the dialog scrolls instead of growing.
+// top of the viewport: past it the dialog's body scrolls instead of growing.
 const VIEWPORT_MARGIN_PX = 16
 
 export interface ConfirmDialogProps<T> {
@@ -73,8 +73,19 @@ export interface ConfirmDialogProps<T> {
 // - Stable footer: on confirm the dialog is re-anchored by its bottom edge at
 //   the position it already has, so a message appearing, changing or growing
 //   pushes the header up instead of moving the buttons under the pointer.
-//   Labels are stacked (StackedLabel), so no button changes width either.
-// - Short screens: the dialog never runs past the viewport; it scrolls.
+//   The switch is instant: the content transitions nothing (transition-none;
+//   the primitive's duration-200 would otherwise animate top, bottom, the
+//   translate and max-height for 200ms). Its open/close fade and zoom are
+//   CSS animations and are unaffected. Labels are stacked (StackedLabel), so
+//   no button changes width either.
+// - Short screens: the dialog never runs past the viewport (16px from the
+//   top once anchored). Only its body (title, description, the slot's
+//   controls) scrolls; the message, the status line and the buttons sit
+//   outside it. So once the dialog reaches that cap, a message appearing or
+//   growing shrinks the body instead: the buttons stay fully visible and
+//   where they were, the message stays in full view above them, and the
+//   title is reached by scrolling the body. This holds while the message
+//   and the buttons fit in the cap, which the server's short sentences do.
 // - Closing: the dialog fades out showing exactly what it last showed (title,
 //   labels, message, position); everything resets when it next opens.
 export function ConfirmDialog<T>({
@@ -172,9 +183,11 @@ export function ConfirmDialog<T>({
         onCloseAutoFocus={onCloseAutoFocus}
         data-anchored={anchored ? "bottom" : undefined}
         // flex, not the primitive's grid: an empty message region's
-        // negative margin can cancel a flex gap, never a grid row's.
+        // negative margin can cancel a flex gap, never a grid row's. The
+        // content itself does not scroll (its body does) and transitions
+        // nothing, so re-anchoring cannot animate the footer.
         className={cn(
-          "flex max-h-[calc(100dvh-2rem)] flex-col overflow-y-auto",
+          "flex max-h-[calc(100dvh-2rem)] flex-col transition-none",
           anchored && "top-auto translate-y-0",
         )}
         style={
@@ -186,17 +199,26 @@ export function ConfirmDialog<T>({
             : undefined
         }
       >
-        <AlertDialogHeader className="gap-2">
-          <AlertDialogTitle className="leading-snug text-pretty wrap-break-word">
-            {shown.title}
-          </AlertDialogTitle>
-          <AlertDialogDescription className="text-pretty">{shown.description}</AlertDialogDescription>
-        </AlertDialogHeader>
+        {/* The body: the only part that scrolls. min-h-0 lets it shrink
+            below its content once the dialog hits its cap. -m-1 p-1 gives
+            a focused control's ring room inside the scroll clip without
+            moving anything. */}
+        <div
+          data-slot="confirm-dialog-body"
+          className="-m-1 flex min-h-0 flex-col gap-4 overflow-y-auto p-1"
+        >
+          <AlertDialogHeader className="gap-2">
+            <AlertDialogTitle className="leading-snug text-pretty wrap-break-word">
+              {shown.title}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-pretty">{shown.description}</AlertDialogDescription>
+          </AlertDialogHeader>
 
-        {shown.slot}
+          {shown.slot}
+        </div>
 
         <InlineError id={errorId} error={error} stale={pending} />
-        <p role="status" className="text-center text-sm text-pretty text-muted-foreground empty:-mt-4 sm:text-left">
+        <p role="status" className="text-left text-sm text-pretty text-muted-foreground empty:-mt-4">
           {pending && released
             ? "This is taking longer than usual. You can close this dialog; the result will appear as a notification."
             : null}

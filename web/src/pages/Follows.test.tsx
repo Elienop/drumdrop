@@ -1,8 +1,10 @@
-import { act, screen, waitFor, within } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
 import { Route, Routes, useLocation } from "react-router-dom"
 import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { finishClosing, holdClosingOverlays } from "@/test/closing"
 import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import type { CreateFollowRequest, FollowDTO } from "@/types"
@@ -656,4 +658,273 @@ it("Add and Edit are flex columns, so their empty message region costs no space"
   dialog = await screen.findByRole("dialog")
   expect(dialog).toHaveClass("flex", "flex-col")
   expect(dialog).not.toHaveClass("grid")
+})
+
+it("the title link's focus ring has room around the letters (the heading's treatment)", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+  renderWithProviders(<Follows />)
+  const link = await screen.findByRole("link", { name: "Stick Control" })
+  expect(link).toHaveClass("-mx-1", "px-1", "focus-visible:ring-ring/60")
+})
+
+// --- Edit: a follow removed meanwhile, the lock, the held title ---------------
+
+// A follow whose quality is one of the presets, so the Select shows it.
+const presetFollow: FollowDTO = { ...follows[0], quality: "1080" }
+const qualityOf = (dialog: HTMLElement) => within(dialog).getByRole("combobox", { name: /quality/i })
+
+it("a 404 on save (the follow was removed meanwhile) closes Edit as done, naming the follow, and drops the row", async () => {
+  let gone = false
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(gone ? [follows[1]] : follows)),
+    http.patch(`${ORIGIN}/api/follows/:id`, () => {
+      gone = true
+      return HttpResponse.json(
+        { error: "This follow isn't in DrumDrop anymore: it was removed elsewhere." },
+        { status: 404 },
+      )
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /edit stick control/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("button", { name: /^save$/i }))
+
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+  expect(await screen.findByText("Already removed")).toBeInTheDocument()
+  expect(screen.getByText("Stick Control", { selector: "[data-description]" })).toBeInTheDocument()
+  expect(screen.queryByText(/quality updated/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/isn't in DrumDrop anymore/)).not.toBeInTheDocument()
+  // The refresh dropped the row: no Edit is left that could only fail again.
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: /edit stick control/i })).not.toBeInTheDocument(),
+  )
+})
+
+it("while Edit saves, its Select is locked and focus stays on Save", async () => {
+  let answer: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([presetFollow])),
+    http.patch(`${ORIGIN}/api/follows/:id`, async () => {
+      await new Promise<void>((resolve) => (answer = resolve))
+      return HttpResponse.json({ ...presetFollow, quality: "720" })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /edit stick control/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(qualityOf(dialog))
+  await user.click(await screen.findByRole("option", { name: "720" }))
+  expect(qualityOf(dialog)).toHaveFocus()
+
+  // fireEvent: a press that does not move focus, as in Safari. Focus was on
+  // the Select, which is about to be disabled.
+  fireEvent.click(within(dialog).getByRole("button", { name: /^save$/i }))
+  const saving = await within(dialog).findByRole("button", { name: /saving/i })
+  expect(qualityOf(dialog)).toBeDisabled()
+  expect(saving).toHaveFocus()
+  await act(async () => answer())
+})
+
+it("Edit starts from the follow's saved quality each time it opens, even for the same row", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([presetFollow])))
+  const user = renderAdd()
+  const opener = await screen.findByRole("button", { name: /edit stick control/i })
+
+  await user.click(opener)
+  let dialog = await screen.findByRole("dialog")
+  expect(qualityOf(dialog)).toHaveTextContent("1080")
+  await user.click(qualityOf(dialog))
+  await user.click(await screen.findByRole("option", { name: "720" }))
+  expect(qualityOf(dialog)).toHaveTextContent("720")
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  // Same row, same follow object (nothing was saved): the abandoned 720 must
+  // not survive.
+  await user.click(opener)
+  dialog = await screen.findByRole("dialog")
+  expect(qualityOf(dialog)).toHaveTextContent("1080")
+})
+
+describe("while Edit closes", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("it keeps naming the follow in its title until it is gone", async () => {
+    holdClosingOverlays()
+    server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+    const user = renderAdd()
+    await user.click(await screen.findByRole("button", { name: /edit stick control/i }))
+    const dialog = await screen.findByRole("dialog", { name: "Edit “Stick Control”" })
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+
+    // Positive control: the closing dialog is still mounted (held by Radix).
+    await waitFor(() => expect(dialog).toHaveAttribute("data-state", "closed"))
+    expect(dialog).toBeInTheDocument()
+    expect(dialog).toHaveAccessibleName("Edit “Stick Control”")
+
+    act(() => finishClosing())
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+  })
+})
+
+// --- Add follow: labels, keyboard, stale answers -------------------------------
+
+const footerOf = (dialog: HTMLElement) =>
+  within(dialog.querySelector<HTMLElement>('[data-slot="dialog-footer"]')!)
+
+it("Add's dismiss button reads Cancel while a preview runs, and Close only while Add runs", async () => {
+  let answerPreview: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, async (info) => {
+      await new Promise<void>((resolve) => (answerPreview = resolve))
+      return previewOf(info)
+    }),
+    http.post(`${ORIGIN}/api/follows`, () => new Promise<Response>(() => {})),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345")
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  await within(dialog).findByRole("button", { name: /previewing/i })
+  // A preview's answer is dropped on close, so closing cancels it.
+  expect(footerOf(dialog).getByRole("button", { name: "Cancel" })).toBeInTheDocument()
+  expect(footerOf(dialog).queryByRole("button", { name: "Close" })).not.toBeInTheDocument()
+
+  await act(async () => answerPreview())
+  await within(dialog).findByText("Node 12345")
+  await user.click(within(dialog).getByRole("button", { name: /^add$/i }))
+  await within(dialog).findByRole("button", { name: /adding/i })
+  // Closing does not stop the add: its answer arrives as a notification.
+  expect(footerOf(dialog).getByRole("button", { name: "Close" })).toBeInTheDocument()
+})
+
+it("a late add failure for a preview with no title names 'the follow', not empty quotes", async () => {
+  let fail: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () =>
+      HttpResponse.json({ root_id: 999, title: "", lesson_count: 0, kind: "node" }),
+    ),
+    http.post(`${ORIGIN}/api/follows`, async () => {
+      await new Promise<void>((resolve) => (fail = resolve))
+      return HttpResponse.json(
+        { error: "The follow couldn't be added, and nothing was changed." },
+        { status: 500 },
+      )
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "999")
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  await within(dialog).findByText(/0 lessons/i)
+  await user.click(within(dialog).getByRole("button", { name: /^add$/i }))
+  await user.click(await footerOf(dialog).findByRole("button", { name: "Close" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  await act(async () => fail())
+  expect(await screen.findByText("Couldn't add the follow")).toBeInTheDocument()
+  expect(screen.queryByText(/Couldn't add “/)).not.toBeInTheDocument()
+})
+
+it("Enter in a field runs the next step: Preview first, then Add once the preview matches", async () => {
+  let created: CreateFollowRequest | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, previewOf),
+    http.post(`${ORIGIN}/api/follows`, async ({ request }) => {
+      created = (await request.json()) as CreateFollowRequest
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345{Enter}")
+  expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
+  expect(created).toBeNull()
+
+  await user.keyboard("{Enter}")
+  await waitFor(() => expect(created).toMatchObject({ kind: "node", id: "12345" }))
+  expect(await screen.findByText("Follow added")).toBeInTheDocument()
+})
+
+it("Enter previews from either instructor field, where a form with two fields would not submit", async () => {
+  const previews: string[] = []
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, ({ request }) => {
+      previews.push(new URL(request.url).search)
+      return HttpResponse.json({ root_id: 0, title: "Jared Falk", lesson_count: 40, kind: "instructor" })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByLabelText(/slug/i), "jared-falk")
+  await user.type(within(dialog).getByLabelText(/brand/i), "drumeo{Enter}")
+  expect(await within(dialog).findByText(/40 lessons/i)).toBeInTheDocument()
+  expect(previews).toEqual(["?slug=jared-falk&brand=drumeo"])
+})
+
+it("a failed preview's message clears as soon as the input is edited", async () => {
+  const NOPE = "No content id was found in “URL or id”. Enter the id, then Preview again."
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: NOPE }, { status: 400 })),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "abc")
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(NOPE))
+
+  await user.type(input, "d")
+  expect(within(dialog).getByRole("alert")).toBeEmptyDOMElement()
+  expect(within(dialog).getByRole("button", { name: /^preview$/i })).not.toHaveAttribute(
+    "aria-describedby",
+  )
+})
+
+it("a preview that lands after the dialog was closed and reopened is dropped, even for the same input", async () => {
+  let answer: () => void = () => {}
+  let previews = 0
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, async (info) => {
+      previews++
+      await new Promise<void>((resolve) => (answer = resolve))
+      return previewOf(info)
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  let dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345")
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  await within(dialog).findByRole("button", { name: /previewing/i })
+  await user.click(footerOf(dialog).getByRole("button", { name: "Cancel" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  // Reopened, and typed the same input: the old answer would match it.
+  await user.click(screen.getByRole("button", { name: /add follow/i }))
+  dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345")
+  await act(async () => answer())
+  await waitFor(() => expect(previews).toBe(1))
+  // Let the stale answer's promise chain run out before asserting.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  })
+  expect(within(dialog).queryByText("Node 12345")).not.toBeInTheDocument()
+  expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })

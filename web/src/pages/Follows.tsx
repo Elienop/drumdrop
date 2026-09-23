@@ -7,7 +7,7 @@ import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
-import { deleteOutcome, type DeleteOutcome } from "@/lib/errors"
+import { itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { FollowDTO } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -69,9 +69,9 @@ export function Follows() {
   // and some lessons may already be tombstoned. So the refresh runs on FAILURE
   // too (finally): follows, summary, jobs, and the raw ["lessons"] prefix for
   // every keyed Lessons view. The dialog stays pending until they land. A 404
-  // means it was removed elsewhere first: done, not a failure (deleteOutcome).
-  const unfollow = (id: number, files: boolean): Promise<DeleteOutcome> =>
-    deleteOutcome(api.unfollow(id, { deleteFiles: files })).finally(() =>
+  // means it was removed elsewhere first: done, not a failure (itemOutcome).
+  const unfollow = (id: number, files: boolean): Promise<ItemOutcome> =>
+    itemOutcome(api.unfollow(id, { deleteFiles: files })).finally(() =>
       Promise.all([
         qc.invalidateQueries({ queryKey: qk.follows }),
         qc.invalidateQueries({ queryKey: qk.summary }),
@@ -99,7 +99,7 @@ export function Follows() {
         <h1
           ref={headingRef}
           tabIndex={-1}
-          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60"
         >
           Follows
         </h1>
@@ -149,7 +149,9 @@ export function Follows() {
                         to={`/lessons?follow=${f.id}`}
                         // The row's own click would navigate a second time.
                         onClick={(e) => e.stopPropagation()}
-                        className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                        // -mx-1 px-1: the ring gets room around the letters
+                        // without moving the title (the h1 treatment).
+                        className="-mx-1 rounded-sm px-1 underline-offset-4 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/60"
                       >
                         {f.title}
                       </Link>

@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { useDialogRequest } from "@/lib/dialog-request"
+import { itemOutcome } from "@/lib/errors"
 import type { FocusTarget } from "@/lib/focus"
 import type { FollowDTO } from "@/types"
 import { Button } from "@/components/ui/button"
@@ -50,6 +51,7 @@ export function EditFollowDialog({
   const open = follow !== null
   const { pending, error, run, onCloseAutoFocus } = useDialogRequest({ open, returnFocus })
   const errorId = React.useId()
+  const saveRef = React.useRef<HTMLButtonElement>(null)
   // The page clears `follow` as the dialog closes; the title keeps naming it
   // while the dialog fades out.
   const shownFollow = useHeldWhileClosed(open, follow)
@@ -60,19 +62,33 @@ export function EditFollowDialog({
   // object, and the abandoned choice must not survive.
   if (useOpenedNow(open) && follow) setQuality(follow.quality)
 
+  // A 404 means the follow was removed meanwhile: nothing is left to save,
+  // so the dialog closes as done, like a remove's 404, and the refresh drops
+  // the row.
   const save = () => {
     if (!follow) return
+    // Focus the button first: Safari does not focus a clicked button, and
+    // focus left on the Select, which is about to be disabled, drops to
+    // <body>.
+    saveRef.current?.focus()
     void run(
       async () => {
-        await api.updateFollow(follow.id, { quality })
+        const outcome = await itemOutcome(api.updateFollow(follow.id, { quality }))
         await Promise.all([
           qc.invalidateQueries({ queryKey: qk.follows }),
           qc.invalidateQueries({ queryKey: qk.summary }),
         ])
+        return outcome
       },
       {
         done: () => onOpenChange(false),
-        announce: () => toast.success("Quality updated", { description: follow.title }),
+        announce: (outcome) => {
+          if (outcome === "already-gone") {
+            toast.message("Already removed", { description: follow.title })
+          } else {
+            toast.success("Quality updated", { description: follow.title })
+          }
+        },
         failure: `Couldn't change the quality of “${follow.title}”`,
       },
     )
@@ -98,7 +114,8 @@ export function EditFollowDialog({
 
         <div className="flex flex-col gap-2">
           <Label htmlFor="edit-follow-quality">Quality</Label>
-          <Select value={quality} onValueChange={setQuality}>
+          {/* Locked while saving: a change then would not change what was sent. */}
+          <Select value={quality} onValueChange={setQuality} disabled={pending}>
             <SelectTrigger id="edit-follow-quality" aria-label="Quality">
               <SelectValue />
             </SelectTrigger>
@@ -123,6 +140,7 @@ export function EditFollowDialog({
             <StackedLabel labels={{ cancel: "Cancel", close: "Close" }} active={pending ? "close" : "cancel"} />
           </Button>
           <PendingButton
+            ref={saveRef}
             pending={pending}
             pendingLabel="Saving…"
             aria-describedby={error !== null && !pending ? errorId : undefined}

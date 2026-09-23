@@ -8,7 +8,7 @@ import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { formatBytes, formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
-import { deleteOutcome, errorMessage, type DeleteOutcome } from "@/lib/errors"
+import { errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { ActiveDownload } from "@/lib/sse-reducer"
 import type { LessonDTO, LessonStatus } from "@/types"
 import { Badge } from "@/components/ui/badge"
@@ -67,11 +67,18 @@ const actionsSelector = (id: number) => `[data-row-actions="${id}"]`
 // nothing), but if it did it must fail rather than report a success.
 const noItem = (): Promise<never> => Promise.reject(new Error("the dialog has no lesson"))
 
+// TOMBSTONE is the reason a delete stores on the lesson it skips.
+const TOMBSTONE = "deleted"
+
 // rowNote is the muted line under a lesson's title: why it was skipped, or
-// why it failed (both stored in `error`). Nothing for any other status.
+// why it failed (both stored in `error`). Nothing for any other status. A
+// delete's tombstone reads "Files deleted", the reason under the "skipped"
+// badge, not a bare "deleted" that looks like a code or like the lesson
+// itself was deleted. The stored value stays as it is.
 function rowNote(lesson: LessonDTO): string | null {
   if (lesson.status !== "skipped" && lesson.status !== "failed") return null
   const note = lesson.error?.trim()
+  if (lesson.status === "skipped" && note === TOMBSTONE) return "Files deleted"
   return note ? note : null
 }
 
@@ -126,6 +133,7 @@ export function Lessons() {
   })
   const followTitle =
     follow != null ? followList.data?.find((f) => f.id === follow)?.title : undefined
+  const filterLabel = followTitle ? `Filtered by “${followTitle}”` : "Filtered by one follow"
 
   const runningJobByRailcontent = React.useMemo(() => {
     const m = new Map<number, number>()
@@ -152,7 +160,7 @@ export function Lessons() {
       qc.invalidateQueries({ queryKey: qk.summary })
     },
     onError: (err, lesson) => {
-      toast.error(`Couldn't queue “${lesson.title}”`, { description: errorMessage(err) })
+      failureToast(`Couldn't queue “${lesson.title}”`, errorMessage(err))
     },
   })
 
@@ -165,9 +173,7 @@ export function Lessons() {
       qc.invalidateQueries({ queryKey: qk.summary })
     },
     onError: (err, { lesson }) => {
-      toast.error(`Couldn't cancel the download of “${lesson.title}”`, {
-        description: errorMessage(err),
-      })
+      failureToast(`Couldn't cancel the download of “${lesson.title}”`, errorMessage(err))
     },
   })
 
@@ -180,7 +186,7 @@ export function Lessons() {
       qc.invalidateQueries({ queryKey: qk.summary })
     },
     onError: (err, lesson) => {
-      toast.error(`Couldn't un-skip “${lesson.title}”`, { description: errorMessage(err) })
+      failureToast(`Couldn't un-skip “${lesson.title}”`, errorMessage(err))
     },
   })
 
@@ -195,9 +201,9 @@ export function Lessons() {
   // pending until the refresh lands, so a failure's message appears together
   // with the refreshed lists, and on success focus returns to a row that is
   // already where the server says it is. A 404 means it was removed elsewhere
-  // first: that closes the dialog as done (see deleteOutcome).
-  const deleteLesson = (id: number): Promise<DeleteOutcome> =>
-    deleteOutcome(api.deleteLesson(id)).finally(() =>
+  // first: that closes the dialog as done (see itemOutcome).
+  const deleteLesson = (id: number): Promise<ItemOutcome> =>
+    itemOutcome(api.deleteLesson(id)).finally(() =>
       Promise.all([
         qc.invalidateQueries({ queryKey: qk.jobs() }),
         qc.invalidateQueries({ queryKey: ["lessons"] }),
@@ -205,12 +211,16 @@ export function Lessons() {
       ]),
     )
 
-  const skipLesson = (id: number, reason: string): Promise<void> =>
-    api.skipLesson(id, { reason: reason || undefined }).then(async () => {
+  // A 404 means the lesson was removed meanwhile (with its follow): nothing
+  // is left to skip, so the dialog closes as done, like a delete's 404, and
+  // the refresh drops the row.
+  const skipLesson = (id: number, reason: string): Promise<ItemOutcome> =>
+    itemOutcome(api.skipLesson(id, { reason: reason || undefined })).then(async (outcome) => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["lessons"] }),
         qc.invalidateQueries({ queryKey: qk.summary }),
       ])
+      return outcome
     })
 
   // Where focus goes when a row's dialog closes: the row's Actions button, a
@@ -262,7 +272,7 @@ export function Lessons() {
         <h1
           ref={headingRef}
           tabIndex={-1}
-          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60"
         >
           Lessons
         </h1>
@@ -277,8 +287,10 @@ export function Lessons() {
 
       {follow != null && (
         <div className="flex items-center gap-2">
-          <Badge variant="secondary">
-            {followTitle ? `Filtered by “${followTitle}”` : "Filtered by one follow"}
+          {/* A long follow name truncates inside the badge (it may shrink,
+              min-w-0); the title attribute carries the full label. */}
+          <Badge variant="secondary" className="min-w-0 shrink" title={filterLabel}>
+            <span className="truncate">{filterLabel}</span>
           </Badge>
           <Button variant="ghost" size="sm" onClick={clearFollow}>
             <X />
@@ -342,7 +354,12 @@ export function Lessons() {
                       <TableCell className="font-medium">
                         {lesson.title}
                         {note && (
-                          <p className="mt-0.5 line-clamp-2 max-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground">
+                          // Clamped to two lines; the title attribute carries
+                          // all of it (a failure can be a long worker line).
+                          <p
+                            title={note}
+                            className="mt-0.5 line-clamp-2 max-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground"
+                          >
                             {note}
                           </p>
                         )}
@@ -485,14 +502,18 @@ export function Lessons() {
           if (!open) setSkipping(null)
         }}
         title={skipping ? `Skip “${skipping.lesson.title}”?` : "Skip lesson?"}
-        description="Syncs leave a skipped lesson alone. Un-skip it later and the next sync downloads it."
+        description="Any queued or running download of it stops, and what that download had written is discarded; files from earlier downloads stay. Syncs leave a skipped lesson alone until you un-skip it."
         confirmLabel="Skip"
         pendingLabel="Skipping…"
         confirmVariant="default"
         onConfirm={() =>
           skipping ? skipLesson(skipping.lesson.railcontent_id, skipReason) : noItem()
         }
-        announce={() => toast.success("Lesson skipped", { description: skipping?.lesson.title })}
+        announce={(outcome) => {
+          const description = skipping?.lesson.title
+          if (outcome === "already-gone") toast.message("Already removed", { description })
+          else toast.success("Lesson skipped", { description })
+        }}
         failureTitle={`Couldn't skip “${skipping?.lesson.title ?? "the lesson"}”`}
         returnFocus={rowReturn(skipping)}
       >

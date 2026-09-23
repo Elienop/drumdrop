@@ -683,11 +683,14 @@ describe("Delete is offered exactly when the server says the lesson has files, w
 
 // --- Skip --------------------------------------------------------------------
 
+const SKIP_DELETING =
+  "This lesson's files are being deleted right now, and that skips it anyway. If it still isn't skipped in a moment, Skip again."
+
 it("a failed skip shows the server's message inside the dialog, not as a toast", async () => {
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[1]])),
     http.post(`${ORIGIN}/api/lessons/:id/skip`, () =>
-      HttpResponse.json({ error: "lesson not found" }, { status: 404 }),
+      HttpResponse.json({ error: SKIP_DELETING }, { status: 409 }),
     ),
   )
   const user = userEvent.setup()
@@ -696,12 +699,43 @@ it("a failed skip shows the server's message inside the dialog, not as a toast",
   const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
   expect(dialog).toHaveAccessibleName("Skip “Double Stroke Roll”?")
   await user.click(confirmButton(dialog, /^skip$/i))
-  await waitFor(() =>
-    expect(within(dialog).getByRole("alert")).toHaveTextContent("lesson not found"),
-  )
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(SKIP_DELETING))
   // Only inside the dialog: no toast carries it.
-  expect(screen.getAllByText("lesson not found")).toHaveLength(1)
+  expect(screen.getAllByText(SKIP_DELETING)).toHaveLength(1)
   expect(screen.getByRole("alertdialog")).toBe(dialog)
+})
+
+it("a 404 on skip (the lesson was removed meanwhile) closes the dialog as done, naming the lesson, and drops the row", async () => {
+  let gone = false
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(gone ? [] : [lessons[1]])),
+    http.post(`${ORIGIN}/api/lessons/:id/skip`, () => {
+      gone = true
+      return HttpResponse.json(
+        { error: "This lesson isn't in DrumDrop anymore: its follow was removed meanwhile." },
+        { status: 404 },
+      )
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
+  await user.click(confirmButton(dialog, /^skip$/i))
+
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  expect(await screen.findByText("Already removed")).toBeInTheDocument()
+  expect(
+    screen.getByText("Double Stroke Roll", { selector: "[data-description]" }),
+  ).toBeInTheDocument()
+  expect(screen.queryByText("Lesson skipped")).not.toBeInTheDocument()
+  expect(screen.queryByText(/isn't in DrumDrop anymore/)).not.toBeInTheDocument()
+  // The refresh after the 404 dropped the row: nothing is left to skip again.
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("button", { name: "Actions for Double Stroke Roll" }),
+    ).not.toBeInTheDocument(),
+  )
 })
 
 it("skips with the typed reason, closes, returns focus and then announces it", async () => {
@@ -740,8 +774,10 @@ it("Enter in the skip reason skips, and the reason's label dims with its field w
   renderLessons()
 
   const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
+  // It says what Skip does now: the download stops and its partial output
+  // goes, but files from earlier downloads stay.
   expect(dialog).toHaveAccessibleDescription(
-    "Syncs leave a skipped lesson alone. Un-skip it later and the next sync downloads it.",
+    "Any queued or running download of it stops, and what that download had written is discarded; files from earlier downloads stay. Syncs leave a skipped lesson alone until you un-skip it.",
   )
   const reason = within(dialog).getByLabelText("Reason (optional)")
   await user.type(reason, "too hard{Enter}")
@@ -796,6 +832,8 @@ it("a row action that fails without a server message toasts the outcome and our 
     }),
   ).toBeInTheDocument()
   expect(screen.queryByText(/HTTP 502/)).not.toBeInTheDocument()
+  // A toast with a sentence to read stays until closed (the app's one rule).
+  expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
 })
 
 it("a list that fails without a server message says so in a sentence, never 'HTTP 502'", async () => {
@@ -833,6 +871,34 @@ it("a skipped or failed lesson shows its reason, muted, under its title; other s
   expect(reason.closest("td")).toHaveTextContent(/^Flam Tap/)
   expect(screen.getByText("yt-dlp exited 1").closest("td")).toHaveTextContent(/^Linear Fills/)
   expect(screen.queryByText("a stale error")).not.toBeInTheDocument()
+})
+
+it("a clamped row note carries its full text in a title", async () => {
+  const long = `yt-dlp exited 1: ${"ERROR: [youtube] unable to extract player response ".repeat(4)}`
+  const failed: LessonDTO = {
+    ...lessons[1],
+    railcontent_id: 800,
+    title: "Linear Fills",
+    status: "failed",
+    error: long,
+  }
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([failed])))
+  renderLessons()
+
+  const note = await screen.findByText(long.trim())
+  expect(note).toHaveClass("line-clamp-2")
+  expect(note).toHaveAttribute("title", long.trim())
+})
+
+it("a delete's tombstone reads 'Files deleted' under the title, not a bare 'deleted'", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([tombstoned(lessons[0])])),
+  )
+  renderLessons()
+
+  const note = await screen.findByText("Files deleted")
+  expect(note.closest("td")).toHaveTextContent(/^Single Stroke Roll/)
+  expect(screen.queryByText("deleted", { exact: true })).not.toBeInTheDocument()
 })
 
 it("while a lesson is being deleted, its row says so and offers neither Delete nor Download", async () => {
@@ -888,4 +954,37 @@ it("filtered by a follow, the badge and the card name the follow, not its id", a
   expect(await screen.findByText("Filtered by “Stick Control”")).toBeInTheDocument()
   expect(screen.getByText("Lessons of “Stick Control”")).toBeInTheDocument()
   expect(screen.queryByText(/#3/)).not.toBeInTheDocument()
+})
+
+it("a long follow name truncates inside the filter badge, with the full name in its title", async () => {
+  const title = "The Complete Guide to Every Rudiment You Will Ever Need, Volume Two"
+  server.use(
+    http.get(`${ORIGIN}/api/follows/3/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.get(`${ORIGIN}/api/follows`, () =>
+      HttpResponse.json([
+        {
+          id: 3,
+          kind: "node",
+          railcontent_id: 12345,
+          slug: null,
+          title,
+          brand: "drumeo",
+          quality: "1080p",
+          added_at: "2026-05-01T00:00:00Z",
+          last_synced_at: null,
+        },
+      ]),
+    ),
+  )
+  renderWithProviders(<Lessons />, { route: "/lessons?follow=3" })
+
+  const text = await screen.findByText(`Filtered by “${title}”`)
+  // jsdom cannot measure the ellipsis: this pins the structure. The text
+  // truncates, and the badge may shrink below its content (its default is
+  // shrink-0 and w-fit, which pushed a long name past the row).
+  expect(text).toHaveClass("truncate")
+  const badge = text.closest('[data-slot="badge"]')
+  expect(badge).toHaveClass("min-w-0", "shrink")
+  expect(badge).not.toHaveClass("shrink-0")
+  expect(badge).toHaveAttribute("title", `Filtered by “${title}”`)
 })

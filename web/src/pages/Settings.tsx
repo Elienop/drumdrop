@@ -2,7 +2,7 @@ import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
-import { errorMessage } from "@/lib/errors"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { clearToken, getToken, setToken } from "@/lib/auth"
 import { Button } from "@/components/ui/button"
@@ -45,9 +45,12 @@ function MusoraCard() {
       qc.invalidateQueries({ queryKey: qk.session })
     },
     onError: (err) => {
-      // 401 → bad Musora credentials; 400 → malformed. The server's message
-      // says which; without one (a proxy page) our own sentence does.
-      toast.error("Couldn't connect to Musora", { description: errorMessage(err) })
+      // The server's sentence says why: Musora rejected the email and
+      // password (422), Musora couldn't be reached (502), or the form was
+      // malformed (400); without one (a proxy page) our own sentence does.
+      // Never a 401: that status belongs to DrumDrop's own API token, and
+      // the api client answers it by opening the token gate.
+      failureToast("Couldn't connect to Musora", errorMessage(err))
     },
   })
 
@@ -60,7 +63,7 @@ function MusoraCard() {
           <div className="flex flex-col gap-1.5">
             <CardTitle>Musora connection</CardTitle>
             <CardDescription>
-              Posted to your local drumdrop server; credentials never leave this machine.
+              Your email and password go only to your DrumDrop server, which signs in to Musora with them and keeps them encrypted so it can sign in again later.
             </CardDescription>
           </div>
           {session.isPending ? (

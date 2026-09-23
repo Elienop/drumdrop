@@ -36,6 +36,8 @@ it("a sync that fails without a server message toasts the outcome and a sentence
     screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again."),
   ).toBeInTheDocument()
   expect(screen.queryByText(/HTTP 500/)).not.toBeInTheDocument()
+  // A toast with a sentence to read stays until closed (the app's one rule).
+  expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
 })
 
 it("disables the Dry-run button after a 503 probe", async () => {

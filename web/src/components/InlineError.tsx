@@ -16,10 +16,12 @@ import { cn } from "@/lib/utils"
 // and EditFollowDialog pass that). Never display:none it: the region would
 // stop announcing.
 //
-// The icon is inline with the text, so it stays beside the first word however
-// the message wraps or is aligned (centred below `sm`, like the dialog
-// header). `stale` mutes a message while a retry is running: it describes the
-// last attempt, not the one in progress.
+// The message is left-aligned at every width, even below `sm` where the
+// dialog header is centred: it can run to several lines, and centred lines of
+// uneven length are hard to read. The icon is inline with the text, so it
+// stays beside the first word however the message wraps. `stale` mutes a
+// message while a retry is running: it describes the last attempt, not the
+// one in progress.
 export function InlineError({
   id,
   error,
@@ -38,7 +40,7 @@ export function InlineError({
           key={error.seq}
           data-stale={stale || undefined}
           className={cn(
-            "text-center text-sm text-pretty text-destructive transition-colors sm:text-left",
+            "text-left text-sm text-pretty text-destructive transition-colors",
             stale && "text-muted-foreground",
           )}
         >

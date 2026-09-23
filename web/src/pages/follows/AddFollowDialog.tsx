@@ -83,7 +83,10 @@ export function AddFollowDialog({
   const [quality, setQuality] = React.useState("best")
   const [preview, setPreview] = React.useState<Preview | null>(null)
   const [step, setStep] = React.useState<"preview" | "add">("preview")
-  const { pending, error, run, onCloseAutoFocus } = useDialogRequest({ open, returnFocus })
+  const { pending, error, run, onCloseAutoFocus, dismissError } = useDialogRequest({
+    open,
+    returnFocus,
+  })
   const errorId = React.useId()
   const addRef = React.useRef<HTMLButtonElement>(null)
 
@@ -145,12 +148,34 @@ export function AddFollowDialog({
           if (status === 201) toast.success("Follow added", { description: data.title })
           else toast.message("Already following", { description: data.title })
         },
-        failure: `Couldn't add “${shown.data.title}”`,
+        // An unknown node id previews with an empty title.
+        failure: shown.data.title.trim()
+          ? `Couldn't add “${shown.data.title}”`
+          : "Couldn't add the follow",
       },
     )
   }
 
   const canPreview = kind === "node" ? id.trim() !== "" : slug.trim() !== ""
+
+  // Enter in a field runs the next step: Add when the preview shown is of
+  // exactly this input, else Preview. Handled per field rather than by a
+  // form: with two fields (slug and brand) and no submit button, a form
+  // does not submit on Enter at all.
+  const onFieldEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter" || e.nativeEvent.isComposing) return
+    e.preventDefault()
+    if (pending) return
+    if (shown) runAdd()
+    else if (canPreview) runPreview()
+  }
+
+  // An edit makes the last failure stale: it was about what was sent, which
+  // the fields no longer say.
+  const edit = (set: (value: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    set(e.target.value)
+    dismissError()
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -166,7 +191,13 @@ export function AddFollowDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={kind} onValueChange={(v) => setKind(v as Kind)}>
+        <Tabs
+          value={kind}
+          onValueChange={(v) => {
+            setKind(v as Kind)
+            dismissError()
+          }}
+        >
           <TabsList className="w-full">
             <TabsTrigger value="node" disabled={adding}>
               Node
@@ -183,7 +214,8 @@ export function AddFollowDialog({
               placeholder="https://drumeo.com/… or 12345"
               value={id}
               disabled={adding}
-              onChange={(e) => setId(e.target.value)}
+              onChange={edit(setId)}
+              onKeyDown={onFieldEnter}
             />
           </TabsContent>
 
@@ -194,7 +226,8 @@ export function AddFollowDialog({
               placeholder="jared-falk"
               value={slug}
               disabled={adding}
-              onChange={(e) => setSlug(e.target.value)}
+              onChange={edit(setSlug)}
+              onKeyDown={onFieldEnter}
             />
             <Label htmlFor="follow-brand">Brand (optional)</Label>
             <Input
@@ -202,7 +235,8 @@ export function AddFollowDialog({
               placeholder="drumeo"
               value={brand}
               disabled={adding}
-              onChange={(e) => setBrand(e.target.value)}
+              onChange={edit(setBrand)}
+              onKeyDown={onFieldEnter}
             />
           </TabsContent>
         </Tabs>
@@ -237,10 +271,11 @@ export function AddFollowDialog({
         <InlineError id={errorId} error={error} stale={pending} />
 
         <DialogFooter>
-          {/* "Close" while a request runs: closing does not stop it, its
-              result then arrives as a notification. */}
+          {/* "Close" only while Add runs: closing does not stop it, and its
+              result then arrives as a notification. A preview's result is
+              dropped when the dialog closes, so then it is a plain Cancel. */}
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            <StackedLabel labels={{ cancel: "Cancel", close: "Close" }} active={pending ? "close" : "cancel"} />
+            <StackedLabel labels={{ cancel: "Cancel", close: "Close" }} active={adding ? "close" : "cancel"} />
           </Button>
           <PendingButton
             variant="outline"

@@ -1,5 +1,5 @@
 import { expect, it } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
 import { ORIGIN, renderWithProviders, server } from "@/test/msw"
@@ -120,11 +120,22 @@ it("retries a failed job (202) and shows a success toast", async () => {
     .toBeInTheDocument()
 })
 
-it("shows an 'already finished' toast when cancel returns 409", async () => {
+// A 409 says why in the server's own sentence; the toast shows it as it is,
+// stays until closed, and the list refreshes (the row was out of date).
+const NOT_ACTIVE = "This job already finished, so there's nothing to cancel."
+const BEING_DELETED =
+  "This lesson's files are being deleted right now. Try again once that has finished."
+
+it("a 409 on cancel toasts the outcome with the server's sentence, and refreshes the list", async () => {
+  let listFetches = 0
   server.use(
-    ...jobsAndLessons(),
+    http.get(`${ORIGIN}/api/jobs`, () => {
+      listFetches++
+      return HttpResponse.json([failedJob, runningJob])
+    }),
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
     http.post(`${ORIGIN}/api/jobs/22/cancel`, () =>
-      HttpResponse.json({ error: "job is not active" }, { status: 409 }),
+      HttpResponse.json({ error: NOT_ACTIVE }, { status: 409 }),
     ),
   )
   const user = userEvent.setup()
@@ -136,10 +147,38 @@ it("shows an 'already finished' toast when cancel returns 409", async () => {
   )
 
   await screen.findByText("Double Stroke Roll")
+  const fetchesBefore = listFetches
   const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
   await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
 
-  expect(await screen.findByText(/already finished/i)).toBeInTheDocument()
+  expect(await screen.findByText("Couldn't cancel the job")).toBeInTheDocument()
+  expect(screen.getByText(NOT_ACTIVE, { selector: "[data-description]" })).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+  await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
+})
+
+it("a 409 on retry shows the server's reason (files being deleted), not a guess of our own", async () => {
+  server.use(
+    ...jobsAndLessons(),
+    http.post(`${ORIGIN}/api/jobs/11/retry`, () =>
+      HttpResponse.json({ error: BEING_DELETED }, { status: 409 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Queue />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Single Stroke Roll")
+  const failedRow = screen.getByText("Single Stroke Roll").closest("tr")!
+  await user.click(within(failedRow).getByRole("button", { name: /retry/i }))
+
+  expect(await screen.findByText("Couldn't retry the job")).toBeInTheDocument()
+  expect(screen.getByText(BEING_DELETED, { selector: "[data-description]" })).toBeInTheDocument()
+  expect(screen.queryByText(/not retryable/i)).not.toBeInTheDocument()
 })
 
 it("a cancel answered by a proxy's HTML page toasts a sentence, never a JSON parse error", async () => {

@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
 import { RotateCcw, X } from "lucide-react"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
-import { errorMessage } from "@/lib/errors"
+import { api } from "@/lib/api"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import type { JobDTO, JobStatus } from "@/types"
@@ -72,6 +72,9 @@ export function Queue() {
     qc.invalidateQueries({ queryKey: qk.summary })
   }
 
+  // A failure shows the server's own sentence (a 409 says why: the job
+  // already finished, or its lesson's files are being deleted), and the list
+  // refreshes anyway: a refusal usually means the row is out of date.
   const cancel = useMutation({
     mutationFn: (id: number) => api.cancelJob(id),
     onSuccess: () => {
@@ -79,9 +82,8 @@ export function Queue() {
       invalidate()
     },
     onError: (err) => {
-      if (err instanceof ApiHttpError && err.status === 409)
-        toast.message("Job already finished")
-      else toast.error("Couldn't cancel the job", { description: errorMessage(err) })
+      failureToast("Couldn't cancel the job", errorMessage(err))
+      invalidate()
     },
   })
 
@@ -92,9 +94,8 @@ export function Queue() {
       invalidate()
     },
     onError: (err) => {
-      if (err instanceof ApiHttpError && err.status === 409)
-        toast.message("Job is not retryable")
-      else toast.error("Couldn't retry the job", { description: errorMessage(err) })
+      failureToast("Couldn't retry the job", errorMessage(err))
+      invalidate()
     },
   })
 
