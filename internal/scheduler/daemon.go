@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,6 +43,10 @@ type Daemon struct {
 	// atomically because Pause/Resume are called from the HTTP handler goroutine
 	// while Run executes on the daemon goroutine.
 	paused atomic.Bool
+
+	// recovered makes the startup recovery run once, whether serve runs it
+	// before it starts serving or Run runs it itself.
+	recovered sync.Once
 }
 
 // Pause stops the daemon from starting new cycles. While paused, the startup
@@ -107,8 +112,28 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// Run is the long-running daemon loop. It first reclaims any jobs left running by
-// a previous crash (RequeueStaleRunning), runs one cycle immediately, then runs a
+// Recover is the startup crash recovery, run once however often it is called:
+// any job still marked running was orphaned by a previous process that died
+// mid-download, so it is re-queued for this run to pick up. serve calls it
+// before it starts serving, so no request races it; Run calls it too (a no-op
+// the second time).
+//
+// It assumes this is the only daemon (daemon or serve) on the database: a
+// second one would requeue the first one's running job. A delete's hold on a
+// lesson needs no recovery: it is a lease that lapses on its own
+// (database.DeleteLease).
+func (d *Daemon) Recover(ctx context.Context) {
+	d.recovered.Do(func() {
+		if reclaimed, err := d.Store.RequeueStaleRunning(ctx); err != nil {
+			fmt.Fprintf(d.log(), "startup: requeue stale running failed: %v\n", err)
+		} else {
+			fmt.Fprintf(d.log(), "startup: requeued %d stale running job(s)\n", reclaimed)
+		}
+	})
+}
+
+// Run is the long-running daemon loop. It first runs the startup recovery
+// (Recover, unless it already ran), runs one cycle immediately, then runs a
 // cycle on every interval tick until the context is cancelled.
 //
 // A cycle error is logged and the loop CONTINUES — a transient store hiccup must
@@ -116,21 +141,7 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 // Only context cancellation (a SIGINT/SIGTERM-derived ctx) ends the loop, and Run
 // then returns nil for a clean shutdown.
 func (d *Daemon) Run(ctx context.Context, interval time.Duration) error {
-	// Crash recovery: any job still marked running was orphaned by a previous
-	// process that died mid-download. Re-queue them so this run picks them up.
-	if reclaimed, err := d.Store.RequeueStaleRunning(ctx); err != nil {
-		fmt.Fprintf(d.log(), "startup: requeue stale running failed: %v\n", err)
-	} else {
-		fmt.Fprintf(d.log(), "startup: requeued %d stale running job(s)\n", reclaimed)
-	}
-	// A delete runs inside one request of this process, so a lesson still
-	// marked as being deleted was left by a process that died mid-delete: end
-	// it, or the lesson could never be downloaded again.
-	if ended, err := d.Store.ClearStaleDeletes(ctx); err != nil {
-		fmt.Fprintf(d.log(), "startup: clear stale deletes failed: %v\n", err)
-	} else if ended > 0 {
-		fmt.Fprintf(d.log(), "startup: ended %d delete(s) a previous run left unfinished\n", ended)
-	}
+	d.Recover(ctx)
 
 	// Run one cycle immediately so the daemon does useful work without waiting a
 	// full interval on startup — unless paused, in which case the next un-paused

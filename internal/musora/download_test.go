@@ -153,7 +153,12 @@ func TestFetchAuxArtifactsSurfacesFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, base), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	failures := fetchAuxArtifacts(l, filepath.Join(dir, base), base)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	failures := fetchAuxArtifacts(l, root, base, base)
 
 	if len(failures) != 1 {
 		t.Fatalf("failures = %v, want exactly 1", failures)

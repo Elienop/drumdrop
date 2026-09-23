@@ -168,6 +168,7 @@ func TestRecordRefusesADamagedRecord(t *testing.T) {
 		`["/etc/passwd"]`,
 		`["Show/Season 01/../../etc"]`,
 		`["../Show/Season 01/x.mp4"]`,
+		`["../Season 01/x.mp4"]`,
 		`["Show/Season 01"]`,
 		`["Show/Season 01/"]`,
 		`["Show/Season 01/a/b"]`,

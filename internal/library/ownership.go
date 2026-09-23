@@ -30,10 +30,13 @@ import (
 // ownership; so the fallback skips every entry another lesson row claims, and
 // reports it.
 //
-// "Claims" is decided by the real file, not only by its name: an existing entry
-// that is the same file (os.SameFile) as one another lesson claims under
-// another spelling, as on a case-insensitive filesystem ("Groove" and
-// "GROOVE"), is claimed too.
+// "Claims" is decided by the real file and the real folder, not by spelling,
+// at every level: an existing entry that is the same file (os.SameFile) as one
+// another lesson claims under another spelling, as on a case-insensitive
+// filesystem ("Groove" and "GROOVE"), is claimed too, and so is one whose
+// season or show folder is spelled another way ("Show" and "SHOW") but is the
+// same folder. A folder "holds" what another lesson records inside it by the
+// same rule (Holds).
 
 // Entries is what one lesson owns in plex-tv season folders, as far as can be
 // proven. Both lists hold absolute paths under the library folder.
@@ -65,12 +68,22 @@ type Claims struct {
 	// listings caches each season folder's entries (name -> isDir), read on
 	// first use; a missing folder lists as empty.
 	listings map[string]map[string]bool
-	// folders caches, per season folder, the names every lesson claims there
-	// (by record, or by a legacy row's name match).
-	folders map[string]map[string][]int
+	// folders caches, per season folder, the entries every lesson claims there
+	// or in the same folder under another spelling (by record, or by a legacy
+	// row's name match), keyed by name.
+	folders map[string]map[string][]claim
 	// stats caches Lstat of claimed entries for the identity checks (nil for
 	// one that does not exist).
 	stats map[string]os.FileInfo
+	// dirStats caches Stat of folders for the folder identity checks (nil for
+	// one that does not exist or can not be read).
+	dirStats map[string]os.FileInfo
+}
+
+// claim is one path a lesson row claims in a season folder, and whose it is.
+type claim struct {
+	path string
+	ids  []int
 }
 
 // ownedPath is one path a lesson row records outside its record.
@@ -92,8 +105,9 @@ func NewClaims(root string, rows []database.Lesson) (*Claims, error) {
 		byID:     map[int][]string{},
 		legacy:   map[string][]database.Lesson{},
 		listings: map[string]map[string]bool{},
-		folders:  map[string]map[string][]int{},
+		folders:  map[string]map[string][]claim{},
 		stats:    map[string]os.FileInfo{},
+		dirStats: map[string]os.FileInfo{},
 	}
 	for _, row := range rows {
 		entries, recorded, err := Record(row)
@@ -127,7 +141,10 @@ func NewClaims(root string, rows []database.Lesson) (*Claims, error) {
 
 // Forget drops every claim of lesson id: its files are gone (a delete
 // tombstoned it), so later questions must not count them. The folder caches
-// are dropped too, as the files it removed changed the listings.
+// are dropped too, as the files it removed changed the listings. The folder
+// identities (dirStats) are kept: removing files does not change which folder
+// is which, and a stale one can only make two folders look the same, which
+// keeps more, never less.
 func (c *Claims) Forget(id int) {
 	for _, p := range c.byID[id] {
 		c.recorded[p] = slices.DeleteFunc(c.recorded[p], func(x int) bool { return x == id })
@@ -141,8 +158,32 @@ func (c *Claims) Forget(id int) {
 	}
 	c.paths = slices.DeleteFunc(c.paths, func(o ownedPath) bool { return o.id == id })
 	c.listings = map[string]map[string]bool{}
-	c.folders = map[string]map[string][]int{}
+	c.folders = map[string]map[string][]claim{}
 	c.stats = map[string]os.FileInfo{}
+}
+
+// dirStat is os.Stat of a folder through the cache: nil when it does not exist
+// or can not be read (no evidence of identity either way).
+func (c *Claims) dirStat(dir string) os.FileInfo {
+	if info, ok := c.dirStats[dir]; ok {
+		return info
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		info = nil
+	}
+	c.dirStats[dir] = info
+	return info
+}
+
+// sameFolder reports whether a and b are one folder: the same path, or two
+// existing folders that are the same one under different spellings.
+func (c *Claims) sameFolder(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, bi := c.dirStat(a), c.dirStat(b)
+	return ai != nil && bi != nil && os.SameFile(ai, bi)
 }
 
 // lstat is os.Lstat through the cache: nil when path does not exist (or can
@@ -201,12 +242,14 @@ func (c *Claims) listing(dir string) (map[string]bool, error) {
 	return l, nil
 }
 
-// folderClaims returns, for the season folder dir, every name a lesson claims
-// there and whose: the recorded entries in it, and the existing entries a
-// legacy row filed there matches by name. A legacy row whose episode name is
-// uncertain claims the entries of every candidate name, so the fallback errs
-// towards keeping. With legacy false only the records count.
-func (c *Claims) folderClaims(dir string, legacy bool) (map[string][]int, error) {
+// folderClaims returns, for the season folder dir, every entry a lesson claims
+// there, keyed by name: the recorded entries in it, and the existing entries a
+// legacy row filed there matches by name, counting dir under every spelling
+// (sameFolder: "Show" and "SHOW" on a case-insensitive disk are one folder). A
+// legacy row whose episode name is uncertain claims the entries of every
+// candidate name, so the fallback errs towards keeping. With legacy false only
+// the records count.
+func (c *Claims) folderClaims(dir string, legacy bool) (map[string][]claim, error) {
 	key := dir
 	if !legacy {
 		key = "\x00records\x00" + dir
@@ -214,26 +257,19 @@ func (c *Claims) folderClaims(dir string, legacy bool) (map[string][]int, error)
 	if f, ok := c.folders[key]; ok {
 		return f, nil
 	}
-	f := map[string][]int{}
+	f := map[string][]claim{}
 	for p, ids := range c.recorded {
-		if filepath.Dir(p) == dir {
-			f[filepath.Base(p)] = append(f[filepath.Base(p)], ids...)
+		if c.sameFolder(filepath.Dir(p), dir) {
+			f[filepath.Base(p)] = append(f[filepath.Base(p)], claim{path: p, ids: ids})
 		}
 	}
-	if rows := c.legacy[dir]; legacy && len(rows) > 0 {
-		listing, err := c.listing(dir)
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			bases, _ := legacyEpisodeBases(row, dir, listing)
-			for name, isDir := range listing {
-				for _, b := range bases {
-					if legacyEpisodeEntry(b, name, isDir, listing) {
-						f[name] = append(f[name], row.RailcontentID)
-						break
-					}
-				}
+	if legacy {
+		for folder, rows := range c.legacy {
+			if len(rows) == 0 || !c.sameFolder(folder, dir) {
+				continue
+			}
+			if err := c.legacyClaims(f, folder, rows); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -241,10 +277,32 @@ func (c *Claims) folderClaims(dir string, legacy bool) (map[string][]int, error)
 	return f, nil
 }
 
+// legacyClaims adds to f the existing entries of folder that rows (legacy rows
+// filed there) match by name.
+func (c *Claims) legacyClaims(f map[string][]claim, folder string, rows []database.Lesson) error {
+	listing, err := c.listing(folder)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		bases, _ := legacyEpisodeBases(row, folder, listing)
+		for name, isDir := range listing {
+			for _, b := range bases {
+				if legacyEpisodeEntry(b, name, isDir, listing) {
+					f[name] = append(f[name], claim{path: filepath.Join(folder, name), ids: []int{row.RailcontentID}})
+					break
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Claimants returns the ids of the lessons other than self that claim path, an
 // entry of a season folder: one whose record names it; with legacy, one whose
 // name match (a legacy row) reaches it; and, for an existing entry, one that
-// claims another name in the same folder that is the same file as path.
+// claims another name in the same folder (under any spelling of it) that is
+// the same file as path.
 func (c *Claims) Claimants(path string, self int, legacy bool) ([]int, error) {
 	path = absPath(path)
 	dir, name := filepath.Dir(path), filepath.Base(path)
@@ -252,14 +310,19 @@ func (c *Claims) Claimants(path string, self int, legacy bool) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := append([]int(nil), claimed[name]...)
+	var ids []int
+	for _, cl := range claimed[name] {
+		ids = append(ids, cl.ids...)
+	}
 	if info, lerr := os.Lstat(path); lerr == nil {
-		for other, oids := range claimed {
-			if other == name {
-				continue
-			}
-			if oinfo := c.lstat(filepath.Join(dir, other)); oinfo != nil && os.SameFile(info, oinfo) {
-				ids = append(ids, oids...)
+		for _, cls := range claimed {
+			for _, cl := range cls {
+				if cl.path == path {
+					continue
+				}
+				if oinfo := c.lstat(cl.path); oinfo != nil && os.SameFile(info, oinfo) {
+					ids = append(ids, cl.ids...)
+				}
 			}
 		}
 	}
@@ -350,22 +413,43 @@ func (c *Claims) Plan(self database.Lesson) (Entries, error) {
 
 // Holds returns the ids of the lessons other than self that record a path at
 // or inside dir: their output_dir, their video, or one of their library
-// entries. A lesson folder that holds another lesson's files is never one to
-// remove whole.
+// entries, written inside dir or inside the same folder under another
+// spelling (a case-insensitive disk, a symlink, another mount). A lesson
+// folder that holds another lesson's files is never one to remove whole.
 func (c *Claims) Holds(dir string, self int) []int {
 	dir = absPath(dir)
 	var ids []int
 	for _, o := range c.paths {
-		if Inside(dir, o.path) {
+		if c.within(dir, o.path) {
 			ids = append(ids, o.id)
 		}
 	}
 	for p, pids := range c.recorded {
-		if Inside(dir, p) {
+		if c.within(dir, p) {
 			ids = append(ids, pids...)
 		}
 	}
 	return withoutID(ids, self)
+}
+
+// within reports whether path is dir or inside it: as written, or because path
+// or a folder above it is dir under another spelling (same folder by
+// identity).
+func (c *Claims) within(dir, path string) bool {
+	if Inside(dir, path) {
+		return true
+	}
+	if c.dirStat(dir) == nil {
+		return false
+	}
+	for p := path; ; p = filepath.Dir(p) {
+		if c.sameFolder(p, dir) {
+			return true
+		}
+		if filepath.Dir(p) == p {
+			return false
+		}
+	}
 }
 
 // lessonFolderName is the shape of every lesson folder drumdrop creates:

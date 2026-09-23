@@ -49,10 +49,20 @@ type fakeWorkerStore struct {
 	getFollowErr error
 	// gone marks jobs a delete that removes the lesson's files removed: every
 	// guarded write for them returns database.ErrDownloadAbandoned joined with
-	// database.ErrDiscardDownload, and records nothing. kept marks jobs a
-	// delete that keeps the files removed (ErrDownloadAbandoned alone).
-	gone map[int64]bool
-	kept map[int64]bool
+	// database.ErrDiscardDownload and database.ErrLessonDeleted, and records
+	// nothing. skipped marks jobs a Skip removed (ErrDownloadAbandoned with
+	// ErrDiscardDownload). kept marks jobs a delete that keeps the files
+	// removed (ErrDownloadAbandoned alone).
+	gone    map[int64]bool
+	skipped map[int64]bool
+	kept    map[int64]bool
+	// getLessonErr, when set, is what GetLesson answers.
+	getLessonErr error
+	// finishErr, when set, is what FinishDownload answers (nothing recorded).
+	finishErr error
+	// requeued marks jobs another process requeued meanwhile: CancelDownload
+	// answers database.ErrDownloadCanceled and records nothing.
+	requeued map[int64]bool
 	// canceled marks jobs canceled in the database while the worker holds
 	// them: StartDownload and ConfirmDownload return
 	// database.ErrDownloadCanceled; the terminal writes land.
@@ -121,6 +131,9 @@ func (s *fakeWorkerStore) GetFollow(ctx context.Context, id int64) (database.Fol
 // worker's folder numbering). An unknown id returns a zero lesson with no error,
 // so the worker falls back to index 1 — never panicking on a download path.
 func (s *fakeWorkerStore) GetLesson(ctx context.Context, id int) (database.Lesson, error) {
+	if s.getLessonErr != nil {
+		return database.Lesson{}, s.getLessonErr
+	}
 	return s.lessons[id], nil
 }
 
@@ -153,6 +166,8 @@ func (s *fakeWorkerStore) markJobFailedAs(id int64, errMsg string) {
 func (s *fakeWorkerStore) abandoned(jobID int64) error {
 	switch {
 	case s.gone[jobID]:
+		return fmt.Errorf("job %d: %w: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrDiscardDownload, database.ErrLessonDeleted)
+	case s.skipped[jobID]:
 		return fmt.Errorf("job %d: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrDiscardDownload)
 	case s.kept[jobID]:
 		return fmt.Errorf("job %d: %w", jobID, database.ErrDownloadAbandoned)
@@ -183,10 +198,6 @@ func (s *fakeWorkerStore) ConfirmDownload(ctx context.Context, jobID int64, id i
 	return nil
 }
 
-func (s *fakeWorkerStore) ClearStaleDeletes(ctx context.Context) (int, error) {
-	panic("ClearStaleDeletes: not expected from Worker")
-}
-
 func (s *fakeWorkerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
 	return s.withFiles, s.withFilesErr
 }
@@ -202,6 +213,9 @@ func (s *fakeWorkerStore) StartDownload(ctx context.Context, jobID int64, id int
 func (s *fakeWorkerStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
+	}
+	if s.finishErr != nil {
+		return s.finishErr
 	}
 	s.markDownloaded = append(s.markDownloaded, markDownloadedCall{
 		id:        id,
@@ -240,6 +254,9 @@ func (s *fakeWorkerStore) SkipDownload(ctx context.Context, jobID int64, id int,
 func (s *fakeWorkerStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
+	}
+	if s.requeued[jobID] {
+		return fmt.Errorf("job %d is queued: %w", jobID, database.ErrDownloadCanceled)
 	}
 	s.markSkipped = append(s.markSkipped, id)
 	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())

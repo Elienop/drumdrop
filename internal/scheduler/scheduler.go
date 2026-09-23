@@ -74,7 +74,6 @@ type Store interface {
 	SkipDownload(ctx context.Context, jobID int64, id int, reason string) error
 	CancelDownload(ctx context.Context, jobID int64, id int) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
-	ClearStaleDeletes(ctx context.Context) (int, error)
 }
 
 // Compile-time assertion that the real store satisfies the scheduler's Store

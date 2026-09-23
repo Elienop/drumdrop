@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,6 +111,14 @@ func TestParseServeArgsIntervalFromEnv(t *testing.T) {
 type fakeDaemon struct {
 	started  chan struct{}
 	returned chan struct{}
+	// recovered is set when Recover returns; recoverDelay makes it slow.
+	recovered    atomic.Bool
+	recoverDelay time.Duration
+}
+
+func (d *fakeDaemon) Recover(context.Context) {
+	time.Sleep(d.recoverDelay)
+	d.recovered.Store(true)
 }
 
 func (d *fakeDaemon) Run(ctx context.Context, _ time.Duration) error {
@@ -180,6 +189,45 @@ func TestGracefulServeShutdownOrdering(t *testing.T) {
 	}
 	if closedWhileRunning {
 		t.Fatal("onClose ran before the daemon goroutine returned (store closed under a live daemon)")
+	}
+}
+
+// TestGracefulServeRecoversBeforeServing pins that the startup recovery has
+// finished before the first request is served (code review round 3, L4): the
+// listener is already bound, so a request sent at once waits for srv.Serve,
+// and srv.Serve only starts after Recover returned.
+func TestGracefulServeRecoversBeforeServing(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	daemon := &fakeDaemon{started: make(chan struct{}), returned: make(chan struct{}), recoverDelay: 200 * time.Millisecond}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		if !daemon.recovered.Load() {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- gracefulServe(ctx, &http.Server{Handler: mux}, ln, daemon, time.Hour, func() error { return nil })
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("first request served with status %d, want 200: it ran before the startup recovery finished", resp.StatusCode)
 	}
 }
 

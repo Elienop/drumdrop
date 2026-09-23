@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/elienop/drumdrop/internal/engine"
@@ -37,7 +38,8 @@ type loginRequest struct {
 // ?id=N(&whole=bool) previews a node follow (root id, lesson count, title);
 // ?slug= previews an instructor follow (display name + lesson count). A missing
 // or unparseable id, or neither param, is a 400; an unknown instructor is a 400.
-// Resolution failures against Musora surface as 502.
+// Resolution failures against Musora surface as 502 (detail logged). No answer
+// echoes the input back.
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	switch {
@@ -49,12 +51,12 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// uses ExtractID) — a URL must not 400 on preview when it works on add.
 		id := engine.ExtractID(q.Get("id"))
 		if id == 0 {
-			writeErr(w, http.StatusBadRequest, "could not parse a content id from: "+q.Get("id"))
+			writeErr(w, http.StatusBadRequest, msgNoContentID)
 			return
 		}
 		s.previewNode(w, id, q.Get("whole") == "true")
 	default:
-		writeErr(w, http.StatusBadRequest, "id or slug is required")
+		writeErr(w, http.StatusBadRequest, msgPreviewNothing)
 	}
 }
 
@@ -63,7 +65,8 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 	rootID, lessonIDs, err := musora.ResolveLessonIDs(id, whole, engine.PermissionIDs())
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "could not resolve content")
+		fmt.Fprintf(logOut, "drumdrop: preview %d: %v\n", id, err)
+		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
 		return
 	}
 
@@ -85,23 +88,25 @@ func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 
 // previewInstructor resolves the instructor's display name and counts the
 // lessons that reference them in the given brand (defaulting to drumeo). An
-// unknown slug is a 400.
+// unknown slug is a 400; Musora not answering is a 502.
 func (s *Server) previewInstructor(w http.ResponseWriter, slug, brand string) {
 	if brand == "" {
 		brand = "drumeo"
 	}
 	_, name, ok, err := musora.ResolveInstructorID(slug)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "could not resolve instructor")
+		fmt.Fprintf(logOut, "drumdrop: preview instructor: %v\n", err)
+		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
 		return
 	}
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "no instructor found for that slug")
+		writeErr(w, http.StatusBadRequest, msgNoInstructor)
 		return
 	}
 	lessons, err := musora.InstructorLessons(slug, brand, engine.PermissionIDs())
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "could not resolve instructor lessons")
+		fmt.Fprintf(logOut, "drumdrop: preview instructor lessons: %v\n", err)
+		writeErr(w, http.StatusBadGateway, msgMusoraUnreachable)
 		return
 	}
 	writeJSON(w, http.StatusOK, previewResponse{

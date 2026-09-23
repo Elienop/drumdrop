@@ -413,7 +413,7 @@ func TestCopyFileRefusesANonRegularSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := copyFileInto(root, "copy.mp4", link, 0o644); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if err := copyFileInto(root, "copy.mp4", root, filepath.Base(link), 0o644); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("copyFileInto(symlink) = %v, want a refusal", err)
 	}
 	assertExist(t, false, filepath.Join(tmp, "copy.mp4"))
@@ -509,7 +509,7 @@ func TestMoveToLibraryCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 	}
 	t.Cleanup(func() { syncFile = orig })
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibrary: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestMoveToLibrarySymlinkedLessonFolderKeepsTheLesson(t *testing.T) {
 	}
 	forceCopyFallback(t)
 
-	newDir, err := moveToLibrary(downloadsDir, filepath.Join(tmp, "lib"), lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, filepath.Join(tmp, "lib"), lessonDir)
 	if err == nil || newDir != "" {
 		t.Fatalf("= (%q, %v), want (\"\", a refusal)", newDir, err)
 	}
@@ -556,7 +556,11 @@ func TestMoveToLibrarySymlinkedLessonFolderKeepsTheLesson(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := copyFileInto(root, "x", lessonDir, 0o644); err == nil {
+	rel, err := filepath.Rel(tmp, lessonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFileInto(root, "x", root, rel, 0o644); err == nil {
 		t.Error("copyFileInto copied a symlink, want a refusal")
 	}
 }
@@ -576,7 +580,7 @@ func TestMoveToLibraryAliasedLibraryIsANoOp(t *testing.T) {
 	}
 	forceCopyFallback(t)
 
-	newDir, err := moveToLibrary(downloadsDir, alias, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, alias, lessonDir)
 	if err != nil || newDir != filepath.Join(alias, "Inst", "Course", "01 - L") {
 		t.Fatalf("= (%q, %v), want the aliased folder as a no-op", newDir, err)
 	}

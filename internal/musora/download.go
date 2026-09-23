@@ -3,8 +3,10 @@ package musora
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -132,12 +134,10 @@ func Sanitize(name string) string {
 	return s
 }
 
-// fetchToFile downloads url to dest. The media/asset URLs are open-read and
-// need no auth: a User-Agent header is enough, no session cookie is attached.
-func fetchToFile(url, dest string) error {
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
+// fetchToFile downloads url to dest, a path inside the open folder root. The
+// media/asset URLs are open-read and need no auth: a User-Agent header is
+// enough, no session cookie is attached.
+func fetchToFile(url string, root *os.Root, dest string) error {
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("User-Agent", browserUA)
 	resp, err := httpClient.Do(req)
@@ -148,13 +148,43 @@ func fetchToFile(url, dest string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %d %s", resp.StatusCode, url)
 	}
-	f, err := os.Create(dest)
+	return writeInRoot(root, dest, resp.Body)
+}
+
+// tmpSuffix names the file writeInRoot writes before it takes its place.
+const tmpSuffix = ".drumdrop-part"
+
+// writeInRoot writes r to name, a path inside the open folder root, creating
+// its folders. Everything goes through root (os.Root), so nothing is written
+// outside it, whatever symlinks the folders hold. The bytes go to a new file
+// (O_EXCL: never through a file or a symlink already at that name), which is
+// then renamed over name: a symlink planted at name is replaced, never
+// followed, so the write can not land on another file inside root either. A
+// failed write removes its new file.
+func writeInRoot(root *os.Root, name string, r io.Reader) error {
+	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return err
+	}
+	tmp := name + tmpSuffix
+	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err // a leftover of a crash, or something in the way
+	}
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	_, err = io.Copy(f, r)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = root.Rename(tmp, name)
+	}
+	if err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // DownloadProgress is a single yt-dlp progress observation for the active
@@ -167,7 +197,13 @@ type DownloadProgress struct {
 }
 
 type DownloadOpts struct {
-	Dir     string
+	Dir string
+	// Root, when set, is the folder the lesson's files must stay inside (the
+	// worker passes the downloads folder): Dir must be inside it, and every
+	// file DrumDrop itself writes (poster, resources, play-along, sheet music,
+	// the nfo) goes through it (os.Root), never through a symlink out of it.
+	// Empty means Dir. yt-dlp writes its video by path: see DownloadLesson.
+	Root    string
 	Index   int
 	Quality string
 	// AudioLang is the preferred audio-track language (ISO code, e.g. "en"); ""
@@ -251,10 +287,11 @@ type auxFailure struct {
 }
 
 // fetchAuxArtifacts downloads every non-video artifact for a lesson (poster,
-// resources, mp3 play-along stems, sheet-music) into dir and returns the list
-// of (artifact, url, error) failures. It does not return early on failure: it
-// attempts all artifacts so a single bad URL never hides the rest.
-func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
+// resources, mp3 play-along stems, sheet-music) into dir, a folder inside the
+// open folder root, and returns the list of (artifact, url, error) failures.
+// It does not return early on failure: it attempts all artifacts so a single
+// bad URL never hides the rest.
+func fetchAuxArtifacts(l *Lesson, root *os.Root, dir, base string) []auxFailure {
 	var failures []auxFailure
 	record := func(artifact, url string, err error) {
 		if err != nil {
@@ -263,7 +300,7 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 	}
 
 	if thumb := firstNonEmpty(l.Thumbnail, l.Video.PosterImageURL); thumb != "" {
-		record("poster", thumb, fetchToFile(thumb, filepath.Join(dir, base+"-poster.jpg")))
+		record("poster", thumb, fetchToFile(thumb, root, filepath.Join(dir, base+"-poster.jpg")))
 	}
 	for _, r := range l.Resources {
 		if r.URL != "" {
@@ -272,7 +309,7 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 			if name == "" {
 				name = urlBasename(r.URL)
 			}
-			record("resource", r.URL, fetchToFile(r.URL, filepath.Join(dir, "resources", Sanitize(name))))
+			record("resource", r.URL, fetchToFile(r.URL, root, filepath.Join(dir, "resources", Sanitize(name))))
 		}
 	}
 	mp3s := map[string]string{
@@ -283,7 +320,7 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 	}
 	for name, u := range mp3s {
 		if u != "" {
-			record("mp3", u, fetchToFile(u, filepath.Join(dir, "play-along", name)))
+			record("mp3", u, fetchToFile(u, root, filepath.Join(dir, "play-along", name)))
 		}
 	}
 	sheetNo := 0
@@ -309,7 +346,7 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 			if len(pages) > 1 {
 				name = fmt.Sprintf("%02d - %s (p%d).%s", sheetNo, Sanitize(title), pi+1, ext)
 			}
-			record("sheet-music", u, fetchToFile(u, filepath.Join(dir, "sheet-music", name)))
+			record("sheet-music", u, fetchToFile(u, root, filepath.Join(dir, "sheet-music", name)))
 		}
 	}
 	return failures
@@ -326,13 +363,34 @@ func fetchAuxArtifacts(l *Lesson, dir, base string) []auxFailure {
 // killed by process group (SIGKILL to -pid) so yt-dlp and its ffmpeg child both
 // die. A nil ctx is treated as context.Background(), preserving the original CLI
 // behaviour byte-for-byte (the run is never canceled out from under it).
+//
+// The lesson folder and every file DownloadLesson writes itself go through the
+// open folder o.Root (see DownloadOpts.Root). yt-dlp is a separate program
+// given an output path: it writes the video by path, so the folder it writes
+// in must be trusted not to hold a symlink planted by someone else.
 func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	base := fmt.Sprintf("%02d - %s", o.Index, Sanitize(l.Title))
 	dir := filepath.Join(o.Dir, base)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	rootDir := o.Root
+	if rootDir == "" {
+		rootDir = o.Dir
+	}
+	rel, err := filepath.Rel(rootDir, dir)
+	if err != nil || !filepath.IsLocal(rel) {
+		return fmt.Errorf("refusing to download into %q: it is not inside %q", dir, rootDir)
+	}
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(rel, 0o755); err != nil {
 		return err
 	}
 	if !o.ResourcesOnly {
@@ -378,10 +436,10 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 			// recs empty -> the song honestly has no video; not an error.
 		}
 	}
-	for _, f := range fetchAuxArtifacts(l, dir, base) {
+	for _, f := range fetchAuxArtifacts(l, root, rel, base) {
 		fmt.Fprintf(os.Stderr, "drumdrop: lesson %d: failed to fetch %s %s: %v\n", l.ID, f.Artifact, f.URL, f.Err)
 	}
-	return os.WriteFile(filepath.Join(dir, base+".nfo"), []byte(BuildNFO(l)), 0o644)
+	return writeInRoot(root, filepath.Join(rel, base+".nfo"), strings.NewReader(BuildNFO(l)))
 }
 
 // runYtDlp executes one yt-dlp invocation with the given argv and returns its

@@ -133,9 +133,6 @@ func (s *fakePlannerStore) RequeueStaleRunning(ctx context.Context) (int, error)
 func (s *fakePlannerStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
 	panic("ConfirmDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) ClearStaleDeletes(ctx context.Context) (int, error) {
-	panic("ClearStaleDeletes: not expected from Planner")
-}
 
 // fakeExpander returns canned ids (or an error) per follow id. The ids map keeps
 // the per-follow lesson ids; titles are synthesized so tests that only assert on

@@ -344,28 +344,6 @@ func TestIsDownloaded(t *testing.T) {
 	}
 }
 
-func TestMarkSkipped(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
-	}
-	got, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if got.Status != StatusSkipped {
-		t.Errorf("status = %q, want %q", got.Status, StatusSkipped)
-	}
-	if !got.Error.Valid || got.Error.String != "locked content" {
-		t.Errorf("Error = %+v, want %q", got.Error, "locked content")
-	}
-}
-
 func TestUnskipLesson(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -373,8 +351,8 @@ func TestUnskipLesson(t *testing.T) {
 	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := s.SkipLesson(ctx, 1, "locked content"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	if err := s.UnskipLesson(ctx, 1); err != nil {
 		t.Fatalf("UnskipLesson: %v", err)
@@ -414,17 +392,6 @@ func TestUnskipLessonOnlySkipped(t *testing.T) {
 	// An unknown id is also a benign no-op.
 	if err := s.UnskipLesson(ctx, 404); err != nil {
 		t.Errorf("UnskipLesson on a missing id returned %v, want nil (benign no-op)", err)
-	}
-}
-
-// TestMarkSkippedMissing asserts MarkSkipped reports an error when no lesson
-// row matches, rather than silently succeeding on zero rows.
-func TestMarkSkippedMissing(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.MarkSkipped(ctx, 404, "x"); err == nil {
-		t.Error("MarkSkipped on a missing id returned nil error, want error")
 	}
 }
 

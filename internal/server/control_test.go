@@ -94,8 +94,8 @@ func TestUnskipLessonHandler(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 7003, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := store.MarkSkipped(ctx, 7003, "no"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := store.SkipLesson(ctx, 7003, "no"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

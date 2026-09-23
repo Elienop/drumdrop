@@ -184,8 +184,8 @@ func TestFollowLessons(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", sql.NullInt64{}, fid); err != nil {
 		t.Fatalf("UpsertLesson 12: %v", err)
 	}
-	if err := store.MarkSkipped(ctx, 12, "no thanks"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := store.SkipLesson(ctx, 12, "no thanks"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

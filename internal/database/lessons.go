@@ -43,16 +43,23 @@ type Lesson struct {
 	// relative to the library folder, or NULL when there is no record. Read it
 	// through PlacedEntries.
 	LibraryEntries sql.NullString `json:"library_entries"`
-	// Deleting is set while a delete is removing the lesson's files (see
-	// BeginLessonDelete): no job may be enqueued or retried for it meanwhile.
+	// Deleting is true while a delete holds the lesson's files (its lease,
+	// deleting_until, is in the future; see BeginLessonDelete): no job may be
+	// enqueued or retried for it meanwhile. It is read, never written.
 	Deleting bool `json:"deleting"`
 }
+
+// deletingSQL is Lesson.Deleting as a condition on the lessons table: a delete
+// holds the lesson's files while its lease has not run out. Every check of "is
+// this lesson being deleted" uses it, so a lease that lapsed (a delete that
+// died mid-way) stops blocking the lesson everywhere at once, with no sweep.
+const deletingSQL = `(deleting_until IS NOT NULL AND deleting_until > datetime('now'))`
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
-	first_seen_at, downloaded_at, updated_at, library_entries, deleting`
+	first_seen_at, downloaded_at, updated_at, library_entries, ` + deletingSQL
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
 // *sql.Rows (both satisfy this Scan signature).
@@ -79,19 +86,19 @@ func getLessonTx(ctx context.Context, tx *sql.Tx, id int) (Lesson, error) {
 	return l, nil
 }
 
-// lessonDeletingTx returns ErrLessonDeleting while lesson id's files are being
-// deleted (an unknown id is not being deleted).
+// lessonDeletingTx returns ErrLessonDeleting while a delete holds lesson id's
+// files (an unknown id is not being deleted).
 func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
-	var deleting int
+	var deleting bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT deleting FROM lessons WHERE railcontent_id = ?`, id,
+		`SELECT `+deletingSQL+` FROM lessons WHERE railcontent_id = ?`, id,
 	).Scan(&deleting)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
 	case err != nil:
 		return fmt.Errorf("check lesson %d: %w", id, err)
-	case deleting == 1:
+	case deleting:
 		return fmt.Errorf("lesson %d: %w", id, ErrLessonDeleting)
 	}
 	return nil
@@ -167,7 +174,7 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND (status IN (?, ?) OR deleting = 1)`,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND (status IN (?, ?) OR `+deletingSQL+`)`,
 		id, StatusDownloaded, StatusSkipped,
 	).Scan(&n)
 	if err != nil {
@@ -176,19 +183,7 @@ func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	return n > 0, nil
 }
 
-// MarkSkipped records that a lesson was intentionally skipped (e.g. locked or
-// missing content): status='skipped' with the reason recorded in error. It
-// returns an error if no lesson row matched.
-func (s *Store) MarkSkipped(ctx context.Context, id int, reason string) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusSkipped, reason, id,
-	)
-}
-
-// UnskipLesson is the inverse of MarkSkipped: a guarded UPDATE that resets a
+// UnskipLesson is the inverse of SkipLesson: a guarded UPDATE that resets a
 // skipped lesson back to pending and clears its error, ONLY while it is still
 // skipped. It tolerates zero rows as a benign no-op and returns nil — an already-pending/terminal lesson (or an unknown id) is left
 // untouched rather than erroring. It executes directly rather than through
@@ -206,26 +201,6 @@ func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 		}
 		// Zero rows affected (not skipped, or unknown id) is intentional: only a
 		// skipped lesson is reset here, and any other state is a no-op.
-		return nil
-	})
-}
-
-// updateStatus runs a status-mutating UPDATE through withTx and fails if it
-// touched zero rows (the lesson id was unknown). All Mark* helpers funnel
-// through here so the "no such lesson" behavior is defined in exactly one place.
-func (s *Store) updateStatus(ctx context.Context, query string, args ...any) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("update lesson status: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected updating lesson status: %w", err)
-		}
-		if n == 0 {
-			return fmt.Errorf("no lesson matched the status update")
-		}
 		return nil
 	})
 }

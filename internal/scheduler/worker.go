@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -320,16 +321,23 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// sort the way they appear in the course; fall back to 1 when the position is
 	// unknown. The download and the worker's lessonDir MUST share this value so
 	// producedVideo and cleanupPartials target the exact folder DownloadLesson
-	// writes to. GetLesson failure is non-fatal: keep the default index 1. The
-	// row also says what the lesson's previous download left in the library,
-	// which a plex-tv move replaces. A delete can not change it while this job
-	// runs without removing the job (and then nothing here is recorded).
-	index := 1
+	// writes to. The row also says what the lesson's previous download left in
+	// the library, which a plex-tv move replaces; a delete can not change it
+	// while this job runs without removing the job (and then nothing here is
+	// recorded). A row that can not be read is not "owns nothing": the job fails
+	// without downloading, and the next cycle tries again.
 	prev, err := w.Store.GetLesson(ctx, id)
 	if err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ get lesson %d position: %v\n", id, err)
-		prev = database.Lesson{RailcontentID: id}
-	} else if prev.Position.Valid {
+		w.failBeforeDownload(ctx, job, lesson, fmt.Errorf("the lesson's record could not be read: %w", err))
+		return
+	}
+	// What a download needs to be recorded is checked before it costs one.
+	if err := w.checkBeforeDownload(ctx); err != nil {
+		w.failBeforeDownload(ctx, job, lesson, err)
+		return
+	}
+	index := 1
+	if prev.Position.Valid {
 		index = int(prev.Position.Int64)
 	}
 	dir := lessonDir(outDir, index, lesson.Title)
@@ -385,6 +393,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		})
 		derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
 			Dir:           outDir,
+			Root:          w.Cfg.DownloadsDir,
 			Index:         index,
 			Quality:       quality,
 			AudioLang:     w.Cfg.AudioLang,
@@ -445,7 +454,52 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// keeping all terminal writes uncancellable makes "shutdown never strands a
 	// job" a single, obvious invariant.
 	finishCtx := context.WithoutCancel(ctx)
-	w.logAbandoned(id, w.Store.FailDownload(finishCtx, job.ID, id, msg))
+	switch ferr := w.Store.FailDownload(finishCtx, job.ID, id, msg); {
+	case errors.Is(ferr, database.ErrDownloadAbandoned):
+		// A delete or a skip removed the job while it failed: what it wrote goes
+		// as the stopper wants, the same as when it stops mid-download.
+		w.discardAbandoned(finishCtx, id, dir, nil, ferr)
+	case errors.Is(ferr, database.ErrDownloadCanceled):
+		// Requeued elsewhere: the next run writes the same folder, so leave it.
+		fmt.Fprintf(w.log(), "  ⚠ record failure %d: its job was requeued meanwhile: %v\n", id, ferr)
+	default:
+		if ferr != nil {
+			fmt.Fprintf(w.log(), "  ⚠ record failure %d: %v\n", id, ferr)
+		}
+		w.dropFailedDownload(finishCtx, id, dir)
+	}
+}
+
+// failBeforeDownload fails a job whose precondition can not pass, without
+// downloading anything: its reason is logged and reported as a failed attempt,
+// and the lesson is marked failed (the next cycle tries again).
+func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, reason error) {
+	id := job.RailcontentID
+	fmt.Fprintf(w.log(), "  ✖ %d not downloaded: %v\n", id, reason)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "attempt_failed",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         lesson.Title,
+		Attempt:       1,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Err:           reason.Error(),
+		Time:          time.Now(),
+	})
+	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, reason.Error()))
+}
+
+// logAbandoned logs the outcome of a terminal store write made before anything
+// was downloaded (a skip, or a failed precondition), so there is nothing on
+// disk for a delete's intent to apply to.
+func (w *Worker) logAbandoned(id int, err error) {
+	switch {
+	case errors.Is(err, database.ErrDownloadAbandoned):
+		fmt.Fprintf(w.log(), "  ⊗ %d was removed meanwhile; nothing was recorded\n", id)
+	case err != nil:
+		fmt.Fprintf(w.log(), "  ⚠ record %d: %v\n", id, err)
+	}
 }
 
 // stopped reports whether a guarded write's err ends the job: a delete removed
@@ -581,28 +635,64 @@ func lessonDir(outDir string, index int, title string) string {
 	return filepath.Join(outDir, fmt.Sprintf("%02d - %s", index, musora.Sanitize(title)))
 }
 
-// cleanupPartials removes yt-dlp's leftover partial-download artifacts under a
-// cancelled lesson's dir — *.part, *.ytdl, and *.f* (per-format fragments) — so a
-// killed download leaves no half-written files behind. A missing dir is tolerated
-// (nothing to clean); any other read/remove error is ignored: cleanup is
-// best-effort and must not block the cancel path.
+// cleanupPartials removes yt-dlp's leftover partial-download artifacts from a
+// stopped lesson's dir, so a killed download leaves no half-written files
+// behind. Only names of the lesson's own base (the folder's name) in yt-dlp's
+// partial shapes go (isPartialName): a finished subtitle ("<base>.fr.vtt") or
+// a title with dots in it is a kept file, never a partial. A missing dir is
+// tolerated (nothing to clean); any other read/remove error is ignored:
+// cleanup is best-effort and must not block the cancel path.
 func cleanupPartials(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return // missing dir or unreadable: nothing to clean
 	}
+	base := filepath.Base(dir)
 	for _, e := range entries {
-		if e.IsDir() {
+		if !e.Type().IsRegular() {
 			continue
 		}
-		name := e.Name()
-		part, _ := filepath.Match("*.part", name)
-		ytdl, _ := filepath.Match("*.ytdl", name)
-		frag, _ := filepath.Match("*.f*", name)
-		if part || ytdl || frag {
+		if name := e.Name(); isPartialName(name, base) {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}
+}
+
+// isPartialName reports whether name is one of yt-dlp's partial-download
+// artifacts for the lesson base:
+//   - "<base>….part", "<base>….ytdl", and "<base>….part-Frag<N>…" (a download
+//     in progress, and its fragments);
+//   - "<base>[ [Label]].f<digits>.<ext>" (one format of a merge, before
+//     ffmpeg joins them).
+func isPartialName(name, base string) bool {
+	rest, ok := strings.CutPrefix(name, base)
+	if !ok {
+		return false
+	}
+	if strings.HasSuffix(rest, ".part") || strings.HasSuffix(rest, ".ytdl") || strings.Contains(rest, ".part-Frag") {
+		return true
+	}
+	if strings.HasPrefix(rest, " [") {
+		end := strings.Index(rest, "]")
+		if end < 0 {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+	after, ok := strings.CutPrefix(rest, ".f")
+	if !ok {
+		return false
+	}
+	digits, ext, ok := strings.Cut(after, ".")
+	if !ok || digits == "" || ext == "" || strings.Contains(ext, ".") {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // producedVideo returns the path and total size of the mp4(s) DownloadLesson

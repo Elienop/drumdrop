@@ -144,14 +144,14 @@ func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	}
 }
 
-// TestWorkerPlexTvRetriesWhenTheOtherLessonsCannotBeRead (D58) proves that
-// when the other lessons' files can not be read (the rows, or a damaged record
-// among them), the worker neither moves (it could not tell whose entries are
-// whose) nor records the lesson in scratch (a lesson moved before the record
-// existed would lose track of its library copy): the attempt fails and is
-// retried, and after the last one the lesson is failed with its previous
-// record untouched.
-func TestWorkerPlexTvRetriesWhenTheOtherLessonsCannotBeRead(t *testing.T) {
+// TestWorkerFailsBeforeDownloadingWhenTheOtherLessonsCannotBeRead (D58, L1)
+// proves that when the other lessons' files can not be read (the rows, or a
+// damaged record among them), the worker neither moves (it could not tell
+// whose entries are whose) nor records the lesson in scratch (a lesson moved
+// before the record existed would lose track of its library copy), and, since
+// the move could never pass, does not download at all: the lesson is failed
+// with its previous record untouched, and the next cycle tries again.
+func TestWorkerFailsBeforeDownloadingWhenTheOtherLessonsCannotBeRead(t *testing.T) {
 	for name, broken := range map[string]func(*fakeWorkerStore, string){
 		"rows unreadable": func(s *fakeWorkerStore, _ string) { s.withFilesErr = errors.New("database is locked") },
 		"damaged record": func(s *fakeWorkerStore, season string) {
@@ -174,14 +174,14 @@ func TestWorkerPlexTvRetriesWhenTheOtherLessonsCannotBeRead(t *testing.T) {
 			if len(store.markDownloaded) != 0 || !reflect.DeepEqual(store.markFailed, []int{100}) {
 				t.Errorf("recorded %+v, failed %v; want nothing recorded and lesson 100 failed", store.markDownloaded, store.markFailed)
 			}
-			if n := len(dl.calls); n != 2 {
-				t.Errorf("download attempts = %d, want 2 (a failed attempt is retried)", n)
+			if n := len(dl.calls); n != 0 {
+				t.Errorf("download attempts = %d, want 0 (the precondition can not pass)", n)
 			}
 			if _, err := os.Stat(lib); !os.IsNotExist(err) {
 				t.Errorf("library written (err=%v), want untouched", err)
 			}
-			if !strings.Contains(log.String(), "not moved to the library: the other lessons' files") {
-				t.Errorf("log %q does not say why it did not move", log.String())
+			if !strings.Contains(log.String(), "not downloaded: the other lessons' files") {
+				t.Errorf("log %q does not say why it did not download", log.String())
 			}
 		})
 	}
@@ -217,39 +217,56 @@ func TestWorkerAbandonedMidMoveRemovesWhatItPlaced(t *testing.T) {
 	}
 }
 
-// TestWorkerAbandonedKeepsWhatARowRecords proves the discard never removes a
-// path a lesson row records by then (read fresh): a placed entry another row
-// names, and a lesson folder a row records (the delete that abandoned the
-// download could not remove it, and the row says so).
+// TestWorkerAbandonedKeepsWhatARowRecords proves a Skip's discard never
+// removes a path a lesson row records by then (read fresh), the skipped
+// lesson's own row included: a placed entry a row names, and a lesson folder a
+// row records (the lesson's earlier download, recorded there). A delete of the
+// lesson's files is different (L5): its own row protects nothing, since those
+// files are being deleted; another lesson's row still does.
 func TestWorkerAbandonedKeepsWhatARowRecords(t *testing.T) {
-	t.Run("placed entry", func(t *testing.T) {
-		w, store, _, _, season := plexWorker(t)
-		store.gone = map[int64]bool{}
-		base := "Beginner Course - s01e05 - Lesson A"
-		store.onConfirm = func() {
-			store.gone[1] = true
-			store.withFiles = []database.Lesson{recordedRow(100, season, base+".mp4")}
+	base := "Beginner Course - s01e05 - Lesson A"
+	for _, c := range []struct {
+		name     string
+		stopper  func(s *fakeWorkerStore) map[int64]bool
+		recorder int
+		wantKept bool
+	}{
+		{"skip, own row", func(s *fakeWorkerStore) map[int64]bool { s.skipped = map[int64]bool{}; return s.skipped }, 100, true},
+		{"delete, own row", func(s *fakeWorkerStore) map[int64]bool { s.gone = map[int64]bool{}; return s.gone }, 100, false},
+		{"delete, another row", func(s *fakeWorkerStore) map[int64]bool { s.gone = map[int64]bool{}; return s.gone }, 200, true},
+	} {
+		// Another lesson recording the path before the move makes the move
+		// refuse it: nothing would be placed there to keep.
+		if c.recorder == 100 {
+			t.Run("placed entry/"+c.name, func(t *testing.T) {
+				w, store, _, _, season := plexWorker(t)
+				stopped := c.stopper(store)
+				store.onConfirm = func() {
+					stopped[1] = true
+					store.withFiles = []database.Lesson{recordedRow(c.recorder, season, base+".mp4")}
+				}
+				if _, err := w.RunOnce(context.Background(), 0); err != nil {
+					t.Fatalf("RunOnce: %v", err)
+				}
+				assertExist(t, c.wantKept, filepath.Join(season, base+".mp4"))
+				assertExist(t, false, filepath.Join(season, base+".nfo"))
+			})
 		}
-		if _, err := w.RunOnce(context.Background(), 0); err != nil {
-			t.Fatalf("RunOnce: %v", err)
-		}
-		assertExist(t, true, filepath.Join(season, base+".mp4"))
-		assertExist(t, false, filepath.Join(season, base+".nfo"))
-	})
-	t.Run("lesson folder", func(t *testing.T) {
-		w, store, dl, _, _ := plexWorker(t)
-		w.Cfg.LibraryDir = ""
-		store.gone = map[int64]bool{}
-		folder := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-		dl.afterWrite = func(string) {
-			store.gone[1] = true
-			store.withFiles = []database.Lesson{{RailcontentID: 100, OutputDir: sql.NullString{String: folder, Valid: true}}}
-		}
-		if _, err := w.RunOnce(context.Background(), 0); err != nil {
-			t.Fatalf("RunOnce: %v", err)
-		}
-		assertExist(t, true, filepath.Join(folder, "05 - Lesson A.mp4"))
-	})
+		t.Run("lesson folder/"+c.name, func(t *testing.T) {
+			w, store, dl, _, _ := plexWorker(t)
+			w.Cfg.LibraryDir = ""
+			stopped := c.stopper(store)
+			folder := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+			dl.afterWrite = func(string) {
+				stopped[1] = true
+				store.withFiles = []database.Lesson{{RailcontentID: c.recorder, OutputDir: sql.NullString{String: folder, Valid: true}}}
+			}
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertExist(t, c.wantKept, filepath.Join(folder, "05 - Lesson A.mp4"))
+		})
+	}
 	t.Run("rows unreadable", func(t *testing.T) {
 		w, store, dl, _, _ := plexWorker(t)
 		w.Cfg.LibraryDir = ""
@@ -346,12 +363,12 @@ func TestWorkerAbandonedWithoutALibrary(t *testing.T) {
 	}
 }
 
-// TestWorkerKeepsFilesWhenTheDeleteKeepsThem (D60) proves
+// TestWorkerKeepsFilesWhenTheDeleteKeepsThem (D60, I3) proves
 // a download stopped by a delete that keeps the files (a follow removed
-// without its files) removes nothing, wherever it is stopped: mid-download
-// (its scratch folder, which may hold a copy a row still records, stays whole,
-// partial files included) or mid-move (what it placed, and the previous copy's
-// replacement, stay).
+// without its files) removes nothing it finished, wherever it is stopped:
+// mid-download (its scratch folder, which may hold a copy a row still
+// records, stays, and only yt-dlp's partial files go) or mid-move (what it
+// placed, and the previous copy's replacement, stay).
 func TestWorkerKeepsFilesWhenTheDeleteKeepsThem(t *testing.T) {
 	for _, layout := range []string{LayoutPlexTV, ""} {
 		t.Run("mid-download/layout="+layout, func(t *testing.T) {
@@ -366,7 +383,8 @@ func TestWorkerKeepsFilesWhenTheDeleteKeepsThem(t *testing.T) {
 			if _, err := w.RunOnce(context.Background(), 0); err != nil {
 				t.Fatalf("RunOnce: %v", err)
 			}
-			assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"), filepath.Join(scratch, "old-sheet.pdf"), filepath.Join(scratch, "05 - Lesson A.mp4.part"))
+			assertExist(t, true, filepath.Join(scratch, "05 - Lesson A.mp4"), filepath.Join(scratch, "old-sheet.pdf"))
+			assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.mp4.part"))
 		})
 		t.Run("mid-move/layout="+layout, func(t *testing.T) {
 			w, store, _, lib, season := plexWorker(t)

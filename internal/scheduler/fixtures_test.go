@@ -138,5 +138,30 @@ func testMovePlexTV(t *testing.T, libraryDir, show string, season, episode int, 
 		}
 		pl.claims = c
 	}
+	if pl.downloads == "" {
+		pl.downloads = filepath.Dir(lessonDir)
+	}
 	return moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, pl)
+}
+
+// testMoveToLibrary runs the default-layout move as the worker does, as
+// lesson 1, with the claims of others (none when empty).
+func testMoveToLibrary(t *testing.T, downloadsDir, libraryDir, lessonDir string, others ...database.Lesson) (string, error) {
+	t.Helper()
+	c, err := library.NewClaims(libraryDir, others)
+	if err != nil {
+		t.Fatalf("NewClaims: %v", err)
+	}
+	return moveToLibrary(downloadsDir, libraryDir, lessonDir, c, 1)
+}
+
+// stubRename makes every rename of the moves call f with the two full paths
+// instead, for the rest of the test (f may call os.Rename to let one through).
+func stubRename(t *testing.T, f func(oldpath, newpath string) error) {
+	t.Helper()
+	orig := renameAt
+	renameAt = func(from *os.Root, src string, to *os.Root, dst string) error {
+		return f(filepath.Join(from.Name(), src), filepath.Join(to.Name(), dst))
+	}
+	t.Cleanup(func() { renameAt = orig })
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"time"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/library"
@@ -26,31 +27,15 @@ var errFilesKept = errors.New("the lesson's files could not all be removed")
 // possible, but the lesson's row could not be updated". Its detail is logged.
 var errRecordNotUpdated = errors.New("the lesson's record could not be updated")
 
-// The fixed messages a delete answers with (hard rule 11: never err.Error()).
-// Each says what happened, what is left, and what to do next.
-const (
-	msgLessonFilesKept     = "Not all of this lesson's files could be deleted. Any download of it was stopped, and it stays listed with the files that are left. The server log says what went wrong; fix that, then Delete again."
-	msgLessonChanged       = "This lesson changed while it was being deleted, so it was left as it is now. Delete again to remove its files."
-	msgLessonDeleting      = "This lesson is already being deleted. Wait for that to finish, then refresh."
-	msgLessonNotUpdated    = "This lesson's files were deleted as far as possible, but its record could not be updated. The server log says what went wrong; Delete again to finish."
-	msgFollowFilesKept     = "Not every lesson's files could be deleted, so the follow was kept. Its downloads were stopped, lessons whose files were deleted are marked skipped, and the rest stay listed with the files that are left. The server log says what went wrong; fix that, then Remove again."
-	msgFollowLessonChanged = "A lesson of this follow changed while the follow was being removed, so the follow was kept and that lesson was left as it is now. Its downloads were stopped, and lessons whose files were deleted are marked skipped. Remove again to delete the rest."
-	msgFollowNewFiles      = "A lesson of this follow finished downloading while the follow was being removed, so the follow was kept with that lesson's files. Its other downloads were stopped, and lessons whose files were deleted are marked skipped. Remove again to delete the new files too."
-	msgFollowDeleting      = "A lesson of this follow is being deleted right now. Wait for that to finish, then Remove again."
-	msgFollowNotUpdated    = "This follow's files were deleted as far as possible, but a record could not be updated, so the follow was kept. The server log says what went wrong; Remove again to finish."
-	msgFollowNotRemoved    = "The follow could not be removed. Nothing was changed. Try again."
-)
+// errNoClaims is the delete outcome "what the other lessons claim could not
+// be read (a store error, or a damaged record)": nothing was removed. Its
+// detail is logged.
+var errNoClaims = errors.New("the other lessons' files could not be read")
 
 // roots are the folders a delete may remove files under: the downloads and
 // the library folders.
 func (s *Server) roots() []string {
-	var roots []string
-	for _, r := range []string{s.cfg.DownloadsDir, s.cfg.LibraryDir} {
-		if r != "" {
-			roots = append(roots, r)
-		}
-	}
-	return roots
+	return library.Roots(s.cfg.DownloadsDir, s.cfg.LibraryDir)
 }
 
 // removeLessonFiles removes every file lesson l records. What it removes follows
@@ -70,8 +55,10 @@ func (s *Server) roots() []string {
 // Every removal goes through library.Remove, confined by os.Root to the
 // downloads or library root it sits inside: a path outside both, a root
 // itself, or a path reached through a symlinked folder that leads outside is
-// refused. A missing path is already gone. The trade-off: a symlinked folder
-// that an operator placed inside the library on purpose is refused too.
+// refused. A missing path inside a root is already gone; one outside every
+// root is refused too, since it may have moved with a folder mounted elsewhere
+// (the row then keeps naming it, see keptFiles). The trade-off: a symlinked
+// folder that an operator placed inside the library on purpose is refused too.
 //
 // On failure it returns an error with every detail, and kept: what the row
 // must go on recording, which is only what is still on disk (see keptFiles).
@@ -92,29 +79,36 @@ func (s *Server) removeLessonFiles(c *library.Claims, l database.Lesson) (kept d
 			errs = append(errs, rerr)
 		}
 	}
+	folderKept := false
 	if l.OutputDir.Valid && !library.IsSeasonDir(l.OutputDir.String) {
-		if rerr := s.removeLessonFolder(c, l); rerr != nil {
-			errs = append(errs, rerr)
+		if rerr := c.RemoveLessonFolder(s.roots(), l.OutputDir.String, l.RailcontentID); rerr != nil {
+			folderKept = true
+			errs = append(errs, fmt.Errorf("lesson %d: %w", l.RailcontentID, rerr))
 		}
 	}
 	if len(errs) == 0 {
 		return database.KeptFiles{}, nil
 	}
-	kept, kerr := s.keptFiles(l, plan, left)
+	kept, kerr := s.keptFiles(l, plan, left, folderKept)
 	return kept, errors.Join(append(errs, kerr)...)
 }
 
 // keptFiles is what lesson l goes on recording after a removal that failed
-// partway: left are the planned library entries still on disk.
+// partway: left are the planned library entries still on disk, and folderKept
+// says its own folder was refused or could not be removed.
 //   - its library record narrows to left (a lesson moved before the record
 //     existed gains a record of exactly those); one that had neither a
 //     record nor planned entries keeps none;
 //   - output_dir stays while what it names is still there: a season folder
-//     while entries of the lesson remain in it, its own folder while it exists;
-//   - video_path (and its size) stays while the video exists.
+//     while entries of the lesson remain in it; its own folder while it
+//     exists, and also when its removal was refused while it is not where the
+//     row says (a folder outside every root, as after the library moved: the
+//     record is how the files can still be found);
+//   - video_path (and its size) stays while the video exists, and in that
+//     same refused-and-unseen case.
 //
 // A path whose existence can not be read counts as still there.
-func (s *Server) keptFiles(l database.Lesson, plan library.Entries, left []string) (database.KeptFiles, error) {
+func (s *Server) keptFiles(l database.Lesson, plan library.Entries, left []string, folderKept bool) (database.KeptFiles, error) {
 	var kept database.KeptFiles
 	_, recorded, _ := l.PlacedEntries() // Plan already refused a damaged record
 	if recorded || len(plan.Remove) > 0 || len(plan.Kept) > 0 {
@@ -125,14 +119,20 @@ func (s *Server) keptFiles(l database.Lesson, plan library.Entries, left []strin
 		}
 		kept.LibraryEntries = entries
 	}
+	// unseen: the folder's removal was refused and it is not where the row
+	// says (a library moved since, say): the row is how its files can still
+	// be found, so it keeps naming them.
+	unseen := false
 	if l.OutputDir.Valid {
 		if library.IsSeasonDir(l.OutputDir.String) {
 			kept.OutputDir = len(left) > 0
 		} else {
-			kept.OutputDir = stillThere(l.OutputDir.String)
+			there := stillThere(l.OutputDir.String)
+			unseen = folderKept && !there
+			kept.OutputDir = there || unseen
 		}
 	}
-	kept.VideoPath = l.VideoPath.Valid && l.VideoPath.String != "" && stillThere(l.VideoPath.String)
+	kept.VideoPath = l.VideoPath.Valid && l.VideoPath.String != "" && (unseen || stillThere(l.VideoPath.String))
 	return kept, nil
 }
 
@@ -140,20 +140,6 @@ func (s *Server) keptFiles(l database.Lesson, plan library.Entries, left []strin
 func stillThere(path string) bool {
 	_, err := os.Lstat(path)
 	return !errors.Is(err, fs.ErrNotExist)
-}
-
-// removeLessonFolder removes lesson l's own folder (its output_dir), refusing
-// one that is not named like a lesson folder or that holds a path another
-// lesson records.
-func (s *Server) removeLessonFolder(c *library.Claims, l database.Lesson) error {
-	dir := l.OutputDir.String
-	if !library.IsLessonFolder(dir) {
-		return fmt.Errorf("lesson %d records the folder %q, which is not named like a lesson folder; refusing to remove it", l.RailcontentID, dir)
-	}
-	if ids := c.Holds(dir, l.RailcontentID); len(ids) > 0 {
-		return fmt.Errorf("lesson %d records the folder %q, which holds files lessons %v record; refusing to remove it", l.RailcontentID, dir, ids)
-	}
-	return library.Remove(s.roots(), dir)
 }
 
 // deleteLessonFiles removes lesson l's files (as read by BeginLessonDelete or
@@ -167,7 +153,8 @@ func (s *Server) removeLessonFolder(c *library.Claims, l database.Lesson) error 
 //     change it meanwhile): nothing is written and database.ErrLessonChanged
 //     is returned;
 //   - the row could not be written: the detail is logged and
-//     errRecordNotUpdated returned (a wrapped sql.ErrNoRows passes through).
+//     errRecordNotUpdated returned (a wrapped sql.ErrNoRows passes through:
+//     the row is gone).
 //
 // c holds what every lesson row with files claims, for the ownership checks.
 func (s *Server) deleteLessonFiles(ctx context.Context, c *library.Claims, l database.Lesson) error {
@@ -196,26 +183,59 @@ func (s *Server) deleteLessonFiles(ctx context.Context, c *library.Claims, l dat
 
 // claims indexes what every lesson row with files claims in the library, for
 // the ownership checks of one delete. A follow delete builds it once and
-// forgets each lesson it tombstones. A damaged record anywhere refuses the
-// delete (errFilesKept, detail logged): no ownership can be decided.
+// forgets each lesson it tombstones. When the rows can not be read (a store
+// error) or a record anywhere is damaged, no ownership can be decided: the
+// delete removes nothing and answers errNoClaims (detail logged). A read that
+// failed is never taken for "the other lessons own nothing".
 func (s *Server) claims(ctx context.Context) (*library.Claims, error) {
 	others, err := s.store.ListLessonsWithFiles(ctx)
 	if err != nil {
-		return nil, err
+		fmt.Fprintf(logOut, "drumdrop: delete: the other lessons' files could not be read: %v\n", err)
+		return nil, errNoClaims
 	}
 	c, err := library.NewClaims(s.cfg.LibraryDir, others)
 	if err != nil {
 		fmt.Fprintf(logOut, "drumdrop: delete: %v\n", err)
-		return nil, errFilesKept
+		return nil, errNoClaims
 	}
 	return c, nil
 }
 
-// endDelete ends the deletes of lessons ids, whatever happened (see
-// database.Store.EndLessonDelete), logging a failure.
-func (s *Server) endDelete(ctx context.Context, ids ...int) {
-	if err := s.store.EndLessonDelete(ctx, ids...); err != nil {
-		fmt.Fprintf(logOut, "drumdrop: end delete of lessons %v: %v\n", ids, err)
+// deleteRenewEvery is how often a running delete renews its lease on its
+// lessons (database.DeleteRenewEvery); a variable so a test can shorten it.
+var deleteRenewEvery = database.DeleteRenewEvery
+
+// holdDelete keeps the delete of lessons ids (begun by BeginLessonDelete or
+// BeginFollowDelete) holding them for as long as it runs: it renews their
+// lease every deleteRenewEvery, so however long the removal takes, the
+// lessons stay refused to downloads and to a second delete, while a delete
+// the process died in lapses by itself (database.DeleteLease). The returned
+// func ends the hold: it stops the renewals, waits for one in flight, and
+// ends the deletes (EndLessonDelete), whatever happened. Failures are logged.
+func (s *Server) holdDelete(ctx context.Context, ids ...int) (end func()) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(deleteRenewEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if err := s.store.RenewLessonDelete(ctx, ids...); err != nil {
+					fmt.Fprintf(logOut, "drumdrop: renew the delete of lessons %v: %v\n", ids, err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+		if err := s.store.EndLessonDelete(ctx, ids...); err != nil {
+			fmt.Fprintf(logOut, "drumdrop: end delete of lessons %v: %v\n", ids, err)
+		}
 	}
 }
 

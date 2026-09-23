@@ -140,10 +140,9 @@ func (s *Store) RemoveFollow(ctx context.Context, id int64) error {
 // identity (kind/railcontent_id/slug/brand) untouched. It is forward-only: it
 // does NOT re-download or otherwise touch existing lessons — the new quality
 // governs lessons enqueued from now on (the worker reads follow.Quality at
-// download time). 0 rows matched → "no follow with id" error so the caller can
-// map it to a 404 (mirroring RemoveFollow / TouchLastSynced; the API handler
-// also reads the follow first). quality is validated by the caller against the
-// allowed preset set before this is called.
+// download time). 0 rows matched is a wrapped sql.ErrNoRows, which the API
+// maps to a 404. quality is validated by the caller against the allowed
+// preset set before this is called.
 func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -157,7 +156,7 @@ func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality strin
 			return fmt.Errorf("rows affected updating follow %d: %w", id, err)
 		}
 		if n == 0 {
-			return fmt.Errorf("no follow with id %d", id)
+			return fmt.Errorf("no follow with id %d: %w", id, sql.ErrNoRows)
 		}
 		return nil
 	})
@@ -171,8 +170,7 @@ func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality strin
 // follow's lessons are left alone (their follow_id becomes NULL), so removing
 // one follow never stops another's downloads. It refuses with
 // ErrLessonDeleting while a lesson of the follow is being deleted. 0 follow
-// rows → "no follow with id" error (not a wrapped sql.ErrNoRows, like
-// RemoveFollow), so the caller reads the follow first for a clean 404.
+// rows (another request removed it first) is a wrapped sql.ErrNoRows, a 404.
 //
 // It never removes a file: a download it stops keeps what it wrote (see
 // abandoned_jobs). It returns the ids of the jobs that may still be running,
@@ -184,7 +182,7 @@ func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) ([]int64, err
 			return err
 		}
 		var err error
-		running, err = removeFollowCascadeTx(ctx, tx, id, false)
+		running, err = removeFollowCascadeTx(ctx, tx, id, intentKeep)
 		return err
 	})
 	if err != nil {
@@ -194,10 +192,11 @@ func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) ([]int64, err
 }
 
 // removeFollowCascadeTx is the body of RemoveFollowCascade, shared with
-// RemoveFilelessFollowCascade. discard is what the delete wants done with what
-// a stopped download wrote (see removeActiveJobsTx).
-func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64, discard bool) ([]int64, error) {
-	running, err := removeActiveJobsTx(ctx, tx, discard, followLessonsClause, id)
+// RemoveFilelessFollowCascade. intent is what the delete wants done with what
+// a stopped download wrote (see removeActiveJobsTx). A follow that is gone
+// (another request removed it first) is a wrapped sql.ErrNoRows.
+func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64, intent string) ([]int64, error) {
+	running, err := removeActiveJobsTx(ctx, tx, intent, followLessonsClause, id)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +215,7 @@ func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64, discard bo
 		return nil, fmt.Errorf("rows affected deleting follow %d: %w", id, err)
 	}
 	if n == 0 {
-		return nil, fmt.Errorf("no follow with id %d", id)
+		return nil, fmt.Errorf("no follow with id %d: %w", id, sql.ErrNoRows)
 	}
 	return running, nil
 }

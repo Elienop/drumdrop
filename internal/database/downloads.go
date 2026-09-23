@@ -8,22 +8,39 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // ErrDownloadAbandoned is returned by the worker's guarded writes (StartDownload,
 // ConfirmDownload, FinishDownload, FailDownload, SkipDownload, CancelDownload)
-// when the job or its lesson no longer exists: a delete removed them while the
-// download was running. Nothing was written, and nothing of that download may
-// be recorded. Whether what it wrote must be removed is what the delete wanted:
-// the error also matches ErrDiscardDownload when it removes the lesson's files.
-var ErrDownloadAbandoned = errors.New("download abandoned: its job or lesson was deleted")
+// when the job or its lesson no longer exists: a delete or a skip removed them
+// while the download was running. Nothing was written, and nothing of that
+// download may be recorded. Whether what it wrote must be removed is what the
+// stopper wanted (abandoned_jobs): the error also matches ErrDiscardDownload
+// when it must go, and ErrLessonDeleted as well when the lesson's own files are
+// being deleted.
+var ErrDownloadAbandoned = errors.New("download abandoned: its job or lesson was removed")
 
-// ErrDiscardDownload is joined to ErrDownloadAbandoned when the delete that
-// abandoned the download removes the lesson's files (a lesson delete, or a
-// follow removed with its files), so the worker must remove what the download
-// wrote too. Without it the delete keeps files (a follow removed without its
-// files), or its intent is unknown, and the worker removes nothing.
-var ErrDiscardDownload = errors.New("the delete removes the lesson's files")
+// ErrDiscardDownload is joined to ErrDownloadAbandoned when the stopper wants
+// what the download wrote removed: a lesson delete, a follow removed with its
+// files, or a skip. Without it the stopper keeps files (a follow removed
+// without its files), or its intent is unknown, and the worker removes nothing
+// the download wrote.
+var ErrDiscardDownload = errors.New("what the download wrote is to be removed")
+
+// ErrLessonDeleted is joined to ErrDownloadAbandoned and ErrDiscardDownload when
+// the stopper is a delete of the lesson's own files (a lesson delete, or a
+// follow removed with its files): the lesson's own record protects nothing the
+// download wrote, since the delete is removing it too. Without it (a skip) the
+// lesson's record still stands, and what it names stays.
+var ErrLessonDeleted = errors.New("the lesson's own files are being deleted")
+
+// The intents a stopper records for a job it removed (abandoned_jobs.intent).
+const (
+	intentKeep    = "keep"
+	intentDiscard = "discard"
+	intentDelete  = "delete"
+)
 
 // ErrDownloadCanceled is returned by StartDownload and ConfirmDownload when the
 // job still exists but is no longer running: it was canceled (in the database,
@@ -31,10 +48,11 @@ var ErrDiscardDownload = errors.New("the delete removes the lesson's files")
 // written; the worker must stop and record the cancel (CancelDownload).
 var ErrDownloadCanceled = errors.New("download canceled")
 
-// ErrLessonDeleting is returned when a lesson's files are being deleted right
-// now: a job can not be enqueued or retried for it (EnqueueJob, RetryJob), and
-// a second delete can not start (BeginLessonDelete, BeginFollowDelete,
-// RemoveFollowCascade). Nothing was written.
+// ErrLessonDeleting is returned while a delete holds a lesson's files (see
+// DeleteLease): a job can not be enqueued or retried for it (EnqueueJob,
+// RetryJob), it can not be skipped (SkipLesson), and a second delete can not
+// start (BeginLessonDelete, BeginFollowDelete, RemoveFollowCascade). Nothing
+// was written.
 var ErrLessonDeleting = errors.New("the lesson's files are being deleted")
 
 // ErrLessonChanged is returned by TombstoneLesson and KeepLessonFiles when the
@@ -116,20 +134,22 @@ type DownloadRecord struct {
 
 // withLiveJob runs fn in one transaction, but only while job jobID for lesson
 // id and the lesson row both still exist and the job's status is one of
-// statuses. A job or lesson that is gone yields ErrDownloadAbandoned (joined
-// with ErrDiscardDownload when the delete that removed it removes the lesson's
-// files, see abandoned_jobs); a job in another status yields
+// statuses. A job or lesson that is gone yields ErrDownloadAbandoned (with what
+// the stopper wanted, see abandonedAnswer); a job in another status yields
 // ErrDownloadCanceled. Either way nothing is written. Every write the worker
-// makes about a job goes through it, and a delete removes the lesson's jobs
-// first, so no step of a download that started before a delete lands after it.
+// makes about a job goes through it, and a delete or a skip removes the
+// lesson's jobs first, so no step of a download that started before it lands
+// after it.
 func (s *Store) withLiveJob(ctx context.Context, jobID int64, id int, statuses []string, fn func(*sql.Tx) error) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
+	var abandoned error
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		var status string
 		err := tx.QueryRowContext(ctx,
 			`SELECT status FROM jobs WHERE id = ? AND railcontent_id = ?`, jobID, id,
 		).Scan(&status)
 		if errors.Is(err, sql.ErrNoRows) {
-			return abandonedTx(ctx, tx, jobID, id)
+			abandoned = abandonedAnswer(ctx, tx, jobID, id)
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("check job %d: %w", jobID, err)
@@ -141,33 +161,57 @@ func (s *Store) withLiveJob(ctx context.Context, jobID int64, id int, statuses [
 			return fmt.Errorf("check lesson %d: %w", id, err)
 		}
 		if lessons == 0 {
-			return abandonedTx(ctx, tx, jobID, id)
+			abandoned = abandonedAnswer(ctx, tx, jobID, id)
+			return nil
 		}
 		if !slices.Contains(statuses, status) {
 			return fmt.Errorf("job %d is %s: %w", jobID, status, ErrDownloadCanceled)
 		}
 		return fn(tx)
 	})
+	if err != nil || abandoned == nil {
+		return err
+	}
+	return s.consumeAbandoned(ctx, jobID, abandoned)
 }
 
-// abandonedTx is the error for a job a delete removed: ErrDownloadAbandoned,
-// joined with ErrDiscardDownload only when the delete recorded that it removes
-// the lesson's files. An unknown or unreadable intent keeps the files: nothing
-// is removed without proof the delete wanted it.
-func abandonedTx(ctx context.Context, tx *sql.Tx, jobID int64, id int) error {
-	var discard int
+// abandonedAnswer is the error for a job a stopper removed: ErrDownloadAbandoned,
+// joined with ErrDiscardDownload when the stopper recorded that what the
+// download wrote goes, and with ErrLessonDeleted too when the lesson's own
+// files are being deleted. The row must name the same job AND lesson. An
+// unknown or unreadable intent keeps the files: nothing is removed without
+// proof the stopper wanted it.
+func abandonedAnswer(ctx context.Context, tx *sql.Tx, jobID int64, id int) error {
+	var intent string
 	err := tx.QueryRowContext(ctx,
-		`SELECT discard FROM abandoned_jobs WHERE job_id = ?`, jobID,
-	).Scan(&discard)
+		`SELECT intent FROM abandoned_jobs WHERE job_id = ? AND railcontent_id = ?`, jobID, id,
+	).Scan(&intent)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("job %d, lesson %d: %w", jobID, id, ErrDownloadAbandoned)
 	case err != nil:
-		return fmt.Errorf("job %d, lesson %d: %w (what the delete wanted could not be read, so its files are kept: %v)", jobID, id, ErrDownloadAbandoned, err)
-	case discard == 1:
+		return fmt.Errorf("job %d, lesson %d: %w (what the stopper wanted could not be read, so its files are kept: %v)", jobID, id, ErrDownloadAbandoned, err)
+	case intent == intentDelete:
+		return fmt.Errorf("job %d, lesson %d: %w: %w: %w", jobID, id, ErrDownloadAbandoned, ErrDiscardDownload, ErrLessonDeleted)
+	case intent == intentDiscard:
 		return fmt.Errorf("job %d, lesson %d: %w: %w", jobID, id, ErrDownloadAbandoned, ErrDiscardDownload)
 	}
 	return fmt.Errorf("job %d, lesson %d: %w", jobID, id, ErrDownloadAbandoned)
+}
+
+// consumeAbandoned removes the abandoned_jobs row of jobID once its worker has
+// read it (answer), so the table holds only rows a worker may still need. The
+// answer stands whatever happens here: a row that could not be removed is only
+// noted, and lapses after abandonedTTL.
+func (s *Store) consumeAbandoned(ctx context.Context, jobID int64, answer error) error {
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM abandoned_jobs WHERE job_id = ?`, jobID)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("%w (its abandoned_jobs row stays until it lapses: %v)", answer, err)
+	}
+	return answer
 }
 
 // runningOnly and runningOrCanceled are the job statuses a guarded write
@@ -316,16 +360,32 @@ func (s *Store) ListLessonsWithFiles(ctx context.Context) ([]Lesson, error) {
 	return scanLessons(rows)
 }
 
+// DeleteLease is how long a delete's hold on a lesson lasts unless renewed
+// (lessons.deleting_until). A delete renews it while it runs (RenewLessonDelete,
+// see DeleteRenewEvery) and clears it when it ends, so the lease only matters
+// when the process died mid-delete: the lesson is downloadable again once it
+// lapses, with no startup sweep that could clear a live delete of another
+// process.
+const DeleteLease = 2 * time.Minute
+
+// DeleteRenewEvery is how often a running delete renews its lease: a quarter of
+// DeleteLease, so a few missed renewals (a stalled database) never let a live
+// delete's lease lapse.
+const DeleteRenewEvery = DeleteLease / 4
+
+// leaseArg is the SQLite datetime modifier that puts a lease DeleteLease ahead.
+var leaseArg = fmt.Sprintf("+%d seconds", int(DeleteLease/time.Second))
+
 // BeginLessonDelete starts deleting a lesson's files. In one transaction it
 // reads the lesson (a wrapped sql.ErrNoRows if unknown), refuses with
-// ErrLessonDeleting if a delete of it is already running, marks it deleting (no
-// job can be enqueued or retried for it until EndLessonDelete, TombstoneLesson
-// or KeepLessonFiles), and removes every job of it that is queued, running or
-// canceled (removeActiveJobsTx), recording that the files go. So once the
-// delete answers, no step of a download already under way can record
-// anything, and no new one can start. It returns the lesson as it is then,
-// whose recorded files the caller removes, and the ids of the jobs whose
-// processes the caller should kill.
+// ErrLessonDeleting if a delete holds it already, takes the delete's lease (no
+// job can be enqueued or retried for it until EndLessonDelete,
+// TombstoneLesson or KeepLessonFiles, or until the lease lapses), and removes
+// every job of it that is queued, running or canceled (removeActiveJobsTx),
+// recording that the lesson's files go. So once the delete answers, no step of
+// a download already under way can record anything, and no new one can start.
+// It returns the lesson as it is then, whose recorded files the caller
+// removes, and the ids of the jobs whose processes the caller should kill.
 func (s *Store) BeginLessonDelete(ctx context.Context, id int) (Lesson, []int64, error) {
 	var (
 		l       Lesson
@@ -339,10 +399,12 @@ func (s *Store) BeginLessonDelete(ctx context.Context, id int) (Lesson, []int64,
 		if l.Deleting {
 			return fmt.Errorf("lesson %d: %w", id, ErrLessonDeleting)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE lessons SET deleting = 1 WHERE railcontent_id = ?`, id); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE lessons SET deleting_until = datetime('now', ?) WHERE railcontent_id = ?`, leaseArg, id,
+		); err != nil {
 			return fmt.Errorf("mark lesson %d deleting: %w", id, err)
 		}
-		if running, err = removeActiveJobsTx(ctx, tx, true, `railcontent_id = ?`, id); err != nil {
+		if running, err = removeActiveJobsTx(ctx, tx, intentDelete, `railcontent_id = ?`, id); err != nil {
 			return err
 		}
 		l, err = getLessonTx(ctx, tx, id)
@@ -356,8 +418,8 @@ func (s *Store) BeginLessonDelete(ctx context.Context, id int) (Lesson, []int64,
 
 // BeginFollowDelete is BeginLessonDelete for every lesson of a follow that is
 // being removed with its files: in one transaction it refuses with
-// ErrLessonDeleting if any of them is being deleted already, marks them all
-// deleting, and removes every queued, running or canceled job of them. It
+// ErrLessonDeleting if a delete holds any of them already, takes the lease on
+// them all, and removes every queued, running or canceled job of them. It
 // returns the lessons as they are then and the ids of the jobs to kill. Jobs
 // the follow queued for another follow's lessons are not touched.
 func (s *Store) BeginFollowDelete(ctx context.Context, followID int64) ([]Lesson, []int64, error) {
@@ -369,11 +431,13 @@ func (s *Store) BeginFollowDelete(ctx context.Context, followID int64) ([]Lesson
 		if err := refuseDeletingTx(ctx, tx, followID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE lessons SET deleting = 1 WHERE follow_id = ?`, followID); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE lessons SET deleting_until = datetime('now', ?) WHERE follow_id = ?`, leaseArg, followID,
+		); err != nil {
 			return fmt.Errorf("mark lessons of follow %d deleting: %w", followID, err)
 		}
 		var err error
-		if running, err = removeActiveJobsTx(ctx, tx, true, followLessonsClause, followID); err != nil {
+		if running, err = removeActiveJobsTx(ctx, tx, intentDelete, followLessonsClause, followID); err != nil {
 			return err
 		}
 		rows, err := tx.QueryContext(ctx,
@@ -395,12 +459,12 @@ func (s *Store) BeginFollowDelete(ctx context.Context, followID int64) ([]Lesson
 // argument is the follow id).
 const followLessonsClause = `railcontent_id IN (SELECT railcontent_id FROM lessons WHERE follow_id = ?)`
 
-// refuseDeletingTx returns ErrLessonDeleting if any lesson of the follow is
-// being deleted right now.
+// refuseDeletingTx returns ErrLessonDeleting if a delete holds any lesson of
+// the follow right now.
 func refuseDeletingTx(ctx context.Context, tx *sql.Tx, followID int64) error {
 	var deleting int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM lessons WHERE follow_id = ? AND deleting = 1`, followID,
+		`SELECT count(*) FROM lessons WHERE follow_id = ? AND `+deletingSQL, followID,
 	).Scan(&deleting); err != nil {
 		return fmt.Errorf("check lessons of follow %d: %w", followID, err)
 	}
@@ -410,15 +474,33 @@ func refuseDeletingTx(ctx context.Context, tx *sql.Tx, followID int64) error {
 	return nil
 }
 
+// RenewLessonDelete extends the lease of a delete still holding lessons ids by
+// another DeleteLease. A lesson whose delete already ended (no lease) is left
+// alone, as is an unknown id.
+func (s *Store) RenewLessonDelete(ctx context.Context, ids ...int) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE lessons SET deleting_until = datetime('now', ?) WHERE railcontent_id = ? AND deleting_until IS NOT NULL`,
+				leaseArg, id,
+			); err != nil {
+				return fmt.Errorf("renew the delete of lesson %d: %w", id, err)
+			}
+		}
+		return nil
+	})
+}
+
 // EndLessonDelete ends the deletes of lessons ids: they may be downloaded
 // again. TombstoneLesson and KeepLessonFiles end it themselves; a delete calls
 // this too, whatever happened, so a failure between them never leaves a lesson
-// that can not be downloaded. An unknown id is not an error.
+// that can not be downloaded until its lease lapses. An unknown id is not an
+// error.
 func (s *Store) EndLessonDelete(ctx context.Context, ids ...int) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, id := range ids {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE lessons SET deleting = 0 WHERE railcontent_id = ? AND deleting = 1`, id,
+				`UPDATE lessons SET deleting_until = NULL WHERE railcontent_id = ? AND deleting_until IS NOT NULL`, id,
 			); err != nil {
 				return fmt.Errorf("end delete of lesson %d: %w", id, err)
 			}
@@ -427,57 +509,90 @@ func (s *Store) EndLessonDelete(ctx context.Context, ids ...int) error {
 	})
 }
 
-// ClearStaleDeletes ends every delete still marked on a lesson, and returns how
-// many it ended. The daemon calls it once at startup, like
-// RequeueStaleRunning: a delete runs inside one request of this process, so a
-// mark left at startup was left by a process that died mid-delete.
-func (s *Store) ClearStaleDeletes(ctx context.Context) (int, error) {
-	var n int
+// SkipLesson is the API's Skip: in one transaction it marks lesson id skipped
+// with reason (recorded in its error column), and stops every download of it
+// for good: its queued jobs are removed, and so are its running and canceled
+// ones, recording that what those downloads wrote goes, except what any lesson
+// row records (the lesson's own earlier files stay). So once it answers no
+// download of the lesson, queued or running, can record anything, and syncs
+// leave it alone (ShouldSkipEnqueue). It refuses with ErrLessonDeleting while a
+// delete holds the lesson, and returns a wrapped sql.ErrNoRows for an unknown
+// id. It returns the ids of the jobs whose processes the caller should kill.
+func (s *Store) SkipLesson(ctx context.Context, id int, reason string) ([]int64, error) {
+	var running []int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE lessons SET deleting = 0 WHERE deleting = 1`)
+		l, err := getLessonTx(ctx, tx, id)
 		if err != nil {
-			return fmt.Errorf("clear stale deletes: %w", err)
+			return err
 		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected clearing stale deletes: %w", err)
+		if l.Deleting {
+			return fmt.Errorf("lesson %d: %w", id, ErrLessonDeleting)
 		}
-		n = int(affected)
+		if running, err = removeActiveJobsTx(ctx, tx, intentDiscard, `railcontent_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE lessons SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE railcontent_id = ?`,
+			StatusSkipped, reason, id,
+		); err != nil {
+			return fmt.Errorf("skip lesson %d: %w", id, err)
+		}
 		return nil
 	})
-	return n, err
+	if err != nil {
+		return nil, err
+	}
+	return running, nil
 }
 
+// abandonedTTL is how long an abandoned_jobs row nobody read is kept: longer
+// than any worker holds one job. A row still needed after it (a download in
+// another process that ran for a week) is gone, and a missing row keeps the
+// files: the safe side.
+const abandonedTTL = "-7 days"
+
 // removeActiveJobsTx deletes the queued, running and canceled jobs matching
-// where (a condition on the jobs table), and returns the ids of the running
-// and canceled ones, whose processes may still be going. For those it records
-// what the delete wants (abandoned_jobs: discard, or keep the files), which the
-// worker reads when its next write finds the job gone. A canceled job is
-// removed too: its worker may not have finished yet, and must not record after
-// the delete. Any of their lessons still 'downloading' is left as
-// endDownloadSQL says.
-func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, discard bool, where string, args ...any) ([]int64, error) {
+// where (a condition on the jobs table), and returns the ids of the ones whose
+// worker may still be going: every running job, and every canceled job that a
+// worker had claimed (started_at set; one canceled while still queued never
+// had a worker). For those it records what the stopper wants (abandoned_jobs:
+// intent), which the worker reads, and consumes, when its next write finds
+// the job gone. A canceled job is removed too: its worker may not have
+// finished yet, and must not record after the stopper. Any of their lessons
+// still 'downloading' is left as endDownloadSQL says. Rows older than
+// abandonedTTL are dropped first, so the table can not grow without bound.
+func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, intent, where string, args ...any) ([]int64, error) {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM abandoned_jobs WHERE recorded_at < datetime('now', ?)`, abandonedTTL,
+	); err != nil {
+		return nil, fmt.Errorf("drop lapsed abandoned jobs: %w", err)
+	}
 	cond := `status IN ('` + JobQueued + `', '` + JobRunning + `', '` + JobCanceled + `') AND ` + where
-	rows, err := tx.QueryContext(ctx, `SELECT id, railcontent_id, status FROM jobs WHERE `+cond, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT id, railcontent_id, status, started_at IS NOT NULL FROM jobs WHERE `+cond, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list active jobs: %w", err)
 	}
+	type inFlightJob struct {
+		id   int64
+		rcID int
+	}
 	var (
-		inFlight []int64
+		inFlight []inFlightJob
 		lessons  []int
 	)
 	for rows.Next() {
 		var (
-			id     int64
-			rcID   int
-			status string
+			id      int64
+			rcID    int
+			status  string
+			started bool
 		)
-		if err := rows.Scan(&id, &rcID, &status); err != nil {
+		if err := rows.Scan(&id, &rcID, &status, &started); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan active job: %w", err)
 		}
-		if status != JobQueued {
-			inFlight = append(inFlight, id)
+		if status == JobRunning || status == JobCanceled && started {
+			inFlight = append(inFlight, inFlightJob{id: id, rcID: rcID})
 		}
 		lessons = append(lessons, rcID)
 	}
@@ -487,12 +602,14 @@ func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, discard bool, where str
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate active jobs: %w", err)
 	}
-	for _, id := range inFlight {
+	ids := make([]int64, 0, len(inFlight))
+	for _, j := range inFlight {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO abandoned_jobs(job_id, discard) VALUES(?, ?)`, id, discard,
+			`INSERT OR REPLACE INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, ?, ?)`, j.id, j.rcID, intent,
 		); err != nil {
-			return nil, fmt.Errorf("record what the delete wants for job %d: %w", id, err)
+			return nil, fmt.Errorf("record what the stopper wants for job %d: %w", j.id, err)
 		}
+		ids = append(ids, j.id)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE `+cond, args...); err != nil {
 		return nil, fmt.Errorf("delete active jobs: %w", err)
@@ -502,7 +619,7 @@ func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, discard bool, where str
 			return nil, fmt.Errorf("end the download of lesson %d: %w", rcID, err)
 		}
 	}
-	return inFlight, nil
+	return ids, nil
 }
 
 // sameFilesClause matches a lesson row whose recorded files are still exactly
@@ -522,7 +639,7 @@ func sameFilesArgs(before Lesson) []any {
 func (s *Store) TombstoneLesson(ctx context.Context, before Lesson) error {
 	return s.casLesson(ctx, before,
 		`UPDATE lessons
-		    SET status = ?, error = 'deleted', deleting = 0,
+		    SET status = ?, error = 'deleted', deleting_until = NULL,
 		        output_dir = NULL, video_path = NULL, bytes = NULL, library_entries = NULL,
 		        updated_at = CURRENT_TIMESTAMP
 		  WHERE `+sameFilesClause,
@@ -548,7 +665,7 @@ type KeptFiles struct {
 func (s *Store) KeepLessonFiles(ctx context.Context, before Lesson, kept KeptFiles) error {
 	return s.casLesson(ctx, before,
 		`UPDATE lessons
-		    SET status = ?, error = NULL, deleting = 0,
+		    SET status = ?, error = NULL, deleting_until = NULL,
 		        output_dir = CASE WHEN ? THEN output_dir END,
 		        video_path = CASE WHEN ? THEN video_path END,
 		        bytes = CASE WHEN ? THEN bytes END,
@@ -608,7 +725,7 @@ func (s *Store) RemoveFilelessFollowCascade(ctx context.Context, id int64) ([]in
 			return fmt.Errorf("follow %d: %d lessons: %w", id, withFiles, ErrFollowHasFiles)
 		}
 		var err error
-		running, err = removeFollowCascadeTx(ctx, tx, id, true)
+		running, err = removeFollowCascadeTx(ctx, tx, id, intentDelete)
 		return err
 	})
 	if err != nil {

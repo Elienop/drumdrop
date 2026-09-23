@@ -108,10 +108,6 @@ func (s *fakeDaemonStore) StartDownload(ctx context.Context, jobID int64, id int
 func (s *fakeDaemonStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
 	return nil
 }
-func (s *fakeDaemonStore) ClearStaleDeletes(ctx context.Context) (int, error) {
-	s.record("clear-deletes")
-	return 0, nil
-}
 func (s *fakeDaemonStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
 	s.record("job-done")
 	return nil
@@ -281,11 +277,10 @@ func TestDaemonRunReclaimsOnceAndStopsOnCancel(t *testing.T) {
 		t.Errorf("RequeueStaleRunning called %d times, want exactly 1 (startup only)", reclaims)
 	}
 
-	// requeue must be the very first recorded op, then the stale deletes are
-	// ended, both before any plan/drain.
+	// requeue must be the very first recorded op, before any plan/drain.
 	ops := store.snapshotOps()
-	if len(ops) < 2 || ops[0] != "requeue" || ops[1] != "clear-deletes" {
-		t.Errorf("first ops = %v, want requeue then clear-deletes first", ops)
+	if len(ops) < 1 || ops[0] != "requeue" {
+		t.Errorf("first ops = %v, want requeue first", ops)
 	}
 }
 

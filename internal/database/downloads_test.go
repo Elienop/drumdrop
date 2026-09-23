@@ -67,11 +67,17 @@ func TestMigration004UpgradesAnExistingDatabase(t *testing.T) {
 	if l.Deleting {
 		t.Error("old row reads as being deleted after the upgrade")
 	}
-	if _, err := db.Exec(`UPDATE lessons SET library_entries = '["Show/Season 01/x"]', deleting = 1 WHERE railcontent_id = 7`); err != nil {
+	if _, err := db.Exec(`UPDATE lessons SET library_entries = '["Show/Season 01/x"]', deleting_until = datetime('now', '+1 minute') WHERE railcontent_id = 7`); err != nil {
 		t.Fatalf("write the new columns: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO abandoned_jobs(job_id, discard) VALUES(1, 1)`); err != nil {
+	if l, err := s.GetLesson(context.Background(), 7); err != nil || !l.Deleting {
+		t.Errorf("a live lease reads as not deleting (%v)", err)
+	}
+	if _, err := db.Exec(`INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(1, 7, 'discard')`); err != nil {
 		t.Fatalf("write the new table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(2, 7, 'bogus')`); err == nil {
+		t.Error("an intent outside keep/discard/delete was stored, want the CHECK to refuse it")
 	}
 }
 
@@ -233,8 +239,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 				t.Fatalf("TombstoneLesson: %v", err)
 			}
 			err := write(s, jobID, 5)
-			if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) {
-				t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrDiscardDownload", name, err)
+			if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) || !errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrDiscardDownload and ErrLessonDeleted", name, err)
 			}
 			l := mustLesson(t, s, 5)
 			if l.Status != StatusSkipped || l.Error.String != "deleted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
@@ -252,8 +258,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 			if _, err := s.RemoveFilelessFollowCascade(ctx, f); err != nil {
 				t.Fatalf("RemoveFilelessFollowCascade: %v", err)
 			}
-			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) {
-				t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrDiscardDownload", name, err)
+			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) || !errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrDiscardDownload and ErrLessonDeleted", name, err)
 			}
 		})
 		t.Run(name+"/follow removed keeping its files", func(t *testing.T) {
@@ -416,9 +422,8 @@ func TestBeginLessonDeleteRemovesItsJobsAndBlocksNewOnes(t *testing.T) {
 		if _, err := s.GetJob(ctx, j); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("lesson 1's job %d survived (err=%v), want removed", j, err)
 		}
-		var discard int
-		if err := s.rawDB().QueryRow(`SELECT discard FROM abandoned_jobs WHERE job_id = ?`, j).Scan(&discard); err != nil || discard != 1 {
-			t.Errorf("job %d intent = %d (err %v), want discard recorded", j, discard, err)
+		if got := abandonedIntent(t, s, j); got != intentDelete {
+			t.Errorf("job %d intent = %q, want %q recorded", j, got, intentDelete)
 		}
 	}
 	if st := mustJob(t, s, done).Status; st != JobDone {
@@ -472,23 +477,6 @@ func TestBeginLessonDeleteLeavesADownloadingLessonWithFilesDownloaded(t *testing
 	}
 	if l.Status != StatusDownloaded || l.Error.Valid {
 		t.Errorf("lesson = %s/%v, want downloaded with no error", l.Status, l.Error)
-	}
-}
-
-// TestClearStaleDeletes proves the daemon's startup step ends a delete a dead
-// process left marked, so the lesson can be downloaded again.
-func TestClearStaleDeletes(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-	seedJob(t, s, 1, sql.NullInt64{})
-	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
-		t.Fatalf("BeginLessonDelete: %v", err)
-	}
-	if n, err := s.ClearStaleDeletes(ctx); err != nil || n != 1 {
-		t.Fatalf("ClearStaleDeletes = %d, %v, want 1", n, err)
-	}
-	if l := mustLesson(t, s, 1); l.Deleting {
-		t.Error("lesson still deleting after ClearStaleDeletes")
 	}
 }
 
@@ -732,9 +720,8 @@ func TestRemoveFollowCascadeStopsOnlyItsOwnLessons(t *testing.T) {
 	if !reflect.DeepEqual(kill, []int64{own}) {
 		t.Errorf("jobs to kill = %v, want only the follow's own [%d]", kill, own)
 	}
-	var discard int
-	if err := s.rawDB().QueryRow(`SELECT discard FROM abandoned_jobs WHERE job_id = ?`, own).Scan(&discard); err != nil || discard != 0 {
-		t.Errorf("intent for job %d = %d (err %v), want keep (0)", own, discard, err)
+	if got := abandonedIntent(t, s, own); got != intentKeep {
+		t.Errorf("intent for job %d = %q, want %q", own, got, intentKeep)
 	}
 	if j := mustJob(t, s, collateral); j.Status != JobRunning || j.FollowID.Valid {
 		t.Errorf("collateral job = %+v, want still running, detached", j)

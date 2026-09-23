@@ -506,8 +506,8 @@ func TestDeleteRefusesWhileARecordIsDamaged(t *testing.T) {
 	log := captureLog(t)
 	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: library}, "test")
 
-	wantError(t, serveDelete(t, srv, "/api/lessons/1"), http.StatusInternalServerError, msgLessonFilesKept)
-	wantError(t, serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"), http.StatusInternalServerError, msgFollowFilesKept)
+	wantError(t, serveDelete(t, srv, "/api/lessons/1"), http.StatusInternalServerError, msgLessonNoClaims)
+	wantError(t, serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"), http.StatusInternalServerError, msgFollowNoClaims)
 	assertPresent(t, season, "Show - s01e05 - Five.mp4", "Show - s01e06 - Six.mp4")
 	if l := mustLesson(t, store, 1); l.Status != database.StatusDownloaded || !l.OutputDir.Valid || l.Deleting {
 		t.Errorf("lesson 1 = %+v, want untouched and the delete ended", l)

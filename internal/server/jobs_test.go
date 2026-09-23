@@ -160,8 +160,8 @@ func TestSummary(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 32, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 32: %v", err)
 	}
-	if err := store.MarkSkipped(ctx, 32, "no"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := store.SkipLesson(ctx, 32, "no"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	if _, err := store.AddNodeFollow(ctx, 101, "Course A", "drumeo", "best"); err != nil {
 		t.Fatalf("AddNodeFollow: %v", err)

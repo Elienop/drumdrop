@@ -36,7 +36,7 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 //   - ErrJobNotActive → 409 "job is not active"
 //   - ErrJobNotTerminal → 409 "job is not in a terminal state"
 //   - ErrLessonDeleting → 409, the lesson's files are being deleted
-//   - anything else → 500 "internal error" (the raw err is never leaked, so
+//   - anything else → 500 msgServerError (the raw err is never leaked, so
 //     internal SQL phrasing such as "sql: no rows in result set" stays out of
 //     responses; it goes to the server log instead)
 //
@@ -54,13 +54,9 @@ func writeStoreErr(w http.ResponseWriter, err error, notFoundMsg string) {
 		writeErr(w, http.StatusConflict, msgBeingDeleted)
 	default:
 		fmt.Fprintf(logOut, "drumdrop: store error: %v\n", err)
-		writeErr(w, http.StatusInternalServerError, "internal error")
+		writeErr(w, http.StatusInternalServerError, msgServerError)
 	}
 }
-
-// msgBeingDeleted answers a download or retry of a lesson whose files are
-// being deleted right now.
-const msgBeingDeleted = "This lesson's files are being deleted. Try again once that has finished."
 
 // isNotFound reports whether err is a wrapped sql.ErrNoRows.
 func isNotFound(err error) bool { return errors.Is(err, sql.ErrNoRows) }

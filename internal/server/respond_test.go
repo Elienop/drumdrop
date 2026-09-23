@@ -77,7 +77,7 @@ func TestWriteStoreErr(t *testing.T) {
 			name:     "default maps to 500 without leaking raw error",
 			err:      fmt.Errorf("sql: no rows in result set: secret table internals"),
 			wantCode: http.StatusInternalServerError,
-			wantMsg:  "internal error",
+			wantMsg:  msgServerError,
 		},
 	}
 	for _, tc := range tests {

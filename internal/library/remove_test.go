@@ -93,8 +93,8 @@ func TestRemoveUsesTheLongestRoot(t *testing.T) {
 
 // TestRemoveFindsTheRootUnderAnotherSpelling covers a record or a folder
 // written under another spelling of a root (a symlink to it, a second mount):
-// it is removed through the real root, by identity; a missing path outside
-// every root is already gone; an existing one is refused.
+// it is removed through the real root, by identity; a path outside every
+// root is refused, missing or not.
 func TestRemoveFindsTheRootUnderAnotherSpelling(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on Windows")
@@ -115,8 +115,11 @@ func TestRemoveFindsTheRootUnderAnotherSpelling(t *testing.T) {
 	}
 	assertExist(t, true, lib)
 
-	if err := Remove([]string{lib}, filepath.Join(tmp, "moved-away", "F", "05 - Old")); err != nil {
-		t.Errorf("missing path outside every root = %v, want nil (already gone)", err)
+	// A missing path outside every root may be a folder that moved with a
+	// library mounted elsewhere since (security review round 3, M1): it is
+	// refused, never reported as removed.
+	if err := Remove([]string{lib}, filepath.Join(tmp, "moved-away", "F", "05 - Old")); err == nil || !strings.Contains(err.Error(), "not reported as removed") {
+		t.Errorf("missing path outside every root = %v, want the named refusal", err)
 	}
 	seedSeason(t, filepath.Join(tmp, "elsewhere"), "keep.txt")
 	if err := Remove([]string{lib}, filepath.Join(tmp, "elsewhere", "keep.txt")); err == nil {

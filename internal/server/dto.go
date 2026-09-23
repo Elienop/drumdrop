@@ -56,6 +56,11 @@ type LessonDTO struct {
 	// to act on (database.Lesson.HasFiles: an output_dir, or a library record
 	// that is not empty), whatever its status. Always present.
 	HasFiles bool `json:"has_files"`
+	// Deleting is true while a delete of this lesson is in progress: the same
+	// predicate (database.Lesson.Deleting, a live lease) the server uses to
+	// refuse a download, retry, skip or second delete of it with 409. Always
+	// present.
+	Deleting bool `json:"deleting"`
 }
 
 // JobDTO is the JSON wire shape of a database.Job.
@@ -149,6 +154,7 @@ func lessonDTO(l database.Lesson) LessonDTO {
 		DownloadedAt:        nullTime(l.DownloadedAt),
 		UpdatedAt:           nullTime(l.UpdatedAt),
 		HasFiles:            l.HasFiles(),
+		Deleting:            l.Deleting,
 	}
 }
 

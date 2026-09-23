@@ -16,13 +16,6 @@ import (
 // "default") keeps the per-lesson-subfolder layout.
 const LayoutPlexTV = "plex-tv"
 
-// rename is the move primitive moveToLibrary uses, isolated behind a package var
-// so a test can force the cross-filesystem copy fallback. It defaults to
-// os.Rename (which exists on every release target, Windows included); the
-// copy-tree fallback on ANY rename error means no Unix-only errno is ever
-// referenced, so the cross-platform builds stay green.
-var rename = os.Rename
-
 // moveToLibrary moves lessonDir into libraryDir at lessonDir's path relative to
 // downloadsDir, returning the new (library) dir. It tries a rename first
 // (instant and atomic on the same filesystem); on a cross-filesystem rename
@@ -34,7 +27,8 @@ var rename = os.Rename
 //   - newDir == "": the lesson is whole in lessonDir. A copy that failed
 //     part-way is removed from the library first.
 //   - newDir != "": the library holds the whole lesson. An error alongside it
-//     means lessonDir could not be fully removed; the message names the leftover.
+//     means lessonDir could not be fully removed, or is a note (a leftover it
+//     replaced); the message says which.
 //
 // A copied lesson is flushed to disk (every file and folder) before the
 // downloads copy is removed, so a crash right after can not leave the only copy
@@ -42,13 +36,18 @@ var rename = os.Rename
 //
 // It rejects a lessonDir that is not under downloadsDir (rel ".", "..", an
 // absolute Rel result) before any write, so a stray path can never land outside
-// the library. Everything it creates or removes in the library goes through
-// os.Root: the destination's parent must resolve inside the library (a
-// symlinked course folder is refused, not followed), and an existing
-// destination (a re-download) is removed there so the move replaces it. It
+// the library. Everything it reads, creates or removes goes through folders it
+// holds open (os.Root): the lesson folder must be a real folder inside
+// downloads, the destination's parent must resolve inside the library (a
+// symlinked course folder is refused, not followed), and the rename acts on
+// the two open folders (renameAt; by path only on Windows). A destination
+// that already exists is replaced only if no lesson other than self records
+// anything in it (claims.Holds): the lesson's own previous download is
+// replaced, a leftover no lesson records is replaced and reported, and one
+// another lesson records refuses the move (the lesson stays in downloads). It
 // returns the new dir and an error for the caller to LOG — the caller treats
 // the move as non-fatal and must never fail the job on it.
-func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, err error) {
+func moveToLibrary(downloadsDir, libraryDir, lessonDir string, claims *library.Claims, self int) (newDir string, err error) {
 	// Move to the same path relative to the downloads root. Reject a lessonDir
 	// that escapes the root (".." prefix or an absolute Rel result) before any
 	// write, so a stray path can never land outside the library.
@@ -71,6 +70,15 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 	if filepath.Clean(dstDir) == filepath.Clean(lessonDir) || sameDir(dstDir, lessonDir) {
 		return dstDir, nil
 	}
+	if claims == nil {
+		return "", errors.New("refusing to move: the other lessons' files were not read")
+	}
+
+	scratch, err := openScratch(downloadsDir, lessonDir)
+	if err != nil {
+		return "", err
+	}
+	defer scratch.close()
 
 	// Open the destination's PARENT inside the library (created if missing), so
 	// the rename moves the whole lesson folder in as the leaf, and nothing is
@@ -81,27 +89,36 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 	}
 	defer closeParent()
 	leaf := filepath.Base(rel)
-	if err := parent.RemoveAll(leaf); err != nil {
-		return "", fmt.Errorf("remove existing library dir %q: %w", dstDir, err)
+	var note error
+	if _, lerr := parent.Lstat(leaf); lerr == nil {
+		if ids := claims.Holds(dstDir, self); len(ids) > 0 {
+			return "", fmt.Errorf("refusing to move: %q holds files lessons %v record, so the lesson stays whole in downloads", dstDir, ids)
+		}
+		if ids := claims.Holds(dstDir, 0); len(ids) == 0 {
+			note = fmt.Errorf("replaced %q, which no lesson records", dstDir)
+		}
+		if err := parent.RemoveAll(leaf); err != nil {
+			return "", fmt.Errorf("remove existing library dir %q: %w", dstDir, err)
+		}
 	}
 
-	if rerr := rename(lessonDir, dstDir); rerr == nil {
-		return dstDir, nil
-	} else if cerr := copyTreeInto(parent, leaf, lessonDir); cerr != nil {
+	if rerr := renameAt(scratch.parent, scratch.base, parent, leaf); rerr == nil {
+		return dstDir, note
+	} else if cerr := copyTreeInto(parent, leaf, scratch.parent, scratch.base); cerr != nil {
 		// Cross-filesystem (or otherwise unrenamable): copy the tree, then drop the
 		// source. The copy only read the source, so the whole lesson is still in
 		// downloads; take the partial copy back out of the library.
 		err := fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
-		return "", errors.Join(err, discardPartialCopy(parent, leaf))
+		return "", errors.Join(err, discardPartialCopy(parent, leaf), note)
 	}
 	if err := syncIn(parent, "."); err != nil {
 		err = fmt.Errorf("flush library folder %q after the copy: %w", filepath.Dir(dstDir), err)
-		return "", errors.Join(err, discardPartialCopy(parent, leaf))
+		return "", errors.Join(err, discardPartialCopy(parent, leaf), note)
 	}
-	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
-		return dstDir, downloadsLeftoverErr(lessonDir, rmerr)
+	if rmerr := scratch.remove(); rmerr != nil {
+		return dstDir, errors.Join(downloadsLeftoverErr(lessonDir, rmerr), note)
 	}
-	return dstDir, nil
+	return dstDir, note
 }
 
 // openLibraryParent creates the folder rel inside libraryDir and opens it as

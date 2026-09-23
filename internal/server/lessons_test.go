@@ -60,8 +60,8 @@ func TestListLessonsStatusFilter(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 22, "Skipped", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson 22: %v", err)
 	}
-	if err := store.MarkSkipped(ctx, 22, "no thanks"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := store.SkipLesson(ctx, 22, "no thanks"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

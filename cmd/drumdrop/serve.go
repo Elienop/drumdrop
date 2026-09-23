@@ -21,10 +21,12 @@ import (
 // release build can override it with -ldflags "-X main.version=...".
 var version = "dev"
 
-// daemonRunner is the slice of *scheduler.Daemon that gracefulServe needs: a
-// Run loop that ends only on context cancellation. It is an interface so the
-// shutdown-ordering test can substitute a fake without a real store or network.
+// daemonRunner is the slice of *scheduler.Daemon that gracefulServe needs: the
+// startup recovery, and a Run loop that ends only on context cancellation. It
+// is an interface so the shutdown-ordering test can substitute a fake without a
+// real store or network.
 type daemonRunner interface {
+	Recover(ctx context.Context)
 	Run(ctx context.Context, interval time.Duration) error
 }
 
@@ -124,6 +126,11 @@ func gracefulServe(ctx context.Context, srv *http.Server, ln net.Listener, daemo
 	// of the HTTP server's shutdown context.
 	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
 	defer cancelDaemon()
+
+	// The startup recovery runs to the end before the first request is served
+	// (the listener is bound, but nothing accepts until srv.Serve), so no
+	// request can race it; Run then skips it.
+	daemon.Recover(daemonCtx)
 
 	daemonDone := make(chan struct{})
 	go func() {

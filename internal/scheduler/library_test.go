@@ -49,7 +49,7 @@ func movePlex(libraryDir, show string, season, episode int, title, lessonDir str
 	if err != nil {
 		return "", "", err
 	}
-	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, plexLibrary{claims: c})
+	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, plexLibrary{claims: c, downloads: filepath.Dir(lessonDir)})
 	return res.seasonDir, res.videoPath, err
 }
 
@@ -63,7 +63,7 @@ func TestMoveToLibraryRenames(t *testing.T) {
 	downloadsDir, lessonDir := seedLesson(t)
 	libraryDir := filepath.Join(filepath.Dir(downloadsDir), "lib") // same tmp fs
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibrary: %v", err)
 	}
@@ -103,11 +103,9 @@ func TestMoveToLibraryCrossFsFallback(t *testing.T) {
 	libraryDir := filepath.Join(filepath.Dir(downloadsDir), "lib")
 
 	// Force the rename to fail so the copy-tree fallback runs.
-	orig := rename
-	rename = func(oldpath, newpath string) error { return errInjectedRename }
-	t.Cleanup(func() { rename = orig })
+	stubRename(t, func(oldpath, newpath string) error { return errInjectedRename })
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibrary: %v", err)
 	}
@@ -150,9 +148,9 @@ func TestMoveToLibraryDestinationExistsReplaced(t *testing.T) {
 		t.Fatalf("write stale: %v", err)
 	}
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
-	if err != nil {
-		t.Fatalf("moveToLibrary: %v", err)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
+	if newDir != dstDir || err == nil || !strings.Contains(err.Error(), "which no lesson records") {
+		t.Fatalf("moveToLibrary = (%q, %v), want %q and a note that an untracked leftover was replaced", newDir, err, dstDir)
 	}
 	// The stale file is gone (destination was replaced, not merged).
 	if _, err := os.Stat(filepath.Join(newDir, "stale.txt")); !os.IsNotExist(err) {
@@ -175,7 +173,7 @@ func TestMoveToLibraryDestEqualsSourceIsNoOp(t *testing.T) {
 	// Library == downloads: dstDir resolves to lessonDir.
 	libraryDir := downloadsDir
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	if err != nil {
 		t.Fatalf("moveToLibrary: %v", err)
 	}
@@ -217,15 +215,15 @@ func TestMoveToLibraryRejectsOutsideRoot(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := moveToLibrary(downloadsDir, libraryDir, outside); err == nil {
-		t.Fatal("moveToLibrary(outside-root) = nil, want an error")
+	if _, err := testMoveToLibrary(t, downloadsDir, libraryDir, outside); err == nil {
+		t.Fatal("testMoveToLibrary(t, outside-root) = nil, want an error")
 	}
 	// The root-equal case (lessonDir == downloadsDir, rel ".") must also reject.
 	if err := os.MkdirAll(downloadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir downloads: %v", err)
 	}
-	if _, err := moveToLibrary(downloadsDir, libraryDir, downloadsDir); err == nil {
-		t.Fatal("moveToLibrary(root-equal) = nil, want an error")
+	if _, err := testMoveToLibrary(t, downloadsDir, libraryDir, downloadsDir); err == nil {
+		t.Fatal("testMoveToLibrary(t, root-equal) = nil, want an error")
 	}
 	// And no library was created by either rejection.
 	if _, err := os.Stat(libraryDir); !os.IsNotExist(err) {
@@ -289,9 +287,7 @@ func TestMoveToLibraryPlexTVCrossFsFallback(t *testing.T) {
 	_, lessonDir := seedLesson(t)
 	libraryDir := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(lessonDir)))), "lib")
 
-	orig := rename
-	rename = func(oldpath, newpath string) error { return errInjectedRename }
-	t.Cleanup(func() { rename = orig })
+	stubRename(t, func(oldpath, newpath string) error { return errInjectedRename })
 
 	seasonDir, videoPath, err := movePlex(libraryDir, "Beginner Course", 1, 5, "Lesson Five", lessonDir)
 	if err != nil {
@@ -443,9 +439,7 @@ func TestPlexEpisodeBase(t *testing.T) {
 // move takes its copy path.
 func forceCopyFallback(t *testing.T) {
 	t.Helper()
-	orig := rename
-	rename = func(oldpath, newpath string) error { return errInjectedRename }
-	t.Cleanup(func() { rename = orig })
+	stubRename(t, func(oldpath, newpath string) error { return errInjectedRename })
 }
 
 // skipWithoutPermissionChecks skips the test up front where the OS does not
@@ -524,7 +518,7 @@ func TestMoveToLibraryCopyFailsPartWayLeavesNoPartialCopy(t *testing.T) {
 	forceCopyFallback(t)
 	makeUnreadable(t, filepath.Join(lessonDir, "01 - L.nfo"))
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	if err == nil {
 		t.Fatal("moveToLibrary = nil error, want the copy failure")
 	}
@@ -552,7 +546,7 @@ func TestMoveToLibrarySourceNotRemovableKeepsLibraryCopy(t *testing.T) {
 	forceCopyFallback(t)
 	makeUndeletable(t, lessonDir)
 
-	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	newDir, err := testMoveToLibrary(t, downloadsDir, libraryDir, lessonDir)
 	wantDir := filepath.Join(libraryDir, "Inst", "Course", "01 - L")
 	if newDir != wantDir {
 		t.Errorf("newDir = %q, want the complete library copy %q", newDir, wantDir)
@@ -660,14 +654,12 @@ func TestMoveToLibraryPlexTVCopyFailsPartWayUndoesTheMove(t *testing.T) {
 func TestMoveToLibraryPlexTVUndoRenamesBack(t *testing.T) {
 	tmp := t.TempDir()
 	lessonDir, _, seasonDir := seedSongScratch(t, tmp)
-	orig := rename
-	rename = func(oldpath, newpath string) error {
+	stubRename(t, func(oldpath, newpath string) error {
 		if strings.Contains(oldpath, "[Original]") {
 			return errInjectedRename
 		}
 		return os.Rename(oldpath, newpath)
-	}
-	t.Cleanup(func() { rename = orig })
+	})
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4"))
 
 	gotSeason, _, err := movePlex(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)

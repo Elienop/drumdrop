@@ -103,10 +103,16 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 
 // handleSkipLesson serves POST /api/lessons/{id}/skip: it marks the lesson
 // skipped, recording the optional {reason} in the lesson's error column, and
-// returns the updated lesson with 200. It reads the lesson first so an unknown
-// id maps cleanly to 404 (MarkSkipped's own miss error is not a wrapped
-// sql.ErrNoRows). An empty or missing body is allowed and skips with no reason;
-// a malformed body is a 400. A non-integer id is a 400.
+// returns the updated lesson with 200. Skip sticks: in the same transaction it
+// removes the lesson's queued, running and canceled jobs (SkipLesson), then it
+// kills a running download, whose worker then records nothing and removes what
+// that download wrote (its earlier, recorded files stay); syncs leave a
+// skipped lesson alone. It cancels rather than refusing while a download runs:
+// the user asked for the lesson not to be downloaded, and a refusal would only
+// send them to Cancel first. While a delete holds the lesson it answers 409
+// (msgSkipDeleting): the delete skips it anyway once the files are gone. An
+// unknown id is a 404; an empty or missing body skips with no reason; a
+// malformed body or a non-integer id is a 400.
 func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
@@ -115,21 +121,23 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 
 	var req skipLessonRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 
-	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+	running, err := s.store.SkipLesson(r.Context(), id, req.Reason)
+	switch {
+	case errors.Is(err, database.ErrLessonDeleting):
+		writeErr(w, http.StatusConflict, msgSkipDeleting)
+		return
+	case err != nil:
+		writeStoreErr(w, err, msgSkipGone)
 		return
 	}
-	if err := s.store.MarkSkipped(r.Context(), id, req.Reason); err != nil {
-		writeStoreErr(w, err, "lesson not found")
-		return
-	}
+	s.killRunning(running)
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgSkipGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -173,8 +181,10 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 // It first marks the lesson deleting and removes its queued, running and
 // canceled jobs (BeginLessonDelete), then kills a running download: no step of
 // a download already under way can record anything once the delete answers,
-// and no new one can start until it ends. From there the delete runs to the
-// end even if the client goes away, and always ends the mark. File removal
+// and no new one can start until it ends; a download that was under way
+// removes what it wrote, whatever the lesson's record says. From there the
+// delete runs to the end even if the client goes away, renews its hold on the
+// lesson while it runs, and always ends it (holdDelete). File removal
 // uses the RAW stored paths (container paths), NOT the host-mapped DTO
 // values, and follows the lesson's record (see removeLessonFiles). An unknown
 // id is a 404, a non-integer id a 400, a lesson already being deleted a 409.
@@ -192,11 +202,11 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgLessonGone)
 		return
 	}
 	ctx := context.WithoutCancel(r.Context())
-	defer s.endDelete(ctx, id)
+	defer s.holdDelete(ctx, id)()
 	s.killRunning(running)
 
 	c, err := s.claims(ctx)
@@ -204,22 +214,25 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 		err = s.deleteLessonFiles(ctx, c, l)
 	}
 	switch {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgLessonNoClaims)
+		return
 	case errors.Is(err, errFilesKept):
 		writeErr(w, http.StatusInternalServerError, msgLessonFilesKept)
 		return
 	case errors.Is(err, errRecordNotUpdated):
-		writeErr(w, http.StatusInternalServerError, msgLessonNotUpdated)
+		writeErr(w, http.StatusInternalServerError, msgLessonNotSaved)
 		return
 	case errors.Is(err, database.ErrLessonChanged):
 		writeErr(w, http.StatusConflict, msgLessonChanged)
 		return
 	case err != nil:
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgLessonGone)
 		return
 	}
 	updated, err := s.store.GetLesson(ctx, id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgLessonGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(updated))

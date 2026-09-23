@@ -9,6 +9,19 @@ import (
 	"strings"
 )
 
+// Roots is the list of folders a removal may act under: every non-empty dir
+// given (the downloads and library folders). Order does not matter: Remove
+// picks the longest root that holds a path.
+func Roots(dirs ...string) []string {
+	var roots []string
+	for _, d := range dirs {
+		if d != "" {
+			roots = append(roots, d)
+		}
+	}
+	return roots
+}
+
 // Remove removes path (a file, a symlink itself, or a folder with everything
 // in it) through the root that holds it, with os.Root, so no symlinked folder
 // on the way can make it act outside that root: such a path is refused ("path
@@ -17,11 +30,12 @@ import (
 // roots under another spelling (a symlink to it, or another mount of it),
 // decided by identity (os.SameFile), not by spelling.
 //
-// A path inside a root that is missing is already gone: nil. So is a path in
-// none of the roots that does not exist (a record written under a library path
-// that has since moved). A path that exists outside every root is refused, and
-// so is a root itself. Relative paths and roots are read from the working
-// directory, as the OS reads them.
+// A path inside a root that is missing is already gone: nil. A path in none of
+// the roots is refused whether it exists or not: a missing one may be a
+// lesson whose folder moved with a library mounted elsewhere since, so calling
+// it gone would report files deleted that are still on disk, untracked. A
+// root itself is refused too. Relative paths and roots are read from the
+// working directory, as the OS reads them.
 func Remove(roots []string, path string) error {
 	if path == "" {
 		return errors.New("refusing to remove an empty path")
@@ -30,9 +44,6 @@ func Remove(roots []string, path string) error {
 	root, rel, err := holdingRoot(roots, path)
 	if err != nil {
 		return err
-	}
-	if root == "" {
-		return nil // outside every root, and missing
 	}
 	r, err := os.OpenRoot(root)
 	if err != nil {
@@ -46,8 +57,7 @@ func Remove(roots []string, path string) error {
 }
 
 // holdingRoot finds the root that holds path and path relative to it (see
-// Remove). root == "" with a nil error means path is in none of them and does
-// not exist.
+// Remove), or refuses.
 func holdingRoot(roots []string, path string) (root, rel string, err error) {
 	for _, r := range roots {
 		if r == "" {
@@ -84,7 +94,7 @@ func holdingRoot(roots []string, path string) (root, rel string, err error) {
 		}
 	}
 	if _, lerr := os.Lstat(path); errors.Is(lerr, fs.ErrNotExist) {
-		return "", "", nil
+		return "", "", fmt.Errorf("%q is not inside the downloads or library folder (%q) and is not there: it may have moved with a folder mounted elsewhere since, so it is not reported as removed", path, roots)
 	}
 	return "", "", fmt.Errorf("%q is not safely inside any of %q; refusing to remove it", path, roots)
 }
@@ -102,6 +112,21 @@ func rootInfos(roots []string) map[string]os.FileInfo {
 		}
 	}
 	return out
+}
+
+// RemoveLessonFolder removes dir, a lesson's own folder (the default layout's
+// "NN - Title", or a download's scratch folder), whole, through Remove. It
+// refuses a folder not named like a lesson folder (a damaged row naming a show
+// or course folder), and one that holds a path a lesson other than self
+// records (Holds; self 0 counts every lesson).
+func (c *Claims) RemoveLessonFolder(roots []string, dir string, self int) error {
+	if !IsLessonFolder(dir) {
+		return fmt.Errorf("%q is not named like a lesson folder; refusing to remove it", dir)
+	}
+	if ids := c.Holds(dir, self); len(ids) > 0 {
+		return fmt.Errorf("%q holds files lessons %v record; refusing to remove it", dir, ids)
+	}
+	return Remove(roots, dir)
 }
 
 // samePath reports whether a and b are the same path once cleaned.

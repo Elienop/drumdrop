@@ -27,6 +27,10 @@ var syncFile = (*os.File).Sync
 
 // plexLibrary is what the plex-tv move needs to know beyond the lesson itself.
 type plexLibrary struct {
+	// downloads is the downloads folder the scratch lesson folder is in. The
+	// move reads and removes the scratch folder only through it (os.Root), so
+	// a symlink planted in downloads can not make it take files from elsewhere.
+	downloads string
 	// self is the lesson's row as it was before this download: its record (or,
 	// for a legacy row, its season folder and video) says which library entries
 	// are its previous files.
@@ -104,10 +108,15 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 //     every placed entry if one fails, and flushes copies to disk.
 //  5. It removes the scratch folder.
 //
-// Everything it writes or removes in the library goes through os.Root, so a
-// symlink planted in the library can not send a write or a removal outside it:
-// the season folder must resolve inside the library, and a copy creates each
-// entry afresh (O_EXCL), never writing through whatever is there.
+// Everything it reads, writes or removes goes through folders it holds open
+// (os.Root), never through a path read again later: the scratch lesson folder
+// must be a real folder inside downloads, the season folder must resolve
+// inside the library, a rename acts on the two open folders (renameAt; by path
+// only where the platform has no such call, Windows), and a copy creates each
+// entry afresh (O_EXCL), never writing through whatever is there. So a symlink
+// planted in either folder, or swapped in for one of them after it was opened,
+// can not send a write or a removal outside, and the move never copies a file
+// from outside downloads into the library.
 //
 // Whatever fails, one complete copy of the lesson is left in one place, and the
 // result says where to record it: seasonDir == "" means the lesson is whole in
@@ -116,22 +125,9 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 // record is what the lesson owns in the library either way. The error is for
 // the caller to LOG; the move is non-fatal and must never fail the job.
 func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string, lib plexLibrary) (plexMoveResult, error) {
-	scratchBase := filepath.Base(lessonDir)
-	// A malformed scratch base (root, escape, absolute) would make the per-file
-	// TrimPrefix meaningless and could read an unexpected dir; refuse it.
-	if scratchBase == "." || scratchBase == ".." || strings.HasPrefix(scratchBase, ".."+string(filepath.Separator)) || filepath.IsAbs(scratchBase) {
-		return plexMoveResult{}, fmt.Errorf("malformed scratch lesson dir %q", lessonDir)
-	}
 	roots := lib.roots
 	if len(roots) == 0 {
 		roots = []string{libraryDir}
-	}
-
-	seasonRel := filepath.Join(musora.Sanitize(show), library.SeasonName(season))
-	seasonDir := filepath.Join(libraryDir, seasonRel)
-	plan, err := planPlexTVMove(lessonDir, scratchBase, seasonDir, show, title, season, episode)
-	if err != nil {
-		return plexMoveResult{}, err
 	}
 	if _, _, rerr := library.Record(lib.self); rerr != nil {
 		return plexMoveResult{}, fmt.Errorf("refusing to move: the lesson's own record of its library files is damaged, so the lesson stays whole in downloads and its record as it is: %w", rerr)
@@ -139,6 +135,18 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	c := lib.claims
 	if c == nil {
 		return plexMoveResult{}, errors.New("refusing to move: the other lessons' claims were not read")
+	}
+	scratch, err := openScratch(lib.downloads, lessonDir)
+	if err != nil {
+		return plexMoveResult{}, err
+	}
+	defer scratch.close()
+
+	seasonRel := filepath.Join(musora.Sanitize(show), library.SeasonName(season))
+	seasonDir := filepath.Join(libraryDir, seasonRel)
+	plan, err := planPlexTVMove(scratch, lessonDir, seasonDir, show, title, season, episode)
+	if err != nil {
+		return plexMoveResult{}, err
 	}
 
 	self := lib.self.RailcontentID
@@ -191,7 +199,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	}
 
 	if lib.episodeNFO != nil {
-		if err := writeScratchNFO(filepath.Join(lessonDir, scratchBase+".nfo"), lib.episodeNFO); err != nil {
+		if err := writeScratchNFO(scratch.dir, scratch.base+".nfo", lib.episodeNFO); err != nil {
 			notes = append(notes, err)
 		}
 	}
@@ -200,9 +208,9 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	placed := make([]placedStep, 0, len(plan.steps))
 	copied := false
 	for _, st := range plan.steps {
-		renamed, err := placePlexStep(seasonRoot, st)
+		renamed, err := placePlexStep(seasonRoot, scratch.dir, st)
 		if err != nil {
-			stuck, uerr := undoPlexSteps(seasonRoot, placed)
+			stuck, uerr := undoPlexSteps(seasonRoot, scratch.dir, placed)
 			return plexMoveResult{kept: stuck, known: true}, errors.Join(append([]error{err, uerr}, notes...)...)
 		}
 		copied = copied || !renamed
@@ -210,7 +218,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	}
 	if copied {
 		if err := syncIn(seasonRoot, "."); err != nil {
-			stuck, uerr := undoPlexSteps(seasonRoot, placed)
+			stuck, uerr := undoPlexSteps(seasonRoot, scratch.dir, placed)
 			err = fmt.Errorf("flush season folder %q after the copy: %w", seasonDir, err)
 			return plexMoveResult{kept: stuck, known: true}, errors.Join(append([]error{err, uerr}, notes...)...)
 		}
@@ -222,22 +230,85 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	}
 	// 5. Every entry is in the library. Drop the scratch folder: it still holds
 	// the sources of copied entries, plus any non-regular file the plan left out.
-	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
+	if rmerr := scratch.remove(); rmerr != nil {
 		notes = append([]error{downloadsLeftoverErr(lessonDir, rmerr)}, notes...)
 	}
 	return res, errors.Join(notes...)
 }
 
-// writeScratchNFO replaces the download's own nfo in the scratch folder with
-// the episode nfo, so the move places it like every other entry. It writes
-// only over a regular file the download produced; none (or anything else) is
-// a note, not a failure.
-func writeScratchNFO(path string, content []byte) error {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("the download wrote no %q, so no episode nfo was written", filepath.Base(path))
+// scratchDir is a lesson's scratch folder in downloads, held open.
+type scratchDir struct {
+	// parent is the folder holding the lesson folder, opened inside downloads.
+	parent *os.Root
+	// base is the lesson folder's name in parent ("NN - Title"), which every
+	// file the download wrote starts with.
+	base string
+	// dir is the lesson folder itself.
+	dir *os.Root
+}
+
+// openScratch opens the scratch lesson folder lessonDir through the downloads
+// folder: lessonDir must be strictly inside downloads, reached without a
+// symlink that leads out of it, and itself a real folder (not a symlink).
+func openScratch(downloads, lessonDir string) (*scratchDir, error) {
+	if downloads == "" {
+		return nil, fmt.Errorf("refusing to move %q: no downloads folder was given", lessonDir)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	rel, err := filepath.Rel(downloads, lessonDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("refusing to move: lesson folder %q is not inside downloads %q", lessonDir, downloads)
+	}
+	dl, err := os.OpenRoot(downloads)
+	if err != nil {
+		return nil, fmt.Errorf("open downloads %q: %w", downloads, err)
+	}
+	defer dl.Close()
+	parent, err := dl.OpenRoot(filepath.Dir(rel))
+	if err != nil {
+		return nil, fmt.Errorf("open the folder of %q inside downloads: %w", lessonDir, err)
+	}
+	base := filepath.Base(rel)
+	info, err := parent.Lstat(base)
+	if err != nil {
+		parent.Close()
+		return nil, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+	}
+	if !info.IsDir() {
+		parent.Close()
+		return nil, fmt.Errorf("refusing to move %q: not a real folder (mode %s)", lessonDir, info.Mode().Type())
+	}
+	dir, err := parent.OpenRoot(base)
+	if err != nil {
+		parent.Close()
+		return nil, fmt.Errorf("open scratch lesson dir %q: %w", lessonDir, err)
+	}
+	return &scratchDir{parent: parent, base: base, dir: dir}, nil
+}
+
+func (s *scratchDir) close() {
+	s.dir.Close()
+	s.parent.Close()
+}
+
+// remove removes the scratch lesson folder, through its parent.
+func (s *scratchDir) remove() error {
+	return s.parent.RemoveAll(s.base)
+}
+
+// writeScratchNFO replaces the download's own nfo (name, in the scratch
+// folder dir) with the episode nfo, so the move places it like every other
+// entry. It writes only over a regular file the download produced; none (or
+// anything else) is a note, not a failure. It never writes through what is at
+// name: it writes a new file beside it (O_EXCL) and renames that over name, in
+// the folder it holds open, so a symlink swapped in at name after the check is
+// replaced, not followed.
+func writeScratchNFO(dir *os.Root, name string, content []byte) error {
+	info, err := dir.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("the download wrote no %q, so no episode nfo was written", name)
+	}
+	tmp := name + ".drumdrop-episode"
+	f, err := dir.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return fmt.Errorf("write the episode nfo: %w", err)
 	}
@@ -245,7 +316,11 @@ func writeScratchNFO(path string, content []byte) error {
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		err = dir.Rename(tmp, name)
+	}
 	if err != nil {
+		_ = dir.Remove(tmp)
 		return fmt.Errorf("write the episode nfo: %w", err)
 	}
 	return nil
@@ -290,21 +365,22 @@ type placedStep struct {
 	renamed bool
 }
 
-// placePlexStep puts one entry at its destination in the season folder: by
-// rename, or (on any rename error) by a copy made inside season, leaving the
-// source for the final scratch-folder removal. A copy that fails part-way, a
-// file or a folder, is removed again.
-func placePlexStep(season *os.Root, st plexMoveStep) (renamed bool, err error) {
-	rerr := rename(st.src, st.dst)
+// placePlexStep puts one entry at its destination in the season folder: by a
+// rename from the scratch folder (renameAt, on the two open folders), or (on
+// any rename error: another filesystem, an entry already there) by a copy made
+// inside season, leaving the source for the final scratch-folder removal. A
+// copy that fails part-way, a file or a folder, is removed again.
+func placePlexStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err error) {
+	name := filepath.Base(st.dst)
+	rerr := renameAt(scratch, st.name, season, name)
 	if rerr == nil {
 		return true, nil
 	}
-	name := filepath.Base(st.dst)
 	var cerr error
 	if st.dir {
-		cerr = copyTreeInto(season, name, st.src)
+		cerr = copyTreeInto(season, name, scratch, st.name)
 	} else {
-		cerr = copyFileInto(season, name, st.src, st.mode)
+		cerr = copyFileInto(season, name, scratch, st.name, st.mode)
 	}
 	if cerr != nil {
 		err := fmt.Errorf("copy %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
@@ -317,7 +393,7 @@ func placePlexStep(season *os.Root, st plexMoveStep) (renamed bool, err error) {
 // first: a renamed entry is renamed back into the scratch folder (it has no
 // other copy), a copied one is removed (its source never left). It returns the
 // entries still in the library, each also reported in the error.
-func undoPlexSteps(season *os.Root, placed []placedStep) (stuck []string, err error) {
+func undoPlexSteps(season, scratch *os.Root, placed []placedStep) (stuck []string, err error) {
 	var errs []error
 	for i := len(placed) - 1; i >= 0; i-- {
 		st := placed[i]
@@ -328,7 +404,7 @@ func undoPlexSteps(season *os.Root, placed []placedStep) (stuck []string, err er
 			}
 			continue
 		}
-		if rerr := rename(st.dst, st.src); rerr != nil {
+		if rerr := renameAt(season, filepath.Base(st.dst), scratch, st.name); rerr != nil {
 			stuck = append(stuck, st.dst)
 			errs = append(errs, fmt.Errorf("could not return %q to downloads; its only copy is left in the library at %q: %w", st.src, st.dst, rerr))
 		}
@@ -371,9 +447,13 @@ type plexMovePlan struct {
 // plexMoveStep is one entry of a scratch lesson folder and where the plex-tv
 // move puts it.
 type plexMoveStep struct {
-	src, dst string
-	dir      bool
-	mode     fs.FileMode
+	// name is the entry's name in the scratch folder; src is its path, for
+	// messages.
+	name, src string
+	// dst is where it goes in the season folder.
+	dst  string
+	dir  bool
+	mode fs.FileMode
 }
 
 // planPlexTVMove lists the scratch lesson folder in name order and names each
@@ -391,8 +471,8 @@ type plexMoveStep struct {
 // regular files; they go with the scratch folder). videoPath is the destination
 // of the first real lesson video in name order (isLessonVideoName), which for a
 // song is its [Drumless] version.
-func planPlexTVMove(lessonDir, scratchBase, seasonDir, show, title string, season, episode int) (plexMovePlan, error) {
-	entries, err := os.ReadDir(lessonDir)
+func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title string, season, episode int) (plexMovePlan, error) {
+	entries, err := fs.ReadDir(scratch.dir.FS(), ".")
 	if err != nil {
 		return plexMovePlan{}, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
 	}
@@ -409,7 +489,7 @@ func planPlexTVMove(lessonDir, scratchBase, seasonDir, show, title string, seaso
 	longest := 0
 	for _, e := range entries {
 		name := e.Name()
-		en := entry{step: plexMoveStep{src: filepath.Join(lessonDir, name), dir: e.IsDir()}}
+		en := entry{step: plexMoveStep{name: name, src: filepath.Join(lessonDir, name), dir: e.IsDir()}}
 		if en.step.dir {
 			en.suffix = " " + name
 		} else {
@@ -421,10 +501,10 @@ func planPlexTVMove(lessonDir, scratchBase, seasonDir, show, title string, seaso
 				continue // skip symlinks/devices: drumdrop only produces regular files
 			}
 			en.step.mode = info.Mode()
-			en.suffix = strings.TrimPrefix(name, scratchBase)
-			// The matcher runs on the SCRATCH name (against scratchBase), so
+			en.suffix = strings.TrimPrefix(name, scratch.base)
+			// The matcher runs on the SCRATCH name (against the scratch base), so
 			// yt-dlp fragments and strays are never chosen as the video.
-			en.video = isLessonVideoName(name, scratchBase)
+			en.video = isLessonVideoName(name, scratch.base)
 		}
 		longest = max(longest, len(en.suffix))
 		list = append(list, en)
@@ -467,40 +547,46 @@ func fitEpisodeBase(show, title string, season, episode, longestSuffix int) (str
 	return prefix + cut, nil
 }
 
-// copyTreeInto copies the folder src into dir as the new folder name,
-// recreating folders and copying regular files with their mode, then flushes
-// every copied folder to disk. It is the cross-filesystem fallback for a move
-// when a rename cannot move the folder across devices. Every folder and file is
-// created afresh inside dir (os.Root, no following a symlink planted at a
-// name): an existing name fails the copy. Non-regular entries inside (symlinks,
-// devices) are skipped. src itself must be a real folder: a symlink to one
-// would otherwise be walked as a single non-regular entry, copying nothing.
-func copyTreeInto(dir *os.Root, name, src string) error {
-	info, err := os.Lstat(src)
+// copyTreeInto copies the folder srcName of src into dir as the new folder
+// name, recreating folders and copying regular files with their mode, then
+// flushes every copied folder to disk. It is the cross-filesystem fallback for
+// a move when a rename cannot move the folder across devices. Both sides are
+// open folders (os.Root): the walk reads only inside src (a symlink in it is a
+// non-regular entry, skipped, never followed), and every folder and file is
+// created afresh inside dir (no following a symlink planted at a name): an
+// existing name fails the copy. srcName itself must be a real folder: a
+// symlink to one would otherwise be walked as a single non-regular entry,
+// copying nothing.
+func copyTreeInto(dir *os.Root, name string, src *os.Root, srcName string) error {
+	info, err := src.Lstat(srcName)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("refusing to copy %q: not a real folder (mode %s)", src, info.Mode().Type())
+		return fmt.Errorf("refusing to copy %q: not a real folder (mode %s)", filepath.Join(src.Name(), srcName), info.Mode().Type())
 	}
 	var dirs []string
-	err = filepath.Walk(src, func(path string, info fs.FileInfo, err error) error {
+	err = fs.WalkDir(src.FS(), srcName, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
+		rel, err := filepath.Rel(srcName, filepath.FromSlash(path))
 		if err != nil {
 			return err
 		}
 		target := filepath.Join(name, rel)
-		if info.IsDir() {
+		if d.IsDir() {
 			dirs = append(dirs, target)
 			return dir.Mkdir(target, 0o755)
 		}
-		if !info.Mode().IsRegular() {
+		if !d.Type().IsRegular() {
 			return nil // skip symlinks/devices: drumdrop only produces regular files
 		}
-		return copyFileInto(dir, target, path, info.Mode())
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return copyFileInto(dir, target, src, filepath.FromSlash(path), info.Mode())
 	})
 	if err != nil {
 		return err
@@ -513,24 +599,29 @@ func copyTreeInto(dir *os.Root, name, src string) error {
 	return nil
 }
 
-// copyFileInto writes src's bytes into the new file name inside dir with the
-// given mode, and flushes it to disk before returning, so the source can be
-// removed safely afterwards. The file is created afresh (O_EXCL, through
-// os.Root): it never writes through a file or a symlink already at name. src
-// must be a regular file. A failed copy removes what it created.
-func copyFileInto(dir *os.Root, name, src string, mode fs.FileMode) error {
-	info, err := os.Lstat(src)
+// copyFileInto writes the bytes of srcName (in the open folder src) into the
+// new file name inside dir with the given mode, and flushes it to disk before
+// returning, so the source can be removed safely afterwards. The source is
+// opened inside src (never outside it) and must be a regular file once open;
+// the destination is created afresh (O_EXCL, through os.Root): it never writes
+// through a file or a symlink already at name. A failed copy removes what it
+// created.
+func copyFileInto(dir *os.Root, name string, src *os.Root, srcName string, mode fs.FileMode) error {
+	info, err := src.Lstat(srcName)
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing to copy %q: not a regular file (mode %s)", src, info.Mode().Type())
+		return fmt.Errorf("refusing to copy %q: not a regular file (mode %s)", filepath.Join(src.Name(), srcName), info.Mode().Type())
 	}
-	in, err := os.Open(src)
+	in, err := src.Open(srcName)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	if st, err := in.Stat(); err != nil || !st.Mode().IsRegular() {
+		return fmt.Errorf("refusing to copy %q: not a regular file once opened (%v)", filepath.Join(src.Name(), srcName), err)
+	}
 
 	out, err := dir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
 	if err != nil {

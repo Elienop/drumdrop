@@ -124,14 +124,12 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
-	orig := rename
-	rename = func(oldpath, newpath string) error {
+	stubRename(t, func(oldpath, newpath string) error {
 		if strings.HasPrefix(newpath, lessonDir) || strings.Contains(oldpath, "[Original]") {
 			return errInjectedRename // the undo's rename back, and [Original] (then copied)
 		}
 		return os.Rename(oldpath, newpath)
-	}
-	t.Cleanup(func() { rename = orig })
+	})
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4")) // so its copy fails
 
 	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
