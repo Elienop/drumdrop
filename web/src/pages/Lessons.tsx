@@ -502,7 +502,7 @@ export function Lessons() {
           if (!open) setSkipping(null)
         }}
         title={skipping ? `Skip “${skipping.lesson.title}”?` : "Skip lesson?"}
-        description="Any queued or running download of it stops, and what that download had written is discarded; files from earlier downloads stay. Syncs leave a skipped lesson alone until you un-skip it."
+        description="Any queued or running download of it stops, and what that download had written is discarded. Syncs leave a skipped lesson alone until you un-skip it."
         confirmLabel="Skip"
         pendingLabel="Skipping…"
         confirmVariant="default"

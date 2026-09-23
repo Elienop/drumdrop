@@ -774,10 +774,11 @@ it("Enter in the skip reason skips, and the reason's label dims with its field w
   renderLessons()
 
   const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
-  // It says what Skip does now: the download stops and its partial output
-  // goes, but files from earlier downloads stay.
+  // It says what Skip does now: the download stops and what it wrote goes.
+  // It promises nothing about earlier files: yt-dlp's --force-overwrites
+  // deletes a kept video as soon as a re-download starts (BACKLOG D66).
   expect(dialog).toHaveAccessibleDescription(
-    "Any queued or running download of it stops, and what that download had written is discarded; files from earlier downloads stay. Syncs leave a skipped lesson alone until you un-skip it.",
+    "Any queued or running download of it stops, and what that download had written is discarded. Syncs leave a skipped lesson alone until you un-skip it.",
   )
   const reason = within(dialog).getByLabelText("Reason (optional)")
   await user.type(reason, "too hard{Enter}")
