@@ -874,15 +874,65 @@ it("Enter previews from either instructor field, where a form with two fields wo
   expect(previews).toEqual(["?slug=jared-falk&brand=drumeo"])
 })
 
-it("the instructor field says what it takes: a name or a slug, like jared-falk", async () => {
+it("the instructor field says what it takes: a name, a slug or a link, like jared-falk", async () => {
   server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])))
   const user = renderAdd()
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
   const dialog = await screen.findByRole("dialog")
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
 
-  const field = within(dialog).getByRole("textbox", { name: "Name or slug" })
-  expect(field).toHaveAccessibleDescription("The instructor's name or slug, like jared-falk.")
+  const field = within(dialog).getByRole("textbox", { name: "Name, slug or link" })
+  expect(field).toHaveAccessibleDescription("The instructor's name, slug or link, like jared-falk.")
+})
+
+it("an instructor preview ends its count with the brand the follow would use", async () => {
+  const sent: { slug: string | null; brand: string | null }[] = []
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, ({ request }) => {
+      const q = new URL(request.url).searchParams
+      sent.push({ slug: q.get("slug"), brand: q.get("brand") })
+      // The server settles the brand from the link, as Brand was left empty.
+      return HttpResponse.json({
+        title: "Jared Falk",
+        lesson_count: 12,
+        kind: "instructor",
+        slug: "jared-falk",
+        brand: "pianote",
+      })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  const link = "https://www.musora.com/pianote/coaches/jared-falk/314120"
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), `${link}{Enter}`)
+
+  expect(await within(dialog).findByText("12 lessons on Pianote")).toBeInTheDocument()
+  expect(sent).toEqual([{ slug: link, brand: null }])
+})
+
+it("a brand without a known name previews as the server sent it", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () =>
+      HttpResponse.json({
+        title: "Jared Falk",
+        lesson_count: 3,
+        kind: "instructor",
+        slug: "jared-falk",
+        brand: "playbass",
+      }),
+    ),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "jared-falk{Enter}")
+
+  expect(await within(dialog).findByText("3 lessons on playbass")).toBeInTheDocument()
 })
 
 it("an instructor preview shows the slug the server normalised to, and Add still sends what was typed", async () => {
@@ -908,7 +958,7 @@ it("an instructor preview shows the slug the server normalised to, and Add still
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
   const dialog = await screen.findByRole("dialog")
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
-  await user.type(within(dialog).getByRole("textbox", { name: "Name or slug" }), "Jared Falk{Enter}")
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "Jared Falk{Enter}")
 
   expect(await within(dialog).findByText("@jared-falk")).toBeInTheDocument()
   expect(previews).toEqual(["Jared Falk"])
@@ -917,7 +967,7 @@ it("an instructor preview shows the slug the server normalised to, and Add still
   await waitFor(() => expect(created).toMatchObject({ kind: "instructor", slug: "Jared Falk" }))
 })
 
-it("a node preview shows no slug", async () => {
+it("a node preview shows no slug and no brand", async () => {
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, previewOf),
@@ -929,10 +979,13 @@ it("a node preview shows no slug", async () => {
 
   expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
   expect(within(dialog).queryByText(/^@/)).not.toBeInTheDocument()
+  expect(within(dialog).getByText("9 lessons")).toBeInTheDocument()
 })
 
 it("an instructor input nothing can normalise shows the server's sentence inline", async () => {
-  const BAD = "That can't be looked up. Enter an instructor's name or slug, like jared-falk, then Preview again."
+  // msgBadSlug, verbatim from internal/server/messages.go.
+  const BAD =
+    "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a link to their coach page. Then Preview again."
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: BAD }, { status: 400 })),
@@ -941,9 +994,33 @@ it("an instructor input nothing can normalise shows the server's sentence inline
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
   const dialog = await screen.findByRole("dialog")
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
-  await user.type(within(dialog).getByRole("textbox", { name: "Name or slug" }), "??{Enter}")
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "??{Enter}")
 
   await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(BAD))
+  expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
+})
+
+it("a coach link typed into the Node tab shows the server's sentence inline", async () => {
+  // msgNoContentID, verbatim from internal/server/messages.go: what the server
+  // answers a link with no number in it, such as a coach page without its id.
+  const NO_ID =
+    "No content id was found in “URL or id”: it needs the number of a lesson or course. Enter the id, or a link that contains it, then Preview again."
+  const sent: (string | null)[] = []
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, ({ request }) => {
+      sent.push(new URL(request.url).searchParams.get("id"))
+      return HttpResponse.json({ error: NO_ID }, { status: 400 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const link = "https://www.musora.com/drumeo/coaches/jared-falk"
+  await user.type(within(dialog).getByLabelText(/url or id/i), `${link}{Enter}`)
+
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(NO_ID))
+  expect(sent).toEqual([link])
   expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })
 

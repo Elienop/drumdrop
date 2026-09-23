@@ -69,6 +69,10 @@ export interface PreviewResponse {
   // Instructor only (omitted for node): the slug the follow will use, which
   // the server normalises from what was typed ("Jared Falk" → "jared-falk").
   slug?: string
+  // Instructor only (omitted for node): the brand the follow will use, once a
+  // pasted coach link's brand and the Brand field are reconciled ("pianote"
+  // for a pianote link with Brand left empty). lesson_count is counted in it.
+  brand?: string
 }
 
 export interface SessionResponse {

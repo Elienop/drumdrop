@@ -53,10 +53,23 @@ interface Preview {
 
 const targetKey = (t: Target) => JSON.stringify(t)
 
+// Musora's own names for its brands, for the preview's "40 lessons on
+// Pianote": the server sends the lower-case value the Brand field takes. A
+// brand not listed here shows as the server sent it, not as a guessed
+// capitalisation.
+const BRAND_NAMES: Record<string, string> = {
+  drumeo: "Drumeo",
+  pianote: "Pianote",
+  guitareo: "Guitareo",
+  singeo: "Singeo",
+}
+
+const brandName = (brand: string) => BRAND_NAMES[brand] ?? brand
+
 // AddFollowDialog is the preview-then-add flow: a segmented kind control
-// (node | instructor), an input (URL-or-id for node, name-or-slug + optional
-// brand for instructor), a Preview button that fetches the title +
-// lesson_count (and, for an instructor, the slug it resolves to), and an
+// (node | instructor), an input (URL-or-id for node; name, slug or coach link,
+// + optional brand, for instructor), a Preview button that fetches the title +
+// lesson_count (and, for an instructor, the slug and brand it resolves to), and an
 // Add button that registers the follow. createFollow resolves to { status,
 // data }: 201 → newly created ("Follow added"), 200 → already following.
 //
@@ -229,9 +242,9 @@ export function AddFollowDialog({
           <TabsContent value="instructor" className="flex flex-col gap-4 pt-2">
             <div className="flex flex-col gap-2">
               {/* Named for what to type, like the node tab's "URL or id"; the
-                  tab already says it is an instructor. Links are not claimed:
-                  the server has not promised to take one. */}
-              <Label htmlFor="follow-slug">Name or slug</Label>
+                  tab already says it is an instructor. A link is a coach
+                  page's, whose brand the follow takes when Brand is empty. */}
+              <Label htmlFor="follow-slug">Name, slug or link</Label>
               <Input
                 id="follow-slug"
                 placeholder="Jared Falk"
@@ -242,7 +255,7 @@ export function AddFollowDialog({
                 onKeyDown={onFieldEnter}
               />
               <p id={slugHintId} className="text-sm text-muted-foreground">
-                The instructor's name or slug, like jared-falk.
+                The instructor's name, slug or link, like jared-falk.
               </p>
             </div>
             <div className="flex flex-col gap-2">
@@ -280,7 +293,9 @@ export function AddFollowDialog({
         {shown && (
           <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
             {/* The slug beside the name is what will be followed, whatever
-                was typed: "Jared Falk" previews as @jared-falk. */}
+                was typed: "Jared Falk" previews as @jared-falk. The brand
+                ends the count line, as the count is of that brand's lessons:
+                a pianote link with Brand empty reads "… lessons on Pianote". */}
             <div className="flex flex-wrap items-baseline gap-x-2">
               <span className="font-medium">{shown.data.title}</span>
               {shown.data.slug && (
@@ -291,6 +306,7 @@ export function AddFollowDialog({
             </div>
             <span className="text-sm text-muted-foreground">
               {shown.data.lesson_count} lessons
+              {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
             </span>
           </div>
         )}
