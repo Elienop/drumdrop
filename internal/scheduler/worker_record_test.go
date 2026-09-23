@@ -63,6 +63,33 @@ func TestWorkerPlexTvRecordsWhatTheMovePlaced(t *testing.T) {
 	}
 }
 
+// TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace proves the episode nfo
+// is only ever written over the nfo the move itself placed. A download that
+// produced none moves without one, and the name it would have used, which the
+// move never checked, may be another lesson's file: it is left alone, and the
+// lesson records only what was placed.
+func TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace(t *testing.T) {
+	w, store, dl, _, season := plexWorker(t)
+	dl.afterWrite = func(dir string) {
+		if err := os.Remove(filepath.Join(dir, "05 - Lesson A.nfo")); err != nil {
+			t.Errorf("drop the download's nfo: %v", err)
+		}
+	}
+	base := "Beginner Course - s01e05 - Lesson A"
+	seedSeason(t, season, base+".nfo")
+	store.withFiles = []database.Lesson{recordedRow(200, season, base+".nfo")}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(season, base+".nfo")); string(got) != base+".nfo" {
+		t.Errorf("the other lesson's nfo = %q, want it untouched", got)
+	}
+	if rec := onlyRecord(t, store); !reflect.DeepEqual(rec.entries, paths(season, base+".mp4")) {
+		t.Errorf("entries = %v, want only the placed video", rec.entries)
+	}
+}
+
 // TestWorkerPlexTvReDownloadReplacesByRecord proves a re-download removes the
 // lesson's previously recorded entries (here under an old title) and never
 // another lesson's at the same episode number.
