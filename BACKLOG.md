@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D95 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D96 on 2026-09-24 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -177,6 +177,28 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'Check them, then delete the folder' internal/scheduler/private.go` ·
     `grep -n 'const plexIgnore' internal/scheduler/private.go` ·
     `go test -count=1 -run 'SweepPrivateRemovesOnlyStoppedDownloads|NeverReusesTheAreaACrashLeft' ./internal/scheduler/`
+- **D95 · Only a `daemon` or `serve` start recovers from a crash.**
+  - *What:* (a) `sync` and `daemon --once` run no startup recovery (`Daemon.Recover`).
+    `SweepPrivate` skips only the jobs its own worker is running (`isRunning` reads the
+    worker's in-memory map), so run from `sync` it would delete the folder a live `serve`
+    is downloading into, and `RequeueStaleRunning` would queue that download again. The
+    jobs table can't stand in: a canceled job still uses its folder while its worker undoes
+    a placement, and a queued job can be claimed between a check and the removal.
+    (b) A killed `sync` leaves its job `running`, and the planner won't queue a lesson that
+    has a running job, so a user who only runs `sync` never gets that lesson back until a
+    `daemon` or `serve` start. (c) A killed one-shot `drumdrop <id | url>` leaves its
+    `.drumdrop-in-progress/run-<pid>-<k>/` folder, and nothing removes it (it is hidden from
+    Plex like the rest). (d) `daemon --once` has no `Ctrl-C` handling either, so an
+    interrupt leaves yt-dlp running in its own process group.
+  - *Why:* a CLI-only user is left with a stuck lesson or a stray folder after a crash;
+    `sync` itself now stops cleanly on `Ctrl-C`, which removes the common cause.
+  - *Fix (new mechanism, needs the owner's call):* a process-liveness signal, e.g. a lock
+    that `daemon`, `serve` and `sync` hold for their lifetime, so recovery runs only when no
+    other process is alive; or `sync` requeues only the jobs it ran itself (a worker
+    change). (d) is a corrected line: the same `signal.NotifyContext` as `daemon` and `sync`.
+  - *Evidence:* `grep -n 'func (w \*Worker) isRunning' -A6 internal/scheduler/private.go` ·
+    `grep -n 'sync runs no startup recovery' -A8 cmd/drumdrop/follow.go` ·
+    `grep -n 'RunOnce(context.Background())' cmd/drumdrop/daemon.go`
 - **D80 · A Skip that lands between the planner's check and its enqueue is downloaded
   anyway.**
   - *What:* the planner asks `ShouldSkipEnqueue`, then calls `EnqueueJob`, which refuses
@@ -990,7 +1012,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     `running`, and the next `daemon` or `serve` start requeues it and removes every stopped
     job's folder, in downloads and in the library (`Daemon.Recover`), keeping and logging
     any `replaced-<id>` folder. A download confirmed just before a shutdown is still placed
-    and recorded. `sync` clears a stopped download's folder too when it starts, and the
+    and recorded. `sync` stops cleanly on `Ctrl-C` (yt-dlp is killed and its folder
+    removed) but runs no startup recovery (D95), and the
     one-shot `drumdrop <lessonOrCourseId | musoraUrl>` no longer loses a file already in
     its lesson folder when its download fails. The README says so.
   - *Evidence:* `go test -count=1 -run 'StoppedReDownload|ReplacesOnlyTheLessons|ReplacesThePreviousFolder|ClaimedAgain|SweepPrivate|RecoverSweeps|Shutdown|RefusesItsOwnSource|AliasedToItsSource|NeverReusesTheArea|CanceledDuringTheFetches|NeverTouchesAFolder' ./internal/scheduler/ ./internal/musora/`

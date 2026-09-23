@@ -290,8 +290,10 @@ removing them. A record that fails (a database error) undoes it the same way, an
 download is tried again.
 
 If drumdrop dies during a download (a crash, or the process killed), the download's folder
-stays; the next `daemon` or `serve` start removes it and queues the download again, and
-`sync` removes it too when it starts. If drumdrop dies while a download is being placed, a
+stays; the next `daemon` or `serve` start removes it and queues the download again.
+`sync` doesn't: it can't tell a crashed download from one a running `serve` is doing, so it
+leaves both (BACKLOG D95). `Ctrl-C` during `sync` stops the download and removes its folder.
+If drumdrop dies while a download is being placed, a
 `replaced-<id>` folder can stay as well. It may hold the only copy of a lesson's earlier
 files, so drumdrop never removes one: every `daemon` or `serve` start logs it (`kept "…":
 files a placement set aside when DrumDrop stopped. Check them, then delete the folder`),
