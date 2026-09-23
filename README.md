@@ -235,6 +235,12 @@ copy that fails part-way is taken back out of the library, so the lesson stays w
 downloads dir; if the copy finished but the downloads copy can't be removed, the library
 copy is kept and recorded. Anything drumdrop could not clean up is logged with its path.
 
+A download that died part-way (a crash, or the process killed) can leave partial files in
+its lesson folder: yt-dlp's `.part`, `.ytdl`, `.f<number>.<ext>` and `.temp.<ext>` files,
+and drumdrop's own `.drumdrop-part` and `.drumdrop-episode`. Before a lesson moves into the
+library, drumdrop removes them from its folder and its subfolders, so none of them reaches
+the library.
+
 drumdrop refuses to start when `DRUMDROP_LIBRARY_DIR` is the downloads dir reached by
 another path (a symlink, or one host folder bound twice), because a move would then delete
 the only copy. The same path written the same way is allowed. In the default layout every
@@ -258,22 +264,44 @@ A delete stops the lesson's downloads first. While it runs, the lesson can't be 
 retried, skipped or deleted again (each is refused until it finishes), so a delete never
 removes files a newer download just wrote; the API's lesson says so (`deleting`). A delete
 holds the lesson for two minutes at a time and renews that while it runs, so if drumdrop
-stops in the middle of one, the lesson is released by itself two minutes later. A download
-a delete stops leaves nothing behind that no lesson records: what it had written is
-removed, except anything another lesson records. Removing a follow *without* its files
-removes nothing the downloads finished: they stop, what they had written stays, and only
-yt-dlp's partial files go. It never stops another follow's download, even one it queued.
-Canceling a re-download leaves a lesson that still has its earlier files as downloaded.
+stops in the middle of one, the lesson is released by itself two minutes later. When a
+delete stops a download, what that download wrote is removed, except anything another
+lesson records. If the lesson's folder was already there when that download started, and
+the lesson's own record did not name it (say, a folder kept when its follow was removed
+without its files), only partial files go from it, and nothing the download placed in the
+library is removed.
+Removing a follow *without* its files removes nothing the downloads finished: they stop,
+what they had written stays, and only partial files go. It never stops another follow's
+download, even one it queued. Canceling a re-download leaves a lesson that still has its
+earlier files as downloaded (but see below: yt-dlp may already have deleted its video).
 
 Skipping a lesson stops its queued or running download for good: that download records
-nothing, and what it had written is removed (the lesson's earlier, recorded files stay).
-Syncs then leave the lesson alone until it is un-skipped. A download that fails every
-attempt removes its lesson folder from the downloads dir, unless a lesson records something
-in it; then, or if the records can't be read, only yt-dlp's partial files go. A download
-whose result could not be recorded (the lesson's own record, or with a library the other
-lessons' records, can't be read) is not started at all: the lesson is marked failed and
-tried again next cycle. Whenever the records can't be read, a stopped or failed download
-removes nothing but, at most, yt-dlp's partial files.
+nothing, and what it wrote is removed, except anything a lesson records (the lesson's own
+earlier files included). If the lesson's folder was already there when the download started
+(say, one kept when its follow was removed without its files), only partial files go from
+it, and nothing the download placed in the library is removed. Syncs then leave the lesson
+alone until it is un-skipped. One narrow window is not covered: a Skip that lands while the
+finished download is being moved into the library, when the download created its lesson
+folder. In the plex-tv layout, if the lesson's title or episode number changed since its
+last download, the move has already removed the earlier episode files, and the Skip then
+removes the new ones, so both are gone. In the default layout, a library folder at the
+lesson's name that no lesson records (say, one kept when its follow was removed without its
+files) is replaced by the move, and the Skip then removes the new one (BACKLOG D79).
+
+A download that fails every attempt removes its lesson folder from the downloads dir only
+if that download created it and no lesson records something in it; otherwise, or if the
+records can't be read, only partial files go. A download whose result could not be recorded
+(the lesson's own record, or with a library the other lessons' records, can't be read) is
+not started at all: the lesson is marked failed and tried again next cycle. Whenever the
+records can't be read, a stopped or failed download removes nothing but, at most, partial
+files.
+
+yt-dlp itself deletes a lesson's existing video (and its subtitles) before it downloads a
+new one: drumdrop runs it with `--force-overwrites`, so a truncated file is never kept as
+finished. So when a lesson's earlier video is in the downloads dir (as it is with no
+library, or with the library the downloads dir), a new download of it that then fails, is
+skipped or is canceled has already lost that video, and the lesson's record may still name
+it. A folder of its own for each download would fix this (BACKLOG D66).
 
 drumdrop writes the files it fetches itself (the poster, resources, play-along audio,
 sheet music and the `.nfo`) through the downloads dir it holds open, never through a
@@ -328,12 +356,18 @@ Each course becomes one *show*, each lesson an *episode*:
   and removal in the library goes through the library folder itself, so a symlink planted
   in it can't send one outside: the season folder must resolve inside the library, each
   copied file is created afresh rather than written through whatever is at its name, and
-  on Linux and macOS each rename acts on the folders drumdrop holds open and never
-  replaces an entry, so a folder swapped for a symlink after the checks can't redirect it
-  either. On Windows the rename goes by path, so that last guarantee does not hold there.
-  The default layout's move works the same way, and never replaces a library folder
-  another lesson records (the lesson stays in downloads, logged). A file at one
-  of its names that no lesson claims (say, one kept when a follow was deleted without its
+  on Linux and macOS each rename acts on the folders drumdrop holds open, so a folder
+  swapped for a symlink after the checks can't redirect it either. A rename there also
+  refuses an entry already at its name (`RENAME_NOREPLACE`, `RENAME_EXCL`), except on a
+  filesystem without that flag (some network filesystems), where it retries without it and
+  replaces. When a rename refuses, the move refuses: the lesson stays whole in downloads,
+  recorded there, and the entry in the way is neither removed nor copied into. drumdrop
+  copies instead of renaming only when downloads and the library are on different
+  filesystems (volumes on Windows), and a copy that fails removes only what it created. On
+  Windows the rename goes by path and replaces an existing entry, so neither guarantee
+  holds there. The default layout's move works the same way, and never replaces a library
+  folder another lesson records (the lesson stays in downloads, logged). A file at one of
+  its names that no lesson claims (say, one kept when a follow was deleted without its
   files) is replaced, and that is logged. A name too long for the filesystem (255 bytes)
   has its title shortened; if even that can't fit, the move is refused.
 - It shapes **only** the library move: downloads still happen in the usual scratch layout,

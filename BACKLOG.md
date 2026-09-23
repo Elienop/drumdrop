@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D79 on 2026-09-23 (*moves*; re-check the
+the highest ID on this page: the next new ID is D89 on 2026-09-23 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -134,15 +134,71 @@ D53 waits on an owner decision.
 - **D66 · What a stopped download wrote is known by its folder, not exactly.**
   - *What:* a download writes into the lesson's scratch folder (`<downloads>/<Course>/NN -
     Title`), shared with whatever is already there: an earlier download of the same lesson,
-    or a copy kept in downloads when a library move failed. When a delete or a Skip stops
-    the download, or it fails every attempt, the worker removes that whole folder unless a
-    lesson row records something in it (for a delete of the lesson's files, a row other than
-    the lesson's own), so an *untracked* leftover of that lesson in the same folder goes
-    with it. A private folder per job (`.drumdrop-job-<id>`), renamed into place on
-    success, would make "what this job wrote" exact.
-  - *Why:* removing an untracked leftover is what the stopper wanted anyway, so this is
-    exactness, not data loss; but the rule would then be provable rather than argued.
-  - *Evidence:* `grep -n 'func (w \*Worker) discardAbandoned\|func (w \*Worker) dropFailedDownload' -A30 internal/scheduler/worker_record.go`
+    a copy kept in downloads when a library move failed, or a folder kept when a follow was
+    removed without its files. Without a library (or with the library the downloads folder)
+    that folder is the lesson's permanent home. drumdrop can't tell which files in it a
+    download wrote, so it goes by the folder: before the first attempt the worker reads
+    whether the folder exists and whether the lesson's own row names it (`lessonFolder`).
+    When a delete or a Skip stops the download, or it fails every attempt, a folder the job
+    created is removed whole unless a lesson row records something in it (for a delete of
+    the lesson's files, a row other than the lesson's own). A folder that was already there
+    loses only its partial files, and nothing a move placed from it is removed; only a
+    delete of the lesson's files still takes the folder the lesson's own row named. Two gaps
+    remain. (a) A download that wrote into a folder that was already there leaves its own
+    new files there, untracked. (b) yt-dlp runs with `--force-overwrites`, so it deletes an
+    existing `<base>.mp4` (and its subtitles) before it downloads the new one
+    (`existing_file` in yt-dlp's `YoutubeDL.py`). In the default setup (no library, or the
+    library the downloads folder) a re-download that then fails, is skipped or is canceled
+    has lost the earlier video, and the lesson's record may still name it. This predates
+    the branch: `main` passes the same flag. A private folder per job
+    (`.drumdrop-job-<id>`), renamed into place on success, would make "what this job wrote"
+    exact and close both.
+  - *Why:* (b) is data loss in the default setup through normal actions: a lesson whose
+    follow was removed with its files kept, then followed again, loses its kept video if
+    the new download fails; a Download of a lesson that has files loses its video if that
+    download fails, or is skipped or canceled. Earlier on this branch (never released) it
+    was worse: a failure or a Skip removed a kept folder no row recorded, video, PDFs and
+    all (security round 4, MEDIUM-1); `1c7f50f` fixed that. What remains is (a), which is
+    exactness, and (b), which only the private folder fixes.
+  - *Evidence:* `grep -n 'func newLessonFolder\|func (f lessonFolder) keeps\|func (w \*Worker) discardAbandoned\|func (w \*Worker) dropFailedDownload' internal/scheduler/worker_record.go`
+    · `grep -n 'force-overwrites' internal/musora/download.go` ·
+    `grep -n 'def existing_file' -A8 "$(python3 -c 'import os, yt_dlp; print(os.path.dirname(yt_dlp.__file__))')/YoutubeDL.py"`
+- **D79 · A Skip during a library move can lose the lesson's earlier files.**
+  - *What:* the move runs after the download is confirmed and before `FinishDownload`
+    reads the Skip, and a Skip's kill stops only yt-dlp, so a Skip that lands during the
+    move is seen only once the move is done. In the plex-tv layout the move first removes
+    the lesson's previous recorded download (step 2), then places the new one; when the
+    title or episode number changed, no row claims the new names, so the Skip's discard
+    removes them too. The season folder ends empty while the row still records the old
+    names (security round 4, LOW-3; code round 4, #3). The default layout has the same
+    shape when the move replaced a library folder no lesson records (say, one kept when a
+    follow was removed without its files): the discard then removes the only copy. Both
+    need the download to have created its scratch folder; otherwise nothing the move placed
+    is removed (D66).
+  - *Why:* the move's irreversible step comes before the guarded write that would have
+    refused it. The window is as long as the move, which is only long on a copy across
+    filesystems. The README says so.
+  - *Fix (new mechanism, can wait):* re-confirm the job right before the first
+    irreversible step, or place the new entries before removing the old ones.
+  - *Evidence:* `grep -n 'previous download goes first' internal/scheduler/plexmove.go` ·
+    `grep -n 'parent.RemoveAll(leaf)' internal/scheduler/library.go` ·
+    `grep -n 'ErrDownloadAbandoned' -A3 internal/scheduler/worker_record.go`
+- **D80 · A Skip that lands between the planner's check and its enqueue is downloaded
+  anyway.**
+  - *What:* the planner asks `ShouldSkipEnqueue`, then calls `EnqueueJob`, which refuses
+    only a lesson being deleted. It can't refuse skipped lessons in general, because a
+    manual *Download* must work on them. So a Skip committed between the two (or a whole
+    delete, whose tombstone skips the lesson and ends its lease) is followed by a full
+    download, recorded as downloaded (code round 4, #5: a probe on the real store ended
+    `downloaded`).
+  - *Why:* it breaks the Skip dialog's promise that syncs leave a skipped lesson alone. The
+    window is about as long as the Skip's transaction.
+  - *Fix (new mechanism, can wait):* an enqueue only the planner uses, which re-checks the
+    skip predicate in the same transaction (`INSERT … SELECT … WHERE NOT EXISTS (… status
+    IN ('downloaded','skipped'))`). It changes the `scheduler.Store` interface, so all five
+    implementers change with it (hard rule 6).
+  - *Evidence:* `sed -n 130,170p internal/scheduler/planner.go` ·
+    `grep -n 'func (s \*Store) EnqueueJob' -A5 internal/database/jobs.go`
 - **D68 · Without a token, the live-progress stream never opens.**
   - *What:* `web/src/lib/sse.tsx` returns early when there is no token (`if (!token) {
     setConnected(false); return }`), so in tokenless loopback mode (allowed, hard rule 11)
@@ -157,6 +213,17 @@ D53 waits on an owner decision.
     (round-3 browser check, BV4).
   - *Why:* the UI is unusable on a phone.
   - *Evidence:* open the app at 375px wide.
+- **D82 · The Add and Edit follow dialogs scroll as a whole.**
+  - *What:* both put `overflow-y-auto` on the whole dialog, capped at the viewport height.
+    They are centred and never re-anchored, so their buttons can't move under the pointer,
+    but on a very short screen the footer can scroll out of view. The confirm dialogs no
+    longer do this (round-4 UI review, N1): only their body scrolls, and the message and
+    the buttons stay in view while the two fit under the cap. That holds because the
+    server's messages stay at 220 characters or fewer (`maxMessageLen`, checked on every
+    message by a test).
+  - *Why:* low priority: the owner doesn't use the app on a phone (decisions #68, *"i dont
+    really use my phone for this app"*), and D69 already blocks phones.
+  - *Evidence:* `grep -n 'overflow-y-auto' web/src/pages/follows/AddFollowDialog.tsx web/src/pages/follows/EditFollowDialog.tsx web/src/components/ConfirmDialog.tsx`
 - **D70 · "Copy path" is offered for a lesson with no files.**
   - *What:* the Lessons row menu shows *Copy path* unconditionally, so a pending lesson with
     no files offers a path that does not exist (round-3 browser check, BV5; the item was at
@@ -170,13 +237,24 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'h-8\|h-9\|size-8\|size-9' web/src/components/ui/button.tsx`
 - **D72 · On Windows the library move renames by path.**
   - *What:* on Linux and macOS each rename of the move acts on the folders it holds open
-    (`renameat2`/`renameatx_np`, never replacing an entry), so a folder swapped for a
-    symlink between the move's checks and its rename can't redirect it. Windows has no such
-    call in Go's reach, so `renameat_other.go` renames by path: there, that swap still
-    redirects the placement. Needs write access to the library and a race.
+    (`renameat2`/`renameatx_np`), so a folder swapped for a symlink between the move's
+    checks and its rename can't redirect it, and an entry already at the destination makes
+    the rename, and so the move, refuse (except on a filesystem without the no-replace
+    flag, where it retries without it). On Windows `renameat_other.go` still renames by
+    path, with `os.Rename`, which is `MoveFileEx(..., MOVEFILE_REPLACE_EXISTING)`: there,
+    that swap still redirects the placement, and an entry that appeared at the destination
+    after the checks is replaced. The call is in Go's reach: `os.Root.Rename` renames
+    relative to folder handles on Windows (`$(go env GOROOT)/src/internal/syscall/windows/at_windows.go`,
+    `NtSetInformationFile` with a root handle), but it replaces an existing entry, and
+    `golang.org/x/sys` v0.42.0 exports what a no-replace version across two folders needs
+    (`NtCreateFile`, `NtSetInformationFile`, `OBJECT_ATTRIBUTES.RootDirectory`,
+    `FileRenameInformation`). A move across volumes falls back to the copy on
+    `ERROR_NOT_SAME_DEVICE` (`crossdevice_windows.go`), which creates every entry afresh.
+    Needs write access to the library and a race.
   - *Why:* the one platform where "nothing lands outside the library, even under a race"
     does not hold.
-  - *Evidence:* `cat internal/scheduler/renameat_other.go`
+  - *Evidence:* `cat internal/scheduler/renameat_other.go internal/scheduler/crossdevice_windows.go` ·
+    `grep -n 'func Renameat' -A25 "$(go env GOROOT)/src/internal/syscall/windows/at_windows.go"`
 - **D73 · yt-dlp writes the video into downloads by path.**
   - *What:* every file drumdrop writes itself goes through `os.Root` on the downloads
     folder (`musora.DownloadOpts.Root`, `writeInRoot`), but yt-dlp is given an output path
@@ -201,13 +279,50 @@ D53 waits on an owner decision.
   - *What:* `Daemon.Recover` requeues every `running` job at startup, which is only right
     when no other process is downloading; the README says to run one `daemon` or `serve`
     per database. Separately, a delete holds its lessons by a two-minute lease it renews
-    every 30 seconds; if its renewals fail for two minutes while it still runs, a second
-    delete (or a download) could start on the same lesson, and the first one's end would
-    clear the second's hold.
-  - *Why:* both need a second process, or a database failing for minutes mid-delete. A
-    process lock on the database, and a holder token on the lease, would close them.
+    every 30 seconds. The lease race needed neither a second process nor a failing
+    database: one follow delete plus one lesson delete in the same process was enough
+    (security round 4, LOW-1). The follow delete's tombstone of lesson 1 ended lesson 1's
+    lease, a lesson delete took lesson 1, and the follow delete's final end cleared that
+    new lease. Fixed minimally on `fix-library-delete-and-move` (`36a0b0d`): a delete's hold
+    drops each lesson its own tombstone or keep finished, and renews and ends only what it
+    still holds. What remains: a lease that lapses while its holder is alive (renewals
+    failing for two minutes, a host suspend, or a wall-clock step, since SQLite's
+    `datetime('now')` follows the wall clock) still lets a second delete begin, and the
+    first delete's renew or end then acts on the second one's lease. A renewal already in
+    flight when a lesson is released can extend a newer delete's lease once, which is
+    harmless: that delete ends it itself.
+  - *Also:* a follow delete's last step (`RemoveFilelessFollowCascade`) removes the
+    follow's lesson rows without looking at their lease, so it can remove the row of a
+    lesson a later lesson delete holds (one begun after the follow delete tombstoned it).
+    Harmless today: the cascade refuses while any of the follow's lessons records files, so
+    that lesson has none, and its delete only finds the row gone and answers 404.
+  - *Why:* the process-lock half needs a second process; the lease half needs a lease to
+    lapse while its delete is alive. A process lock on the database, and a holder token on
+    the lease (D81), would close them.
   - *Evidence:* `grep -n 'func (d \*Daemon) Recover' -A15 internal/scheduler/daemon.go` ·
-    `grep -n 'DeleteLease\|DeleteRenewEvery' internal/database/downloads.go`
+    `grep -n 'DeleteLease\|DeleteRenewEvery' internal/database/downloads.go` ·
+    `grep -n 'func (h \*deleteHold) released' -A5 internal/server/lessonfiles.go` ·
+    `grep -n 'func (s \*Store) RemoveFilelessFollowCascade' -A15 internal/database/downloads.go`
+- **D81 · The delete lease has no holder.**
+  - *What:* `RenewLessonDelete` and `EndLessonDelete` match a lesson by its id and
+    `deleting_until IS NOT NULL`, and `TombstoneLesson` and `KeepLessonFiles` clear the
+    lease the same way: nothing records which delete holds it. The full fix for D76's lease
+    half (security round 4, LOW-1; code round 4, #4): a `deleting_by` holder token on
+    `lessons`, set by `BeginLessonDelete` and `BeginFollowDelete` and checked by
+    `RenewLessonDelete`, `EndLessonDelete`, `TombstoneLesson` and `KeepLessonFiles`. A
+    renewal that matches no rows means the hold was lost, so the delete stops before
+    removing anything more.
+  - *Why:* after a lapse the tombstone's compare-and-swap is the only backstop, and the
+    worker never reads the lease: a job queued while it has lapsed runs, and can undo the
+    delete.
+  - *Decision needed (owner):* migration 004 (`004_lessons_library_entries.sql`) has not
+    been released (it is not on `main`), so the column can go into it for free until then;
+    afterwards it needs a migration of its own. Every merge to `main` is a release (D36),
+    so decide before this branch merges.
+  - *Engine:* SQLite (and `modernc.org/sqlite`) has no lease or owner feature, so this is
+    plain SQL.
+  - *Evidence:* `grep -n deleting_until internal/database/downloads.go` ·
+    `git ls-tree --name-only main internal/database/migrations/` (no 004)
 - **D77 · Test fixtures are copied into three packages.**
   - *What:* `seedSeason`, `recordedRow`/`recordOf`, `sorted` and `assertExist` exist, each
     slightly different, in `internal/library`, `internal/scheduler` and `internal/server`
@@ -285,15 +400,18 @@ D53 waits on an owner decision.
 - **D9 · Small API hardening nits.**
   - *What:* (a) CORS responses carry no `Vary: Origin`. (b) Moved to its own entry, D54: the
     token in the URL is accepted on every `/api/*` route, not only the live-progress stream,
-    which is a security item rather than a nit. (c) An invalid `?brand=` on the instructor
-    preview comes back as a 502 instead of a 400. (d) The preview treats only the literal
+    which is a security item rather than a nit. (c) Fixed on `fix-library-delete-and-move`:
+    an invalid `?brand=` on the instructor preview is now a 400 (`msgBadBrand`) before any
+    Musora call, and `POST /api/follows` refuses one too. Before, the add stored it, and
+    every sync of that instructor follow failed. (d) The preview treats only the literal
     `?whole=true` as true. (e) The SQLite connection string would break on a database path
     that contains `?`.
   - *Why:* none of the remaining ones exposes anything today in a single-user, self-hosted
     tool. A review agent judged them acceptable, but there's no owner ruling, so they stay
     listed here instead of under accepted residuals.
   - *Evidence:* `grep -rn Vary internal/server` (no match) ·
-    `grep -n StatusBadGateway internal/server/preview.go` · `grep -n 'Get("whole")' internal/server/preview.go` ·
+    `grep -n ValidateBrand internal/server/preview.go internal/server/follows.go` (c, fixed) ·
+    `grep -n 'Get("whole")' internal/server/preview.go` ·
     `grep -n 'dsn :=' internal/database/db.go`
   - *Detail:* `drumdrop-http-api-sse-security.md`; agent memory
     `~/.claude/agent-memory/code-reviewer/project_drumdrop_preview_session_handler.md` and
@@ -480,8 +598,9 @@ D53 waits on an owner decision.
 
 ## Open questions (owner decisions)
 
-Two choices described in their own entries are also waiting on the owner: D3's yt-dlp rebuild,
-and D53's fix for the tokenless loopback mode (options A, B or C).
+Three choices described in their own entries are also waiting on the owner: D3's yt-dlp
+rebuild, D53's fix for the tokenless loopback mode (options A, B or C), and whether D81's
+lease holder token goes into the unreleased migration 004 (before this branch merges).
 
 - **D57 · Two lessons can share an episode number in one show. Keep the numbering?**
   - *Context:* a lesson's episode number is its position in the expansion of the follow
@@ -509,8 +628,40 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     again when it expires. (c) Ask whether drumdrop needs a Musora login at all, since
     downloads are open-read.
   - *To weigh:* (b) or (c) removes the risk rather than managing it, because a password that
-    is never stored can't leak.
+    is never stored can't leak. The web UI's Musora card says the server signs in with the
+    email and password and "saves a copy in its config folder"; (b) or (c) changes that
+    sentence too (`grep -n 'saves a copy' web/src/pages/Settings.tsx`).
   - *Detail:* vault note drumdrop-auth-posture.
+
+- **D83 · Which 4xx does Musora send for a wrong password?**
+  - *What:* `POST /api/session` answers 422 for credentials Musora refused, 502 when Musora
+    can't be reached or its answer can't be read, and 500 when the session couldn't be
+    saved; never 401, since the web client clears its API token on any 401 (D88).
+    "Refused" is any 4xx but 408 and 429 (`rejectsCredentials` in `internal/musora/auth.go`).
+    Which status Musora really sends for a wrong password is unconfirmed: the HAR captures
+    that would show it hold live session credentials and are off-limits. A 403 from a web
+    application firewall, a block rather than a verdict on the password, would read as
+    "Musora didn't accept that email and password".
+  - *How:* one login with a wrong password, reading only the status Musora answers
+    (`POST` to `AuthBase + "/sessions"`, as `Login` sends it).
+  - *Why it's the owner's:* it signs in to the owner's Musora account with a wrong
+    password.
+  - *Evidence:* `grep -n 'func rejectsCredentials' -A3 internal/musora/auth.go` ·
+    `grep -n 'StatusUnprocessableEntity\|StatusBadGateway' internal/server/preview.go`
+
+- **D84 · Tidy an instructor's name before looking it up?**
+  - *Context:* an instructor follow takes Musora's slug: lowercase letters, digits and
+    hyphens (`jared-falk`). Anything else, such as `Jared-Falk`, `jared falk` or a pasted
+    instructor page URL, is refused before any lookup, on preview and on add, with a 400
+    that says what is accepted (`msgBadSlug`).
+  - *Options:* (a) keep it: the message says what to type. (b) Lower-case the input, and
+    pull the slug out of a pasted URL, as a node follow already takes a URL.
+  - *To weigh:* (b) needs the shape of Musora's instructor URLs, which nothing in
+    `internal/musora/` records yet, so it starts with capturing one (never guess about
+    Musora's API).
+  - *Why it's the owner's:* it changes what the form accepts.
+  - *Evidence:* `grep -n 'reSlug\|ErrBadSlug' internal/musora/instructor.go` ·
+    `grep -n msgBadSlug internal/server/*.go`
 
 - **D26 · Is v0.7.1 actually running on TrueNAS, and do songs work there?**
   - *What:* the v0.7.1 fixes for the two production song failures, Kryptonite (a hash-style
@@ -724,11 +875,68 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
   - *Now:* `SkipLesson` marks the lesson skipped and removes its queued, running and
     canceled jobs in one transaction, recording `discard` for the ones a worker holds; the
     API kills the running download. That download records nothing and removes what it had
-    written (the lesson's earlier, recorded files stay). Skip cancels rather than refusing
-    while a download runs: the user asked for the lesson not to be downloaded, and a
-    refusal would only send them to *Cancel* first. It answers 409 only while a delete
-    holds the lesson, which skips it anyway once the files are gone.
+    written, except anything a lesson records (the lesson's own earlier, recorded files
+    stay) and a lesson folder that was there before it began (only its partial files go;
+    D66). Skip cancels rather than refusing while a download runs: the user asked for the
+    lesson not to be downloaded, and a refusal would only send them to *Cancel* first. It
+    answers 409 only while a delete holds the lesson, which skips it anyway once the files
+    are gone.
   - *Evidence:* `go test -count=1 -run 'SkipSticks|SkipStops|SkipWhileDeleting|SkipLesson' ./internal/database/ ./internal/scheduler/ ./internal/server/`
+  - *Left open:* D79 (a Skip during the library move can lose the earlier files), D80 (a
+    Skip that races the planner's enqueue).
+- **D85 · A lesson Musora couldn't be reached for was skipped for good.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the worker treated any error from Musora's lesson lookup, a network failure or
+    an answer it couldn't read included, as "gated or missing", and skipped the lesson.
+    Syncs never queue a skipped lesson again, so a short outage during a sync skipped every
+    lesson looked up during it, until each was un-skipped by hand. `main` does the same.
+  - *Now:* a lesson Musora couldn't be reached for, or whose answer couldn't be read, fails
+    and is tried again; only a lesson Musora answers with no match (gated or missing) is
+    skipped.
+  - *Evidence:* `grep -n 'Resolver.Resolve' -A12 internal/scheduler/worker.go`
+- **D86 · A failure's text was raw, wrong, or gone too fast.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the lesson's note (shown under the lesson, and in the Queue next to *Retry*) and
+    the live events carried the worker's raw error (a Go error, yt-dlp's exit status), and
+    a canceled download showed the bare word "canceled". The API answered with fragments
+    ("lesson not found", "job is not active", "login failed", "invalid id: <input>"), some
+    echoing the input. Failure toasts closed after about 4 seconds while carrying the
+    server's full sentence, and the Queue replaced a 409's reason with "Job is not
+    retryable".
+  - *Now:* the lesson's note and the events carry a fixed sentence for each kind of
+    failure, true in both places it shows, and the error behind it goes to the server log
+    only (security round 4, Info 5); a canceled download no longer shows the bare word
+    "canceled". Every message the API sends is a sentence under the copy rules at the top
+    of `internal/server/messages.go` (outcome first, at most 220 characters, no echoed
+    input), checked on every message by a test. A failure toast with a description stays
+    until it is closed, and the Queue shows the server's sentence (round-4 UI review, N2,
+    N3, N4).
+  - *Evidence:* `go test -count=1 -run 'RecordsSentencesNotErrors|MessagesFitTheDialog|MessagesFollowTheCopyRules' ./internal/scheduler/ ./internal/server/`
+    · `grep -rn 'failureToast(' web/src --include=*.tsx`
+- **D87 · Partial files could reach the library.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the move took the lesson folder as it was, so partial files a run left when it
+    died (yt-dlp's `.part`, `.ytdl`, `.f<number>.<ext>` and `.temp.<ext>`, drumdrop's own
+    `.drumdrop-part` and `.drumdrop-episode`) moved into the library with the lesson.
+  - *Now:* before a move, drumdrop removes them from the lesson folder and its subfolders,
+    so none of them reaches the library (security round 4, Info 2). The README says so.
+  - *Evidence:* `go test -count=1 -run 'MovesNoPartialFileIntoTheLibrary|CleanupPartialsRemovesOnlyPartials' ./internal/scheduler/`
+- **D88 · A wrong Musora password logged the user out of DrumDrop.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* `POST /api/session` answered 401 when Musora refused the login, and also when
+    Musora couldn't be reached. The web client takes any 401 for its own API token being
+    refused, so it cleared the stored token and opened the token prompt: a mistyped Musora
+    password locked the user out of DrumDrop until they pasted the token again, and in the
+    tokenless local mode the prompt asked for a token that doesn't exist. On `main` since
+    `43fb9b1` (#5; round-4 UI review, X1).
+  - *Now:* credentials Musora refused (any 4xx but 408 or 429) are a 422, "Musora didn't
+    accept that email and password. Check them, then Connect again."; Musora unreachable,
+    or an answer that can't be read, is a 502; a session that couldn't be saved is a 500.
+    Only the auth middleware may answer 401, and a test reads the server package's source
+    to keep it that way. The Settings test mounts the real token prompt.
+  - *Evidence:* `go test -count=1 -run 'LoginNeverAnswers401|OnlyTheAuthMiddlewareAnswers401|LoginSaysWhether' ./internal/server/ ./internal/musora/`
+    · `cd web && npx vitest run src/pages/Settings.test.tsx`
+  - *Left open:* D83 (which 4xx Musora sends for a wrong password is unconfirmed).
 - **D67 · A default-layout delete after the library moved answered 200 and lost track of
   the files.** This branch (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* a default-layout lesson records its folder by absolute path. After the library
@@ -758,10 +966,14 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     Every write into the library goes through `os.Root` opened on the destination folder
     (which must resolve inside the library), a copied entry is created with `O_EXCL`
     (files) or `Mkdir` (folders), and each rename acts on the folders the move holds open
-    and never replaces an entry (`renameAt`: `renameat2(RENAME_NOREPLACE)` on Linux,
-    `renameatx_np(RENAME_EXCL)` on macOS), so no write follows a symlink planted in the
-    library, even one swapped in after the checks. On Windows the rename is still by path
-    (D72). The scratch side is opened the same way: the lesson folder must be a real
+    and refuses an entry already at its name (`renameAt`: `renameat2(RENAME_NOREPLACE)` on
+    Linux, `renameatx_np(RENAME_EXCL)` on macOS; a filesystem without the flag gets a retry
+    without it, which replaces), so no write follows a symlink planted in the library, even
+    one swapped in after the checks. A rename that refuses makes the move refuse (the
+    lesson stays whole in downloads); the copy runs only across filesystems (`EXDEV`,
+    `ERROR_NOT_SAME_DEVICE` on Windows), and a copy that fails removes only what it created
+    (round 4, `9928719`). On Windows the rename is still by path (D72). The scratch side is
+    opened the same way: the lesson folder must be a real
     folder inside downloads, the episode nfo is written there through it, and the copy
     reads only through it.
     Library == downloads is decided by identity, not spelling: the move is a no-op for an
@@ -770,7 +982,7 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     the lesson's previous download recorded (D51), and stops, recording what is left, if
     that fails. Anything that can't be cleaned up is logged with its path (`⚠ move to
     library`). The move stays non-fatal.
-  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared|ConfigRefuses|UnderARace|NeverReplaces|PlantedSymlink'
+  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared|ConfigRefuses|UnderARace|NeverReplaces|PlantedSymlink|KeepAnEntryPlanted|CopyOnlyAcrossFilesystems'
     ./internal/scheduler/ ./internal/engine/` (the permission-based ones skip as root).
   - *Left open:* if the OS refuses both the move and its undo (a renamed entry can't be
     renamed back), the lesson stays split and the log names every path. Plex seeing
@@ -855,11 +1067,15 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     (`abandoned_jobs`: `keep`, `discard` for a Skip, `delete` for a delete of the files),
     matched on the job and its lesson, consumed by the first write that reads it, and
     dropped after seven days unread. A download stopped by a keep-files delete removes
-    nothing it finished (only yt-dlp's partial files). One stopped by a Skip or a delete
-    that removes the files removes what it placed and its lesson folder, in any layout,
-    with or without a library, except anything a lesson row records by then (read fresh):
-    for a Skip the lesson's own earlier files count, for a delete of the lesson's files
-    they do not. If the rows can't be read, it removes nothing. A download that fails
+    nothing it finished (only partial files). One stopped by a Skip or a delete that
+    removes the files removes what it placed and its lesson folder, in any layout, with or
+    without a library, except anything a lesson row records by then (read fresh): for a
+    Skip the lesson's own earlier files count, for a delete of the lesson's files they do
+    not. A lesson folder that was already there when the download began loses only its
+    partial files, and nothing a move placed from it is removed, unless the stopper is a
+    delete of the lesson's files and the lesson's own row named that folder when the
+    download began (round 4, `1c7f50f`; D66).
+    If the rows can't be read, it removes nothing. A download that fails
     after its job was removed applies the same intent. A follow's delete stops only its own lessons' downloads. A job
     canceled in the database while its worker held it (before its process was registered)
     stops at its next step instead of running to the end, and a cancel that lands once the
