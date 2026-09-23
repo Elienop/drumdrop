@@ -26,7 +26,7 @@ func TestDaemonRecoverRunsOnce(t *testing.T) {
 
 // TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads proves the move
 // takes only a real lesson folder: a symlink at the lesson folder's name,
-// even one to another folder inside downloads, is refused (the lesson stays
+// even one to a sibling folder inside downloads, is refused (the lesson stays
 // where it is), never moved into the library as a link nor followed.
 func TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -36,14 +36,15 @@ func TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads(t *testing.T) {
 		t.Run("layout="+layout, func(t *testing.T) {
 			tmp := t.TempDir()
 			dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-			other := filepath.Join(dl, "Other", "05 - Five")
+			other := filepath.Join(dl, "Course", "99 - Real")
 			seedSeason(t, other, "05 - Five.mp4", "05 - Five.nfo")
 			lessonDir := filepath.Join(dl, "Course", "05 - Five")
 			if err := os.MkdirAll(filepath.Dir(lessonDir), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			// Relative, so it stays inside downloads: os.Root follows it.
-			if err := os.Symlink(filepath.Join("..", "Other", "05 - Five"), lessonDir); err != nil {
+			// A sibling, named relatively: os.Root opened on the course folder
+			// follows it (an absolute or escaping one it refuses by itself).
+			if err := os.Symlink("99 - Real", lessonDir); err != nil {
 				t.Fatal(err)
 			}
 			var err error
