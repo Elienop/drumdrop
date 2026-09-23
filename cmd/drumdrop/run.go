@@ -3,15 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/engine"
 	"github.com/elienop/drumdrop/internal/musora"
+	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
 // valueFlags lists the download flags that consume the following argument.
@@ -151,12 +156,6 @@ func cmdDownload(argv []string) error {
 	}
 
 	// Resolve metadata first (gives titles + the course/series name for foldering).
-	type resolvedLesson struct {
-		id     int
-		lesson *musora.Lesson
-		index  int
-		failed bool
-	}
 	resolved := make([]resolvedLesson, 0, len(ids))
 	courseTitle := ""
 	for i, id := range ids {
@@ -195,38 +194,67 @@ func cmdDownload(argv []string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return err
-	}
+	// An interrupt (Ctrl-C, SIGTERM) stops the download in progress: yt-dlp runs
+	// in its own process group, so it would otherwise outlive drumdrop.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	downloaded, failed := downloadResolved(ctx, engine.Downloader{}, *out, musora.Sanitize(courseTitle), resolved, musora.DownloadOpts{
+		// AudioLang is env-only (DRUMDROP_AUDIO_LANG, default "en") like the
+		// daemon/serve path, so the manual one-shot download prefers the same
+		// audio language rather than yt-dlp's default multi-track pick.
+		Quality:       *quality,
+		AudioLang:     config.AudioLang(),
+		ResourcesOnly: *resourcesOnly,
+	}, os.Stdout, os.Stderr)
 
-	downloaded, failed := 0, 0
-	for _, r := range resolved {
+	fmt.Printf("\nDone → %s\n  downloaded: %d  failed: %d\n", outDir, downloaded, failed)
+	if ctx.Err() != nil {
+		return errors.New("interrupted: a download in progress was stopped and not placed; its lesson folder is as it was")
+	}
+	return nil
+}
+
+// resolvedLesson is one lesson of a one-shot download: its metadata, or
+// failed when it could not be resolved.
+type resolvedLesson struct {
+	id     int
+	lesson *musora.Lesson
+	index  int
+	failed bool
+}
+
+// downloadResolved downloads each resolved lesson into <out>/<course>/NN -
+// Title, one at a time, and counts the outcomes. Each download goes through
+// scheduler.DownloadOneShot: it is written in a private folder and placed
+// only once it finished, so a failed or interrupted one leaves the lesson's
+// folder as it was. Once ctx is done no further lesson starts.
+func downloadResolved(ctx context.Context, d scheduler.Downloader, out, course string, lessons []resolvedLesson, opts musora.DownloadOpts, stdout, stderr io.Writer) (downloaded, failed int) {
+	for _, r := range lessons {
 		if r.failed {
 			failed++
 			continue
 		}
-		fmt.Printf("\n▼ [%02d] %s\n", r.index, r.lesson.Title)
-		err := musora.DownloadLesson(context.Background(), r.lesson, musora.DownloadOpts{
-			Dir:   outDir,
-			Index: r.index,
-			// AudioLang is env-only (DRUMDROP_AUDIO_LANG, default "en") like the
-			// daemon/serve path, so the manual one-shot download prefers the same
-			// audio language rather than yt-dlp's default multi-track pick.
-			Quality:       *quality,
-			AudioLang:     config.AudioLang(),
-			ResourcesOnly: *resourcesOnly,
-		})
+		if ctx.Err() != nil {
+			fmt.Fprintf(stderr, "✖  lesson %d not downloaded: interrupted\n", r.id)
+			failed++
+			continue
+		}
+		fmt.Fprintf(stdout, "\n▼ [%02d] %s\n", r.index, r.lesson.Title)
+		o := opts
+		o.Index = r.index
+		replaced, err := scheduler.DownloadOneShot(ctx, d, r.lesson, out, course, o)
+		for _, p := range replaced {
+			fmt.Fprintf(stdout, "  ↻ replaced %s\n", p)
+		}
 		if err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "✖  lesson %d failed: %v\n", r.id, err)
+			fmt.Fprintf(stderr, "✖  lesson %d failed: %v\n", r.id, err)
 			continue
 		}
 		downloaded++
-		fmt.Printf("  ✓ lesson %d\n", r.id)
+		fmt.Fprintf(stdout, "  ✓ lesson %d\n", r.id)
 	}
-
-	fmt.Printf("\nDone → %s\n  downloaded: %d  failed: %d\n", outDir, downloaded, failed)
-	return nil
+	return downloaded, failed
 }
 
 // stdin is a single shared reader so that bytes buffered by one prompt (e.g. a
