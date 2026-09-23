@@ -111,9 +111,11 @@ func TestRenameNeverReplacesAnEntry(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(tmp, "b", "y.mp4")); string(got) != "y.mp4" {
 		t.Errorf("the entry at the destination was replaced: %q", got)
 	}
+	seedSeason(t, tmp, "x.mp4") // what "../x.mp4" would reach from a
 	if err := renameIn(a, "../x.mp4", b, "z.mp4"); err == nil {
 		t.Error("renameIn took a name that is not a single part")
 	}
+	assertExist(t, true, filepath.Join(tmp, "x.mp4"))
 }
 
 // TestCopyNeverWritesThroughAPlantedSymlink (security L4, M07) proves the
