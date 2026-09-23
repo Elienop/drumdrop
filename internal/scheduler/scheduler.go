@@ -62,14 +62,19 @@ type Store interface {
 	ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error)
 	MarkJobRunning(ctx context.Context, id int64) error
 	// The worker's writes about a job land only while the job and its lesson
-	// still exist (database.ErrDownloadAbandoned otherwise), so nothing a
-	// download does can land after a delete removed them.
+	// still exist (database.ErrDownloadAbandoned otherwise, joined with
+	// database.ErrDiscardDownload when the delete removes the lesson's files),
+	// so nothing a download does can land after a delete removed them; and a
+	// download only starts or goes on while its job is running
+	// (database.ErrDownloadCanceled otherwise).
 	StartDownload(ctx context.Context, jobID int64, id int) error
+	ConfirmDownload(ctx context.Context, jobID int64, id int) error
 	FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error
 	FailDownload(ctx context.Context, jobID int64, id int, msg string) error
 	SkipDownload(ctx context.Context, jobID int64, id int, reason string) error
 	CancelDownload(ctx context.Context, jobID int64, id int) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
+	ClearStaleDeletes(ctx context.Context) (int, error)
 }
 
 // Compile-time assertion that the real store satisfies the scheduler's Store

@@ -47,9 +47,20 @@ type fakeWorkerStore struct {
 	// Optional fault injection.
 	claimErr     error
 	getFollowErr error
-	// gone marks jobs a delete removed: every guarded write for them returns
-	// database.ErrDownloadAbandoned and records nothing.
+	// gone marks jobs a delete that removes the lesson's files removed: every
+	// guarded write for them returns database.ErrDownloadAbandoned joined with
+	// database.ErrDiscardDownload, and records nothing. kept marks jobs a
+	// delete that keeps the files removed (ErrDownloadAbandoned alone).
 	gone map[int64]bool
+	kept map[int64]bool
+	// canceled marks jobs canceled in the database while the worker holds
+	// them: StartDownload and ConfirmDownload return
+	// database.ErrDownloadCanceled; the terminal writes land.
+	canceled map[int64]bool
+	confirms []int64
+	// onConfirm, when set, runs after a ConfirmDownload passed: a delete or a
+	// cancel landing while the download is being moved.
+	onConfirm func()
 	// withFiles is what ListLessonsWithFiles returns (or withFilesErr).
 	withFiles    []database.Lesson
 	withFilesErr error
@@ -138,12 +149,42 @@ func (s *fakeWorkerStore) markJobFailedAs(id int64, errMsg string) {
 }
 
 // abandoned mirrors the store's job guard: a job a delete removed takes no
-// write.
+// write, and says what the delete wanted.
 func (s *fakeWorkerStore) abandoned(jobID int64) error {
-	if s.gone[jobID] {
+	switch {
+	case s.gone[jobID]:
+		return fmt.Errorf("job %d: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrDiscardDownload)
+	case s.kept[jobID]:
 		return fmt.Errorf("job %d: %w", jobID, database.ErrDownloadAbandoned)
 	}
 	return nil
+}
+
+// running mirrors the guard of the writes that start or confirm a download:
+// abandoned, or canceled while the worker held the job.
+func (s *fakeWorkerStore) running(jobID int64) error {
+	if err := s.abandoned(jobID); err != nil {
+		return err
+	}
+	if s.canceled[jobID] {
+		return fmt.Errorf("job %d: %w", jobID, database.ErrDownloadCanceled)
+	}
+	return nil
+}
+
+func (s *fakeWorkerStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
+	s.confirms = append(s.confirms, jobID)
+	if err := s.running(jobID); err != nil {
+		return err
+	}
+	if s.onConfirm != nil {
+		s.onConfirm()
+	}
+	return nil
+}
+
+func (s *fakeWorkerStore) ClearStaleDeletes(ctx context.Context) (int, error) {
+	panic("ClearStaleDeletes: not expected from Worker")
 }
 
 func (s *fakeWorkerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
@@ -151,7 +192,7 @@ func (s *fakeWorkerStore) ListLessonsWithFiles(ctx context.Context) ([]database.
 }
 
 func (s *fakeWorkerStore) StartDownload(ctx context.Context, jobID int64, id int) error {
-	if err := s.abandoned(jobID); err != nil {
+	if err := s.running(jobID); err != nil {
 		return err
 	}
 	s.markDownloadng = append(s.markDownloadng, id)

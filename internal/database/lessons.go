@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -38,16 +39,20 @@ type Lesson struct {
 	DownloadedAt        sql.NullTime   `json:"downloaded_at"`
 	UpdatedAt           sql.NullTime   `json:"updated_at"`
 	// LibraryEntries is the raw library_entries column: a JSON array of the
-	// absolute paths the plex-tv move placed in a season folder for this lesson,
-	// or NULL when there is no record. Read it through PlacedEntries.
+	// entries the plex-tv move placed in a season folder for this lesson, each
+	// relative to the library folder, or NULL when there is no record. Read it
+	// through PlacedEntries.
 	LibraryEntries sql.NullString `json:"library_entries"`
+	// Deleting is set while a delete is removing the lesson's files (see
+	// BeginLessonDelete): no job may be enqueued or retried for it meanwhile.
+	Deleting bool `json:"deleting"`
 }
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
-	first_seen_at, downloaded_at, updated_at, library_entries`
+	first_seen_at, downloaded_at, updated_at, library_entries, deleting`
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
 // *sql.Rows (both satisfy this Scan signature).
@@ -58,9 +63,38 @@ func scanLesson(row interface {
 	err := row.Scan(
 		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Position, &l.Status,
 		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
-		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt, &l.LibraryEntries,
+		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt, &l.LibraryEntries, &l.Deleting,
 	)
 	return l, err
+}
+
+// getLessonTx reads lesson id inside tx (a wrapped sql.ErrNoRows if unknown).
+func getLessonTx(ctx context.Context, tx *sql.Tx, id int) (Lesson, error) {
+	l, err := scanLesson(tx.QueryRowContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons WHERE railcontent_id = ?`, id,
+	))
+	if err != nil {
+		return Lesson{}, fmt.Errorf("get lesson %d: %w", id, err)
+	}
+	return l, nil
+}
+
+// lessonDeletingTx returns ErrLessonDeleting while lesson id's files are being
+// deleted (an unknown id is not being deleted).
+func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
+	var deleting int
+	err := tx.QueryRowContext(ctx,
+		`SELECT deleting FROM lessons WHERE railcontent_id = ?`, id,
+	).Scan(&deleting)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("check lesson %d: %w", id, err)
+	case deleting == 1:
+		return fmt.Errorf("lesson %d: %w", id, ErrLessonDeleting)
+	}
+	return nil
 }
 
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
@@ -126,13 +160,14 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 // ShouldSkipEnqueue reports whether the planner must NOT enqueue a download job
 // for the lesson with the given railcontent_id: true when its status is
 // 'downloaded' (already have it) OR 'skipped' (intentionally passed over, e.g.
-// locked/missing content — re-enqueuing would loop forever). A 'failed' lesson
-// is deliberately NOT skipped so it is retried. An unknown id is not an error:
-// it reports false, so a never-seen lesson enqueues normally.
+// locked/missing content — re-enqueuing would loop forever), or while a delete
+// is removing its files. A 'failed' lesson is deliberately NOT skipped so it is
+// retried. An unknown id is not an error: it reports false, so a never-seen
+// lesson enqueues normally.
 func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND status IN (?, ?)`,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND (status IN (?, ?) OR deleting = 1)`,
 		id, StatusDownloaded, StatusSkipped,
 	).Scan(&n)
 	if err != nil {

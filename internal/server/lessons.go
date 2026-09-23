@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -169,14 +170,16 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 // otherwise re-discover and re-download it — ShouldSkipEnqueue already skips
 // 'skipped', and un-skip can bring it back later.
 //
-// It first removes the lesson's queued and running jobs (BeginLessonDelete)
-// and kills a running download, so no step of a download already under way can
-// record anything once the delete answers. File removal uses the RAW stored
-// paths (container paths), NOT the host-mapped DTO values, and follows the
-// lesson's record (see removeLessonFiles). An unknown id is a 404, a
-// non-integer id a 400. When a file could not be removed, the lesson is kept
-// with its record of what is left, the detail goes to the server log, and the
-// client gets a fixed 500; when a download recorded new files meanwhile, a 409.
+// It first marks the lesson deleting and removes its queued, running and
+// canceled jobs (BeginLessonDelete), then kills a running download: no step of
+// a download already under way can record anything once the delete answers,
+// and no new one can start until it ends. From there the delete runs to the
+// end even if the client goes away, and always ends the mark. File removal
+// uses the RAW stored paths (container paths), NOT the host-mapped DTO
+// values, and follows the lesson's record (see removeLessonFiles). An unknown
+// id is a 404, a non-integer id a 400, a lesson already being deleted a 409.
+// When a file could not be removed, the lesson records only what is left, the
+// detail goes to the server log, and the client gets a fixed 500.
 func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
@@ -184,28 +187,37 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	l, running, err := s.store.BeginLessonDelete(r.Context(), id)
+	if errors.Is(err, database.ErrLessonDeleting) {
+		writeErr(w, http.StatusConflict, msgLessonDeleting)
+		return
+	}
 	if err != nil {
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
+	ctx := context.WithoutCancel(r.Context())
+	defer s.endDelete(ctx, id)
 	s.killRunning(running)
 
-	c, err := s.claims(r.Context())
+	c, err := s.claims(ctx)
 	if err == nil {
-		err = s.deleteLessonFiles(r.Context(), c, l)
+		err = s.deleteLessonFiles(ctx, c, l)
 	}
 	switch {
 	case errors.Is(err, errFilesKept):
-		writeErr(w, http.StatusInternalServerError, "could not delete the lesson's files; the lesson was kept (see the server log)")
+		writeErr(w, http.StatusInternalServerError, msgLessonFilesKept)
+		return
+	case errors.Is(err, errRecordNotUpdated):
+		writeErr(w, http.StatusInternalServerError, msgLessonNotUpdated)
 		return
 	case errors.Is(err, database.ErrLessonChanged):
-		writeErr(w, http.StatusConflict, "the lesson was downloaded again while it was being deleted; try again")
+		writeErr(w, http.StatusConflict, msgLessonChanged)
 		return
 	case err != nil:
 		writeStoreErr(w, err, "lesson not found")
 		return
 	}
-	updated, err := s.store.GetLesson(r.Context(), id)
+	updated, err := s.store.GetLesson(ctx, id)
 	if err != nil {
 		writeStoreErr(w, err, "lesson not found")
 		return

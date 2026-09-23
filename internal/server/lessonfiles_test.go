@@ -59,7 +59,7 @@ func recordOf(season string, names ...string) []string {
 // removeFiles runs a delete of lesson l's files the way a handler does: the
 // claims of every row with files (others, plus l itself as the store would
 // list it) under a server configured with downloads and library.
-func removeFiles(downloads, lib string, l database.Lesson, others []database.Lesson) ([]string, error) {
+func removeFiles(downloads, lib string, l database.Lesson, others []database.Lesson) (database.KeptFiles, error) {
 	rows := append([]database.Lesson(nil), others...)
 	listed := false
 	for _, o := range others {
@@ -70,7 +70,7 @@ func removeFiles(downloads, lib string, l database.Lesson, others []database.Les
 	}
 	c, err := library.NewClaims(lib, rows)
 	if err != nil {
-		return nil, err
+		return database.KeptFiles{}, err
 	}
 	srv := &Server{cfg: Config{DownloadsDir: downloads, LibraryDir: lib}}
 	return srv.removeLessonFiles(c, l)
@@ -329,9 +329,10 @@ func lockedEntry(t *testing.T, dir, name string) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 }
 
-// TestRemoveLessonFilesReportsWhatRemains proves a removal that fails partway
-// keeps going (every other entry is removed), returns the error, and returns as
-// remaining exactly the recorded entries still on disk.
+// TestRemoveLessonFilesReportsWhatRemains (D56) proves a removal that fails
+// partway keeps going (every other entry is removed), returns the error, and
+// says the row must record only what is still on disk: the recorded entries
+// left, the season folder they are in, and no video once it is gone.
 func TestRemoveLessonFilesReportsWhatRemains(t *testing.T) {
 	downloads, library := t.TempDir(), t.TempDir()
 	season := filepath.Join(library, "Show", "Season 01")
@@ -339,15 +340,75 @@ func TestRemoveLessonFilesReportsWhatRemains(t *testing.T) {
 	lockedEntry(t, season, stuck)
 	seedEntries(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
 	l := recordedLesson(1, season, stuck, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	l.VideoPath = sql.NullString{String: filepath.Join(season, "Show - s01e05 - Five.mp4"), Valid: true}
 
-	remaining, err := removeFiles(downloads, library, l, nil)
+	kept, err := removeFiles(downloads, library, l, nil)
 	if err == nil {
 		t.Fatal("removeLessonFiles = nil, want the removal error")
 	}
 	assertGone(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
-	if want := recordOf(season, stuck); !reflect.DeepEqual(remaining, want) {
-		t.Errorf("remaining = %v, want %v", remaining, want)
+	want := database.KeptFiles{OutputDir: true, LibraryEntries: recordOf(season, stuck)}
+	if !reflect.DeepEqual(kept, want) {
+		t.Errorf("kept = %+v, want %+v", kept, want)
 	}
+}
+
+// TestRemoveLessonFilesKeepsOnlyWhatIsThere (D56) covers the other shapes of a
+// partial failure: a default-layout folder that was removed while a library
+// record it carried could not all be (output_dir is dropped, the record
+// narrowed), a lesson folder that could not be removed (output_dir and video
+// kept, no record invented), and a lesson moved before the record existed,
+// which gains a record of exactly what is left.
+func TestRemoveLessonFilesKeepsOnlyWhatIsThere(t *testing.T) {
+	t.Run("folder gone, record left", func(t *testing.T) {
+		downloads, library := t.TempDir(), t.TempDir()
+		season := filepath.Join(library, "Show", "Season 01")
+		stuck := "Show - s01e05 - Five resources"
+		lockedEntry(t, season, stuck)
+		folder := mkLessonDir(t, library, "Show/05 - Five")
+		l := recordedLesson(1, season, stuck)
+		l.OutputDir.String = folder
+		kept, err := removeFiles(downloads, library, l, nil)
+		if err == nil {
+			t.Fatal("removeLessonFiles = nil, want the removal error")
+		}
+		if want := (database.KeptFiles{LibraryEntries: recordOf(season, stuck)}); !reflect.DeepEqual(kept, want) {
+			t.Errorf("kept = %+v, want %+v", kept, want)
+		}
+	})
+	t.Run("folder stuck", func(t *testing.T) {
+		downloads, library := t.TempDir(), t.TempDir()
+		folder := mkLessonDir(t, downloads, "Course/05 - Five")
+		lockedEntry(t, folder, "resources")
+		l := dirLesson(1, folder)
+		l.VideoPath = sql.NullString{String: filepath.Join(folder, "v.mp4"), Valid: true}
+		kept, err := removeFiles(downloads, library, l, nil)
+		if err == nil {
+			t.Fatal("removeLessonFiles = nil, want the removal error")
+		}
+		wantVideo := true
+		if _, serr := os.Lstat(l.VideoPath.String); os.IsNotExist(serr) {
+			wantVideo = false // RemoveAll got to the video before the stuck folder
+		}
+		if want := (database.KeptFiles{OutputDir: true, VideoPath: wantVideo}); !reflect.DeepEqual(kept, want) {
+			t.Errorf("kept = %+v, want %+v", kept, want)
+		}
+	})
+	t.Run("legacy lesson narrows to a record", func(t *testing.T) {
+		downloads, library := t.TempDir(), t.TempDir()
+		season := filepath.Join(library, "Course", "Season 01")
+		stuck := "Course - s01e03 - Three resources"
+		lockedEntry(t, season, stuck)
+		seedEntries(t, season, "Course - s01e03 - Three.mp4", "Course - s01e03 - Three.nfo")
+		l := legacyLesson(1, "Three", 3, season, "Course - s01e03 - Three.mp4")
+		kept, err := removeFiles(downloads, library, l, nil)
+		if err == nil {
+			t.Fatal("removeLessonFiles = nil, want the removal error")
+		}
+		if want := (database.KeptFiles{OutputDir: true, LibraryEntries: recordOf(season, stuck)}); !reflect.DeepEqual(kept, want) {
+			t.Errorf("kept = %+v, want %+v", kept, want)
+		}
+	})
 }
 
 // seedEntries creates each name under dir: a name ending in "/" is a folder

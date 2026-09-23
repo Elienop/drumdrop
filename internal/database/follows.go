@@ -163,43 +163,62 @@ func (s *Store) UpdateFollowQuality(ctx context.Context, id int64, quality strin
 	})
 }
 
-// RemoveFollowCascade deletes the follow and resets the history it spawned: in
-// one transaction it deletes the follow's jobs, then its lessons, then the
-// follow row itself. The explicit child deletes go beyond the schema's
-// ON DELETE SET NULL so nothing is left orphaned with a dangling follow_id; the
-// order (jobs + lessons before the follow) keeps the cascade self-consistent.
-// 0 follow rows → "no follow with id" error (not a wrapped sql.ErrNoRows, like
+// RemoveFollowCascade removes the follow without its files and resets the
+// history it spawned: in one transaction it deletes the jobs of the follow's
+// lessons, then the lessons, then the follow row itself. The explicit child
+// deletes go beyond the schema's ON DELETE SET NULL so nothing is left
+// orphaned with a dangling follow_id. Jobs the follow queued for another
+// follow's lessons are left alone (their follow_id becomes NULL), so removing
+// one follow never stops another's downloads. It refuses with
+// ErrLessonDeleting while a lesson of the follow is being deleted. 0 follow
+// rows → "no follow with id" error (not a wrapped sql.ErrNoRows, like
 // RemoveFollow), so the caller reads the follow first for a clean 404.
 //
-// File removal is NOT done here — the handler removes downloaded files (when the
-// caller opts in) BEFORE calling this, since the lesson rows carry the paths.
-func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		return removeFollowCascadeTx(ctx, tx, id)
+// It never removes a file: a download it stops keeps what it wrote (see
+// abandoned_jobs). It returns the ids of the jobs that may still be running,
+// whose processes the caller should kill.
+func (s *Store) RemoveFollowCascade(ctx context.Context, id int64) ([]int64, error) {
+	var running []int64
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := refuseDeletingTx(ctx, tx, id); err != nil {
+			return err
+		}
+		var err error
+		running, err = removeFollowCascadeTx(ctx, tx, id, false)
+		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return running, nil
 }
 
 // removeFollowCascadeTx is the body of RemoveFollowCascade, shared with
-// RemoveFilelessFollowCascade.
-func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE follow_id = ?`, id); err != nil {
-		return fmt.Errorf("delete jobs for follow %d: %w", id, err)
+// RemoveFilelessFollowCascade. discard is what the delete wants done with what
+// a stopped download wrote (see removeActiveJobsTx).
+func removeFollowCascadeTx(ctx context.Context, tx *sql.Tx, id int64, discard bool) ([]int64, error) {
+	running, err := removeActiveJobsTx(ctx, tx, discard, followLessonsClause, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE `+followLessonsClause, id); err != nil {
+		return nil, fmt.Errorf("delete jobs for follow %d: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM lessons WHERE follow_id = ?`, id); err != nil {
-		return fmt.Errorf("delete lessons for follow %d: %w", id, err)
+		return nil, fmt.Errorf("delete lessons for follow %d: %w", id, err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("delete follow %d: %w", id, err)
+		return nil, fmt.Errorf("delete follow %d: %w", id, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("rows affected deleting follow %d: %w", id, err)
+		return nil, fmt.Errorf("rows affected deleting follow %d: %w", id, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("no follow with id %d", id)
+		return nil, fmt.Errorf("no follow with id %d", id)
 	}
-	return nil
+	return running, nil
 }
 
 // ListFollows returns every follow ordered by added_at (oldest first), with id

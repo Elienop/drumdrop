@@ -18,9 +18,13 @@ import (
 // it is — the library, or else the scratch downloads folder.
 //
 // It returns the recorded byte count, and ok=false when a delete removed the
-// job or lesson meanwhile: then nothing is recorded and what this download
-// wrote is removed (discardAbandoned), so no file is left untracked.
-func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, dir string) (bytes int64, ok bool) {
+// job or lesson meanwhile: then nothing is recorded, and what this download
+// wrote goes as the delete wants (discardAbandoned). err is a failed attempt:
+// the plex-tv move needs every other lesson's claims, and when they can not be
+// read it does not move, nor record the lesson in scratch (a lesson moved
+// before the record existed would lose track of its library copy); the attempt
+// fails and is retried.
+func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, dir string) (bytes int64, ok bool, err error) {
 	id := job.RailcontentID
 	// A download that does not move into a season folder keeps the lesson's
 	// library record as it is (LibraryEntries nil): those entries are still on
@@ -33,12 +37,10 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 		// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
 		// every entry to the episode base. output_dir = the season folder;
 		// video_path = the moved episode .mp4; library_entries = exactly what the
-		// lesson owns there. The move needs every other lesson's claims to know
-		// what it may not touch; without them it does not move at all.
-		others, err := w.Store.ListLessonsWithFiles(ctx)
+		// lesson owns there.
+		claims, err := w.claims(ctx)
 		if err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ move to library %d: not moved, the other lessons' files could not be read: %v\n", id, err)
-			break
+			return 0, false, fmt.Errorf("not moved to the library: %w", err)
 		}
 		show := plexShow(follow, job, lesson)
 		// The <episodedetails> nfo replaces the download's <movie> one before
@@ -46,7 +48,7 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 		// Drumeo to TheTVDB) gets the real episode title/season/episode from
 		// local metadata, and nothing is written in the season folder after.
 		res, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir, plexLibrary{
-			self: prev, others: others, roots: w.roots(),
+			self: prev, claims: claims, roots: w.roots(),
 			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),
 		})
 		if err != nil {
@@ -93,15 +95,29 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 	rec.OutputDir = dir
 
 	// The files are in place; record them even if shutdown began meanwhile.
-	err := w.Store.FinishDownload(context.WithoutCancel(ctx), job.ID, id, rec)
-	if errors.Is(err, database.ErrDownloadAbandoned) {
-		w.discardAbandoned(id, dir, placed)
-		return 0, false
+	finishCtx := context.WithoutCancel(ctx)
+	ferr := w.Store.FinishDownload(finishCtx, job.ID, id, rec)
+	if errors.Is(ferr, database.ErrDownloadAbandoned) {
+		w.discardAbandoned(finishCtx, id, dir, placed, ferr)
+		return 0, false, nil
 	}
+	if ferr != nil {
+		fmt.Fprintf(w.log(), "  ⚠ record download %d: %v\n", id, ferr)
+	}
+	return rec.Bytes, true, nil
+}
+
+// claims indexes what every lesson row with files claims in the library.
+func (w *Worker) claims(ctx context.Context) (*library.Claims, error) {
+	rows, err := w.Store.ListLessonsWithFiles(ctx)
 	if err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ record download %d: %v\n", id, err)
+		return nil, fmt.Errorf("the other lessons' files could not be read: %w", err)
 	}
-	return rec.Bytes, true
+	c, err := library.NewClaims(w.Cfg.LibraryDir, rows)
+	if err != nil {
+		return nil, fmt.Errorf("the other lessons' files are not known: %w", err)
+	}
+	return c, nil
 }
 
 // roots are the folders the worker may remove entries under.
@@ -115,25 +131,43 @@ func (w *Worker) roots() []string {
 	return roots
 }
 
-// discardAbandoned removes what a download wrote after a delete removed its job
-// or lesson, since no row will ever track it: the library entries it placed and
-// its lesson folder (the scratch folder, or the library folder it moved into),
-// never a shared season folder. Without a library the lesson folder is also the
-// lesson's permanent home (the delete removes it itself), so it is left alone.
-func (w *Worker) discardAbandoned(id int, dir string, placed []string) {
-	if w.Cfg.LibraryDir == "" {
-		fmt.Fprintf(w.log(), "  ⊗ %d was deleted while downloading; nothing was recorded\n", id)
+// discardAbandoned is what happens to what a download wrote once a delete
+// removed its job or lesson (cause, from the guarded write, says what the
+// delete wanted):
+//   - a delete that keeps the files (a follow removed without its files), or
+//     one whose intent is unknown: nothing is removed;
+//   - a delete that removes the lesson's files: the library entries this
+//     download placed, and its lesson folder dir (scratch, or the folder it
+//     moved into), are removed, except anything a lesson row records now
+//     (read fresh), which is kept and logged. A season folder is never
+//     removed. If the rows can not be read, nothing is removed.
+func (w *Worker) discardAbandoned(ctx context.Context, id int, dir string, placed []string, cause error) {
+	if !errors.Is(cause, database.ErrDiscardDownload) {
+		fmt.Fprintf(w.log(), "  ⊗ %d was removed while downloading; its files were kept, as the delete asked\n", id)
+		return
+	}
+	c, err := w.claims(ctx)
+	if err != nil {
+		fmt.Fprintf(w.log(), "  ⚠ %d was deleted while downloading; nothing it wrote was removed: %v\n", id, err)
 		return
 	}
 	var errs []error
 	for _, p := range placed {
+		if ids, err := c.Claimants(p, 0, true); err != nil || len(ids) > 0 {
+			errs = append(errs, fmt.Errorf("kept %q, which lessons %v record (%v)", p, ids, err))
+			continue
+		}
 		errs = append(errs, library.Remove(w.roots(), p))
 	}
 	if !library.IsSeasonDir(dir) {
-		errs = append(errs, library.Remove(w.roots(), dir))
+		if ids := c.Holds(dir, 0); len(ids) > 0 {
+			errs = append(errs, fmt.Errorf("kept %q, which holds files lessons %v record", dir, ids))
+		} else {
+			errs = append(errs, library.Remove(w.roots(), dir))
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ %d was deleted while downloading; what it wrote could not all be removed: %v\n", id, err)
+		fmt.Fprintf(w.log(), "  ⚠ %d was deleted while downloading; not everything it wrote was removed: %v\n", id, err)
 		return
 	}
 	fmt.Fprintf(w.log(), "  ⊗ %d was deleted while downloading; removed what it had written\n", id)

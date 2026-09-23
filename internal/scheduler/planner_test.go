@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -39,6 +40,9 @@ type fakePlannerStore struct {
 	downloaded map[int]bool // railcontent_id → already downloaded
 	skipped    map[int]bool // railcontent_id → recorded as skipped
 	active     map[int]bool // railcontent_id → has a queued/running job
+	// deleting marks lessons whose files a delete began removing after the
+	// planner's ShouldSkipEnqueue read: EnqueueJob refuses them.
+	deleting map[int]bool
 
 	enqueued []enqueueCall
 	upserts  []upsertCall
@@ -71,6 +75,9 @@ func (s *fakePlannerStore) ActiveJobExists(ctx context.Context, railcontentID in
 func (s *fakePlannerStore) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (int64, bool, error) {
 	if s.active == nil {
 		s.active = map[int]bool{}
+	}
+	if s.deleting[railcontentID] {
+		return 0, false, fmt.Errorf("lesson %d: %w", railcontentID, database.ErrLessonDeleting)
 	}
 	// Mirror the real store's atomic dedup: an already-active lesson returns its
 	// existing job with created=false and is not recorded as a fresh enqueue.
@@ -122,6 +129,12 @@ func (s *fakePlannerStore) CancelDownload(ctx context.Context, jobID int64, id i
 }
 func (s *fakePlannerStore) RequeueStaleRunning(ctx context.Context) (int, error) {
 	panic("RequeueStaleRunning: not expected from Planner")
+}
+func (s *fakePlannerStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
+	panic("ConfirmDownload: not expected from Planner")
+}
+func (s *fakePlannerStore) ClearStaleDeletes(ctx context.Context) (int, error) {
+	panic("ClearStaleDeletes: not expected from Planner")
 }
 
 // fakeExpander returns canned ids (or an error) per follow id. The ids map keeps
@@ -220,6 +233,25 @@ func TestPlanDoesNotReEnqueueSkipped(t *testing.T) {
 	// Every lesson is still upserted, including the skipped one.
 	if len(store.upserts) != 3 {
 		t.Errorf("upserts = %d, want 3 (all seen lessons recorded)", len(store.upserts))
+	}
+}
+
+// TestPlanSkipsALessonBeingDeleted proves a lesson whose files a delete began
+// removing between the planner's skip check and its enqueue is skipped, not a
+// failed cycle: the other lessons are still enqueued.
+func TestPlanSkipsALessonBeingDeleted(t *testing.T) {
+	store := &fakePlannerStore{
+		follows:  []database.Follow{nodeFollow()},
+		deleting: map[int]bool{31: true},
+	}
+	exp := fakeExpander{ids: map[int64][]int{1: {30, 31, 32}}}
+	p := &Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	enqueued, err := p.Plan(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+	if got, want := enqueuedIDs(store.enqueued), []int{30, 32}; enqueued != 2 || !reflect.DeepEqual(got, want) {
+		t.Errorf("enqueued %d: %v, want 2: %v", enqueued, got, want)
 	}
 }
 

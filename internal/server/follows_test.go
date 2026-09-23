@@ -17,7 +17,15 @@ import (
 // follows-read tests can seed rows directly before building the server over it.
 func newTestStore(t *testing.T) *database.Store {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
+	store, _ := newTestStoreAt(t)
+	return store
+}
+
+// newTestStoreAt is newTestStore, also returning the database file's path.
+func newTestStoreAt(t *testing.T) (*database.Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -30,7 +38,7 @@ func newTestStore(t *testing.T) *database.Store {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	return store
+	return store, path
 }
 
 // TestCreateFollowRejectsInvalidQuality verifies the create handler rejects a

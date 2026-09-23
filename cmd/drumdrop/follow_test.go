@@ -189,6 +189,10 @@ func (s *cliStore) CancelDownload(ctx context.Context, jobID int64, id int) erro
 	return nil
 }
 func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error) { return 0, nil }
+func (s *cliStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
+	return nil
+}
+func (s *cliStore) ClearStaleDeletes(ctx context.Context) (int, error) { return 0, nil }
 
 // cliExpander returns a fixed id list per follow id.
 type cliExpander struct{ ids map[int64][]int }

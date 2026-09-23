@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/library"
 )
 
 // The season-folder fixtures below mirror internal/library's, for the move and
@@ -125,3 +126,17 @@ var fiveLookAlikes = map[string][]string{
 }
 
 var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}
+
+// testMovePlexTV runs the plex-tv move as the worker does, with the claims of
+// others (none when empty) unless pl already carries claims.
+func testMovePlexTV(t *testing.T, libraryDir, show string, season, episode int, title, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
+	t.Helper()
+	if pl.claims == nil {
+		c, err := library.NewClaims(libraryDir, others)
+		if err != nil {
+			t.Fatalf("NewClaims: %v", err)
+		}
+		pl.claims = c
+	}
+	return moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, pl)
+}

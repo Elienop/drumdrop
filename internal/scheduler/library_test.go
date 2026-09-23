@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elienop/drumdrop/internal/library"
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
@@ -44,7 +45,11 @@ func seedLesson(t *testing.T) (downloadsDir, lessonDir string) {
 // movePlex runs the plex-tv move with no lesson on record (no previous
 // download, no other lesson), returning the season folder and the video.
 func movePlex(libraryDir, show string, season, episode int, title, lessonDir string) (string, string, error) {
-	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, plexLibrary{})
+	c, err := library.NewClaims(libraryDir, nil)
+	if err != nil {
+		return "", "", err
+	}
+	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, lessonDir, plexLibrary{claims: c})
 	return res.seasonDir, res.videoPath, err
 }
 

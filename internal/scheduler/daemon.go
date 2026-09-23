@@ -123,6 +123,14 @@ func (d *Daemon) Run(ctx context.Context, interval time.Duration) error {
 	} else {
 		fmt.Fprintf(d.log(), "startup: requeued %d stale running job(s)\n", reclaimed)
 	}
+	// A delete runs inside one request of this process, so a lesson still
+	// marked as being deleted was left by a process that died mid-delete: end
+	// it, or the lesson could never be downloaded again.
+	if ended, err := d.Store.ClearStaleDeletes(ctx); err != nil {
+		fmt.Fprintf(d.log(), "startup: clear stale deletes failed: %v\n", err)
+	} else if ended > 0 {
+		fmt.Fprintf(d.log(), "startup: ended %d delete(s) a previous run left unfinished\n", ended)
+	}
 
 	// Run one cycle immediately so the daemon does useful work without waiting a
 	// full interval on startup — unless paused, in which case the next un-paused

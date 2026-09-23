@@ -31,9 +31,10 @@ type plexLibrary struct {
 	// for a legacy row, its season folder and video) says which library entries
 	// are its previous files.
 	self database.Lesson
-	// others is every lesson row that records files (self may be among them),
-	// so the move never overwrites or removes an entry another lesson claims.
-	others []database.Lesson
+	// claims indexes every lesson row that records files (self may be among
+	// them), so the move never overwrites or removes an entry another lesson
+	// claims. The caller builds it; one it could not build is a failed attempt.
+	claims *library.Claims
 	// roots are the folders the move may remove entries under; empty means the
 	// library only.
 	roots []string
@@ -135,9 +136,9 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	if _, _, rerr := library.Record(lib.self); rerr != nil {
 		return plexMoveResult{}, fmt.Errorf("refusing to move: the lesson's own record of its library files is damaged, so the lesson stays whole in downloads and its record as it is: %w", rerr)
 	}
-	c, err := library.NewClaims(libraryDir, lib.others)
-	if err != nil {
-		return plexMoveResult{}, fmt.Errorf("refusing to move: %w", err)
+	c := lib.claims
+	if c == nil {
+		return plexMoveResult{}, errors.New("refusing to move: the other lessons' claims were not read")
 	}
 
 	self := lib.self.RailcontentID

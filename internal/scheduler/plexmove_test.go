@@ -62,7 +62,7 @@ func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	seedSeason(t, season, siblings...)
 	other := recordedRow(9, season, "Songs - s01e05 - Even Flow-Part 2.mp4")
 
-	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{others: []database.Lesson{other}})
+	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{}, []database.Lesson{other}...)
 	if err != nil {
 		t.Fatalf("move: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPlexTVMoveAcceptsAnyName(t *testing.T) {
 	lib := filepath.Join(tmp, "lib")
 	lessonDir := scratchLesson(t, tmp, 5, "Fill[1]",
 		[]string{" [Mix [Live].mp4", " [Original (Live) [HD]].mp4", ".nfo"}, "sheet music")
-	res, err := moveToLibraryPlexTV(lib, "Drum Fills [Beginner]", 1, 5, "Fill[1]", lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, lib, "Drum Fills [Beginner]", 1, 5, "Fill[1]", lessonDir, plexLibrary{})
 	if err != nil || res.seasonDir == "" {
 		t.Fatalf("move = (%+v, %v), want a move", res, err)
 	}
@@ -150,7 +150,7 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 				}
 				lessonDir := scratchLesson(t, tmp, 5, mover, []string{".mp4", ".nfo"})
 
-				res, err := moveToLibraryPlexTV(lib, "Show", 1, 5, mover, lessonDir, plexLibrary{self: self, others: others})
+				res, err := testMovePlexTV(t, lib, "Show", 1, 5, mover, lessonDir, plexLibrary{self: self}, others...)
 				if err != nil || res.seasonDir != season {
 					t.Fatalf("move = (%+v, %v)", res, err)
 				}
@@ -195,8 +195,8 @@ func TestPlexTVMoveReplacesThePreviousDownloadByRecord(t *testing.T) {
 	other := recordedRow(2, season, "Songs - s01e05 - Old Title-Part 2.mp4")
 	lessonDir, episodeBase, _ := seedSongScratch(t, tmp)
 
-	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir,
-		plexLibrary{self: recordedRow(1, season, previous...), others: []database.Lesson{other}})
+	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
+		plexLibrary{self: recordedRow(1, season, previous...)}, []database.Lesson{other}...)
 	if err != nil {
 		t.Fatalf("move: %v", err)
 	}
@@ -226,8 +226,8 @@ func TestPlexTVMoveRecordOutranksALegacyNameMatch(t *testing.T) {
 	legacy := legacyRow(2, "Even Flow", 5, season, "Songs - s01e05 - Even Flow [Drumless].mp4")
 	lessonDir, _, _ := seedSongScratch(t, tmp)
 
-	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir,
-		plexLibrary{self: recordedRow(1, season, mine), others: []database.Lesson{legacy}})
+	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
+		plexLibrary{self: recordedRow(1, season, mine)}, []database.Lesson{legacy}...)
 	if err != nil {
 		t.Fatalf("move: %v", err)
 	}
@@ -267,8 +267,8 @@ func TestPlexTVMoveRefusesAnEntryAnotherLessonOwns(t *testing.T) {
 			seedSeason(t, season, mine...)
 			before := readDirNames(t, season)
 
-			res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir,
-				plexLibrary{self: recordedRow(1, season, mine...), others: []database.Lesson{otherOf(season)}})
+			res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
+				plexLibrary{self: recordedRow(1, season, mine...)}, []database.Lesson{otherOf(season)}...)
 			if err == nil || !strings.Contains(err.Error(), "refusing to move") || !strings.Contains(err.Error(), "claimed by lesson [2]") {
 				t.Fatalf("err = %v, want a refusal naming lesson 2", err)
 			}
@@ -298,7 +298,7 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
 	seedSeason(t, season, episodeBase+".nfo", episodeBase+" resources/")
 
-	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
 	if res.seasonDir != season {
 		t.Fatalf("move = (%+v, %v), want a move", res, err)
 	}
@@ -324,7 +324,7 @@ func TestPlexTVMoveStopsWhenThePreviousDownloadCannotBeCleared(t *testing.T) {
 	seedSeason(t, season, stale+"/", "Songs - s01e06 - Six.mp4")
 	makeUndeletable(t, filepath.Join(season, stale))
 
-	res, err := moveToLibraryPlexTV(lib, "Songs", 1, 5, "Even Flow", lessonDir,
+	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
 		plexLibrary{self: recordedRow(1, season, stale+"/")})
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("previous download could not be removed from the library, left at %q", filepath.Join(season, stale))) {
 		t.Fatalf("err = %v, want one naming the stale entry", err)
@@ -350,7 +350,7 @@ func TestMoveToLibraryPlexTVFolderCopyFailsPartWayIsRemoved(t *testing.T) {
 	forceCopyFallback(t)
 	makeUnreadable(t, late)
 
-	res, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
 	if err == nil || res.seasonDir != "" || len(owned(res)) != 0 {
 		t.Fatalf("= (%+v, %v), want (nothing, the copy failure)", res, err)
 	}
@@ -368,7 +368,7 @@ func TestPlexTVMoveFitsLongNames(t *testing.T) {
 	show := strings.Repeat("S", 120)
 	title := strings.Repeat("é", 60) // 120 bytes, a rune boundary matters
 	lessonDir := scratchLesson(t, tmp, 5, title, []string{".mp4", ".nfo", " [Drumless].mp4"}, "resources")
-	res, err := moveToLibraryPlexTV(lib, show, 1, 5, title, lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, lib, show, 1, 5, title, lessonDir, plexLibrary{})
 	if err != nil || res.seasonDir == "" {
 		t.Fatalf("move = (%+v, %v), want a move", res, err)
 	}
@@ -385,7 +385,7 @@ func TestPlexTVMoveFitsLongNames(t *testing.T) {
 	tmp2 := t.TempDir()
 	lessonDir = scratchLesson(t, tmp2, 5, "T", []string{".mp4"})
 	// Sanitize caps a show at 150 runes; 150 two-byte runes are 300 bytes.
-	res, err = moveToLibraryPlexTV(filepath.Join(tmp2, "lib"), strings.Repeat("é", 150), 1, 5, "T", lessonDir, plexLibrary{})
+	res, err = testMovePlexTV(t, filepath.Join(tmp2, "lib"), strings.Repeat("é", 150), 1, 5, "T", lessonDir, plexLibrary{})
 	if err == nil || res.seasonDir != "" {
 		t.Errorf("= (%+v, %v), want a refusal", res, err)
 	}
@@ -461,7 +461,7 @@ func TestCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 	}
 	t.Cleanup(func() { syncFile = orig })
 
-	res, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
 	if err != nil || res.seasonDir != season {
 		t.Fatalf("move = (%+v, %v)", res, err)
 	}
@@ -484,7 +484,7 @@ func TestCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 		}
 		return orig(f)
 	}
-	res, err = moveToLibraryPlexTV(filepath.Join(tmp2, "lib"), "Songs", 1, 5, "Even Flow", lessonDir2, plexLibrary{})
+	res, err = testMovePlexTV(t, filepath.Join(tmp2, "lib"), "Songs", 1, 5, "Even Flow", lessonDir2, plexLibrary{})
 	if err == nil || res.seasonDir != "" {
 		t.Fatalf("= (%+v, %v), want the flush failure", res, err)
 	}

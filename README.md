@@ -243,10 +243,18 @@ Deleting a lesson (or a follow with its files) only ever removes files inside th
 and library dirs. A path that reaches outside them through a symlinked folder is refused,
 and so is the root of either dir. The trade-off: a symlink you placed inside the library on
 purpose, pointing at another disk, is refused too, so lessons behind it can't be deleted
-from drumdrop. If a file can't be removed, the lesson is kept (still downloaded, and
-recording only what is left), the delete answers with an error, and the detail goes to the
-server log. Deleting a follow with its files keeps the follow and all its lessons in that
-case, so no file is left that drumdrop no longer tracks.
+from drumdrop. If a file can't be removed, the lesson is kept (it reads downloaded, and
+records only the files still there), the delete answers with an error, and the detail goes
+to the server log. Deleting a follow with its files keeps the follow and all its lessons in
+that case, so no file is left that drumdrop no longer tracks.
+
+A delete stops the lesson's downloads first. While it runs, the lesson can't be downloaded
+again (a download or retry is refused until it finishes), so a delete never removes files
+a newer download just wrote. A download it stops leaves nothing behind that no lesson
+records: what it had written is removed, except anything a lesson still records. Removing
+a follow *without* its files removes no file at all: its downloads stop, and what they had
+written stays. It never stops another follow's download, even one it queued. Canceling a
+re-download leaves a lesson that still has its earlier files as downloaded.
 
 #### Plex TV layout
 

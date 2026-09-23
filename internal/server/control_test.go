@@ -23,9 +23,7 @@ func TestCancelJobRunningUsesWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	claimJob(t, store, id)
 
 	var canceledID int64
 	deps := Deps{CancelRunning: func(jobID int64) bool {
@@ -68,9 +66,7 @@ func TestCancelJobRunningFallsBackToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	claimJob(t, store, id)
 
 	// CancelRunning returns false: the job is not in-flight in this process.
 	deps := Deps{CancelRunning: func(int64) bool { return false }}

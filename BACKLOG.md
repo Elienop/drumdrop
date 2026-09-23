@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D65 on 2026-09-23 (*moves*; re-check the
+the highest ID on this page: the next new ID is D68 on 2026-09-23 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -103,14 +103,15 @@ D53 waits on an owner decision.
     `05 - New`), a switch from the default layout to plex-tv (the `Course/NN - Lesson`
     folder stays), and a plex-tv lesson moved before the library record existed
     (`library_entries` NULL) that is re-downloaded after a switch to the default layout, or
-    while the other lessons' records can't be read, or whose previous episode name is
-    ambiguous (the move logs "the previous download's library files are not known"). A
-    legacy lesson with no video whose title has changed is not found by the name fallback
-    either.
+    whose previous episode name is ambiguous (the move logs "the previous download's
+    library files are not known"). A legacy lesson with no video whose title has changed
+    is not found by the name fallback either. (When the other lessons' records can't be
+    read, the move no longer records the lesson in scratch: the attempt fails and is
+    retried, so that case is gone.)
   - *Why:* Plex shows the old copy too, and no delete will ever remove it. A lesson that
     already has a record carries it across these cases, so this is the legacy rows and the
     default layout's folder.
-  - *Evidence:* `grep -n 'carriedEntries\|previous download.s library files are not known' internal/scheduler/*.go`
+  - *Evidence:* `grep -n 'previous download.s library files are not known' internal/scheduler/*.go`
     · `grep -n 'func moveToLibrary' -A30 internal/scheduler/library.go` (only the new
     destination is cleared).
 - **D59 · A long title in a multibyte script can't be downloaded.**
@@ -122,26 +123,6 @@ D53 waits on an owner decision.
   - *Why:* such a lesson fails every attempt.
   - *Evidence:* `grep -n 'len(r) > 150' internal/musora/download.go` ·
     `grep -n 'func lessonDir' -A3 internal/scheduler/worker.go`
-- **D60 · A download a delete overtakes can still leave or lose files in two cases.**
-  - *What:* once a delete answers, no step of an earlier download records anything (its
-    writes are guarded by its job, which the delete removed), and the worker removes what
-    it wrote. Two gaps remain. (a) With no `DRUMDROP_LIBRARY_DIR`, the lesson folder is
-    also the lesson's permanent home, so the worker leaves it alone: files written after a
-    lesson delete removed that folder stay, untracked. (b) With a library, a follow
-    deleted *without* its files while one of its lessons is being re-downloaded: the
-    re-download may already have replaced the lesson's library copy, and it is then
-    discarded, so the files the owner chose to keep are gone.
-  - *Why:* (a) is an untracked leftover, (b) a lost copy. Both need the worker to know
-    which kind of delete overtook it (a lesson delete tombstones the row; a follow delete
-    removes it).
-  - *Evidence:* `grep -n 'func (w \*Worker) discardAbandoned' -A8 internal/scheduler/worker_record.go`
-- **D61 · A job canceled between two attempts is briefly re-marked running.**
-  - *What:* `MarkJobRunning` re-stamps a job by id whatever its status, so a cancel that
-    lands between a failed attempt and the next one is overwritten with `running` (and one
-    more attempt counted) before the canceled attempt ends it again.
-  - *Why:* a wrong attempt count and a job that reads as running for a moment. The download
-    itself does stop.
-  - *Evidence:* `grep -n 'passes an empty guard' internal/database/jobs.go`
 - **D62 · Plex can see half-copied files during a cross-filesystem move.**
   - *What:* on the copy fallback (downloads and library on different filesystems) the
     entries are copied into place under their final names, so a Plex scan during the copy
@@ -150,15 +131,6 @@ D53 waits on an owner decision.
     open*.)
   - *Why:* Plex may index a truncated file until its next scan.
   - *Evidence:* `grep -n 'func copyTree\|func copyFile' internal/scheduler/plexmove.go`
-- **D63 · A lesson whose re-download was canceled or deleted keeps its files as "skipped".**
-  - *What:* canceling a lesson's re-download (or a delete that removes its running job,
-    then can't remove its files) leaves the row `skipped` / `canceled` while it still
-    records its earlier files. The Lessons page offers *Delete* only for `downloaded`, so
-    those files can't be deleted from the UI until the lesson is un-skipped and downloaded
-    again.
-  - *Why:* files the UI can't reach. The API delete still works.
-  - *Evidence:* `grep -n "StatusSkipped, rcID, StatusDownloading\|func (s \*Store) CancelDownload" internal/database/downloads.go`
-    · `grep -n 'lesson.status === "downloaded"' web/src/pages/Lessons.tsx`
 - **D64 · The store still exports the unguarded download writers.**
   - *What:* the worker now records through the job-guarded writers (`StartDownload`,
     `FinishDownload`, `FailDownload`, `SkipDownload`, `CancelDownload`), and a delete
@@ -171,6 +143,29 @@ D53 waits on an owner decision.
     writers or a test-only seed helper.
   - *Evidence:* `grep -rn '\.MarkDownloaded(\|\.MarkJobDone(\|\.UpdateLessonDeleted(' --include=*.go . | grep -v _test.go`
     (prints nothing).
+- **D66 · What a stopped download wrote is known by its folder, not exactly.**
+  - *What:* a download writes into the lesson's scratch folder (`<downloads>/<Course>/NN -
+    Title`), shared with whatever is already there: an earlier download of the same lesson,
+    or a copy kept in downloads when a library move failed. When a delete that removes the
+    lesson's files stops the download, the worker removes that whole folder unless a lesson
+    row records something in it, so an *untracked* leftover of that lesson in the same
+    folder goes with it. A private folder per job (`.drumdrop-job-<id>`), renamed into
+    place on success, would make "what this job wrote" exact.
+  - *Why:* removing an untracked leftover is what the delete wanted anyway, so this is
+    exactness, not data loss; but the rule would then be provable rather than argued.
+  - *Evidence:* `grep -n 'func (w \*Worker) discardAbandoned' -A30 internal/scheduler/worker_record.go`
+- **D67 · A default-layout lesson whose library was mounted elsewhere since is "deleted"
+  without its files.**
+  - *What:* a plex-tv lesson's record is relative to the library, so it survives the
+    library moving. A default-layout lesson records only `output_dir`, an absolute path. If
+    `DRUMDROP_LIBRARY_DIR` (or the downloads folder) is later mounted at another path, a
+    delete finds nothing at the old path, treats it as already gone, and tombstones the
+    lesson, while its folder stays at the new path, untracked. The same holds for
+    `video_path` and every `output_dir` shown in the UI.
+  - *Why:* an untracked copy Plex still shows. Recording `output_dir` relative to its
+    root, as the library record is, would close it; that is a migration of every row.
+  - *Evidence:* `grep -n 'holdingRoot' -A25 internal/library/remove.go` (a missing path
+    outside every root is "already gone").
 
 - **D54 · Every API route accepts the token in the URL, not only the live-progress stream.**
   - *What:* `requestToken` in `internal/server/auth.go` reads the `Authorization: Bearer`
@@ -565,6 +560,20 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
 
 ## Accepted residuals and deliberate decisions (not work)
 
+- **D65 · No startup backfill of legacy library rows (decided 2026-09-23, this branch).** A
+  review suggested turning every plex-tv row moved before the library record existed
+  (`library_entries` NULL) into a record once, at startup, so the runtime could be
+  record-only. Not done, for three reasons. The name fallback cannot *prove* ownership, so
+  a backfill would turn every legacy guess into a record at once, for lessons nobody
+  touched, and every later delete and move would trust it as proof (owner ruling #66 says
+  files are known by record). Today a guess becomes a record only when an action on that
+  lesson already treats it as the lesson's: a re-download whose move was refused keeps
+  the previous entries it matched, and a delete that failed partway keeps the matched
+  entries it could not remove. Ambiguous rows would still need the name fallback at
+  runtime, so no code would go. And a backfill run while the library is not mounted (a
+  TrueNAS share still coming up) would record nothing, or the wrong thing, for good.
+  Revisit if the legacy fallback ever has to grow again.
+
 - **D35 · The Docker image is linux/amd64 only.** Decided on 2026-06-01 (`82baf22`, v0.2.1)
   after building arm64 under emulation hung a release for about an hour. The image step went
   from about 15 minutes to about 90 seconds. The release binaries still cover five targets
@@ -729,19 +738,63 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
   - *Was:* both delete paths called `_ = removeLessonFiles(...)`, so a refusal or a file that
     couldn't be removed was neither logged nor returned, and the lesson read as deleted
     while its files stayed.
-  - *Now:* a lesson whose files could not all be removed keeps its paths and records
-    exactly what is left, and the caller is told: a fixed 500 message, with the detail on
-    the server's stderr (never in the response). Deleting a follow with its files keeps the
-    follow and every lesson row in that case, so no file loses its row. A delete first
-    removes the lesson's queued and running jobs and kills the running download; every
-    write the worker makes is guarded by its job, so once a delete answers, no step of an
-    earlier download can record anything, and the worker removes what it wrote. A download
-    started after the delete began that records files before it finishes gets a 409, and
-    its record stands.
-  - *Evidence:* `go test -count=1 -run 'CannotBeRemoved|ReportsWhatRemains|StopsItsDownload|Meanwhile|Abandoned|StopsWhenDeleted|WorkerWritesAreAbandoned|TombstoneAndKeep|BeginLessonDelete|BeginFollowDelete'
+  - *Now:* a lesson whose files could not all be removed records only the files still
+    there (its record narrowed, `video_path` and `output_dir` cleared once what they name
+    is gone) and reads downloaded, and the caller is told: a fixed 500 message saying what
+    happened, what is left and to "Delete again", with the detail on the server's stderr
+    (never in the response). Deleting a follow with its files keeps the follow and every
+    lesson row in that case, so no file loses its row. A delete first marks the lesson as
+    being deleted and removes its queued, running and canceled jobs, then kills the
+    running download. Every write the worker makes is guarded by its job, so once a delete
+    answers, no step of an earlier download records anything; and until it answers no
+    download of the lesson can be enqueued or retried (the API answers 409, the planner
+    skips it), so the delete never removes files a newer download wrote. Its last write is
+    still a compare-and-swap on each file column (409 if the row changed, which nothing in
+    drumdrop can do now). The delete runs to the end if the client goes away, and a second
+    delete of the same lesson answers 409.
+  - *Evidence:* `go test -count=1 -run 'CannotBeRemoved|ReportsWhatRemains|KeepsOnlyWhatIsThere|StopsItsDownload|Meanwhile|BlocksNewDownloads|ClientLeaves|Damaged|Abandoned|StopsWhenDeleted|TombstoneAndKeep|KeepLessonFiles|BeginLessonDelete|BeginFollowDelete'
     ./internal/server/ ./internal/scheduler/ ./internal/database/`
-  - *Left open:* D60 (two cases a delete still can't cover), D63 (a canceled re-download
-    leaves files the UI can't delete).
+  - *Left open:* D66 (what a stopped download wrote is known by its folder, not exactly).
+- **D60 · A download a delete overtook could leave or lose files.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* the worker could not tell which kind of delete had removed its job. Without a
+    library the lesson folder was left alone, so files written after a lesson delete
+    stayed untracked; with a library (or with the library the same path as downloads) the
+    worker removed what it wrote even when a follow was removed *without* its files, so a
+    copy the owner chose to keep was deleted, and a kept copy in downloads went with it.
+    Removing one follow also stopped (and so discarded) a download another follow's lesson
+    had queued under it.
+  - *Now:* a delete records what it wants for each job it removes (`abandoned_jobs`):
+    removing the lesson's files, or keeping them. A download stopped by a keep-files
+    delete removes nothing. One stopped by a delete that removes the files removes what it
+    placed and its lesson folder, in any layout, with or without a library, except
+    anything a lesson row records by then (read fresh); if the rows can't be read, it
+    removes nothing. A follow's delete stops only its own lessons' downloads. A job
+    canceled in the database while its worker held it (before its process was registered)
+    stops at its next step instead of running to the end, and a cancel that lands once the
+    files are placed is recorded rather than leaving them untracked.
+  - *Evidence:* `go test -count=1 -run 'Abandoned|KeepsFilesWhenTheDeleteKeepsThem|HonourADatabaseCancel|HonourACancel|StopsOnlyItsOwn|WorkerWritesAreAbandoned'
+    ./internal/scheduler/ ./internal/database/ ./internal/server/`
+  - *Left open:* D66.
+- **D61 · A job canceled between two attempts was briefly re-marked running.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* `MarkJobRunning` re-stamped a job by id whatever its status, overwriting a
+    cancel with `running` and counting one more attempt.
+  - *Now:* it re-stamps only a running job; a canceled one is left as it is, and the
+    worker's next step (`StartDownload`) stops the download and records the cancel.
+  - *Evidence:* `go test -count=1 -run 'MarkJobRunningLeavesACanceledJob|HonourADatabaseCancel' ./internal/database/ ./internal/scheduler/`
+- **D63 · A lesson whose re-download was canceled or deleted kept its files as "skipped".**
+  This branch (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* canceling a re-download, or a delete that stopped one and then could not remove
+    every file, left the row `skipped` while it still recorded its earlier files, and the
+    Lessons page offered *Delete* only for `downloaded` lessons.
+  - *Now:* a download that ends without recording anything (a cancel, or a delete that
+    removed its job) leaves a lesson that still records files `downloaded`, and a delete
+    that could not remove everything leaves it `downloaded` too. The API's lesson carries
+    `has_files`, true exactly when a delete would have files to act on (the store's own
+    predicate, whatever the status); the UI half (offering Delete for any lesson with files)
+    shipped in `ce12d81` and moves onto `has_files`.
+  - *Evidence:* `go test -count=1 -run 'GuardedFailSkipCancel|DownloadingLessonWithFiles|KeepLessonFiles|HasFiles' ./internal/database/ ./internal/server/`
 - **D49 · Board and repo hygiene.** PR #20 (branch `chore/vault-onboarding`) adds this
   BACKLOG.md. It gitignores `.claude/`, which holds the CLAUDE.md symlink into the owner's
   vault, and `.mcp.json` (per-machine Claude Code config). It also tracks `sonar-project.properties` with its

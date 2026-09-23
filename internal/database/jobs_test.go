@@ -103,34 +103,53 @@ func TestMarkJobRunningIncrementsAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
-	running, err := s.GetJob(ctx, id)
-	if err != nil {
-		t.Fatalf("GetJob: %v", err)
-	}
-	if running.Status != JobRunning {
-		t.Errorf("status = %q, want %q", running.Status, JobRunning)
-	}
-	if running.Attempts != 1 {
-		t.Errorf("attempts = %d after first MarkJobRunning, want 1", running.Attempts)
-	}
-	if !running.StartedAt.Valid {
-		t.Error("started_at is NULL after MarkJobRunning, want set")
+	if _, _, err := s.ClaimNextJob(ctx); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
 	}
 
-	// A retry runs MarkJobRunning again: attempts must climb, not reset.
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("second MarkJobRunning: %v", err)
-	}
+	// A retry runs MarkJobRunning: attempts must climb from the claim's 1.
+	forceRunning(t, s, id)
 	retried, err := s.GetJob(ctx, id)
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	if retried.Attempts != 2 {
-		t.Errorf("attempts = %d after second MarkJobRunning, want 2", retried.Attempts)
+	if retried.Status != JobRunning || retried.Attempts != 2 || !retried.StartedAt.Valid {
+		t.Errorf("job = %s attempts=%d started=%v after MarkJobRunning, want running, 2, stamped", retried.Status, retried.Attempts, retried.StartedAt.Valid)
+	}
+}
+
+// TestMarkJobRunningLeavesACanceledJob (D61) proves a job canceled between two
+// attempts is never re-marked running, nor counted another attempt: the
+// re-stamp says the download was canceled and changes nothing.
+func TestMarkJobRunningLeavesACanceledJob(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for i, status := range []string{JobQueued, JobCanceled, JobDone, JobFailed} {
+		id, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 10+i)
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		if _, err := s.rawDB().Exec(`UPDATE jobs SET status = ?, attempts = 1 WHERE id = ?`, status, id); err != nil {
+			t.Fatalf("seed %s: %v", status, err)
+		}
+		if err := s.MarkJobRunning(ctx, id); !errors.Is(err, ErrDownloadCanceled) {
+			t.Errorf("MarkJobRunning(%s job) = %v, want ErrDownloadCanceled", status, err)
+		}
+		if j, _ := s.GetJob(ctx, id); j.Status != status || j.Attempts != 1 {
+			t.Errorf("%s job after MarkJobRunning = %s attempts=%d, want untouched", status, j.Status, j.Attempts)
+		}
+	}
+}
+
+// forceRunning makes job id running (one attempt more) directly, whatever its
+// status: a fixture for tests that need a running job without the queue.
+func forceRunning(t *testing.T, s *Store, id int64) {
+	t.Helper()
+	if _, err := s.rawDB().Exec(
+		`UPDATE jobs SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		JobRunning, id,
+	); err != nil {
+		t.Fatalf("force job %d running: %v", id, err)
 	}
 }
 
@@ -142,9 +161,7 @@ func TestMarkJobDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 	if err := s.MarkJobDone(ctx, id); err != nil {
 		t.Fatalf("MarkJobDone: %v", err)
 	}
@@ -181,9 +198,7 @@ func TestMarkJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 	if err := s.MarkJobFailed(ctx, id, "yt-dlp exited 1"); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
@@ -441,9 +456,7 @@ func TestActiveJobExists(t *testing.T) {
 	}
 
 	// Running: active.
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 	if active, err := s.ActiveJobExists(ctx, lesson); err != nil {
 		t.Fatalf("ActiveJobExists (running): %v", err)
 	} else if !active {
@@ -495,9 +508,7 @@ func TestListJobsByStatus(t *testing.T) {
 	}
 
 	// Move the middle job to running.
-	if err := s.MarkJobRunning(ctx, running); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, running)
 
 	gotQueued, err := s.ListJobsByStatus(ctx, JobQueued)
 	if err != nil {
@@ -608,9 +619,7 @@ func TestCancelJobRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 
 	if err := s.CancelJob(ctx, id); err != nil {
 		t.Fatalf("CancelJob: %v", err)
@@ -638,9 +647,7 @@ func TestCancelJobTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 	if err := s.MarkJobDone(ctx, id); err != nil {
 		t.Fatalf("MarkJobDone: %v", err)
 	}
@@ -679,9 +686,7 @@ func TestMarkJobCanceledRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 
 	if err := s.MarkJobCanceled(ctx, id); err != nil {
 		t.Fatalf("MarkJobCanceled on a running job: %v", err)
@@ -727,9 +732,7 @@ func TestMarkJobCanceledNonRunningNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob (done): %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, doneID); err != nil {
-		t.Fatalf("MarkJobRunning (done): %v", err)
-	}
+	forceRunning(t, s, doneID)
 	if err := s.MarkJobDone(ctx, doneID); err != nil {
 		t.Fatalf("MarkJobDone: %v", err)
 	}
@@ -766,9 +769,7 @@ func TestRetryJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := s.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, id)
 	if err := s.MarkJobFailed(ctx, id, "yt-dlp exited 1"); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
@@ -908,9 +909,7 @@ func TestListQueuedOrderAndFilter(t *testing.T) {
 	}
 
 	// Move the middle job out of the queue.
-	if err := s.MarkJobRunning(ctx, second); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, second)
 
 	queued, err := s.ListQueued(ctx)
 	if err != nil {
@@ -1017,9 +1016,7 @@ func TestEnqueueJobDedupReturnsExisting(t *testing.T) {
 	}
 
 	// Move the job to running; an enqueue must still dedup against it.
-	if err := s.MarkJobRunning(ctx, first); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	forceRunning(t, s, first)
 	third, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 909)
 	if err != nil {
 		t.Fatalf("EnqueueJob third: %v", err)

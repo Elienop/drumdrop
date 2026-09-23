@@ -134,9 +134,7 @@ func TestDeleteFollowFilesTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, jobID); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	claimJob(t, store, jobID)
 
 	// A SECOND follow with its own running job. Deleting `follow` must NOT cancel
 	// this one — it pins the cancel loop's follow-id scoping (weakening the
@@ -152,9 +150,7 @@ func TestDeleteFollowFilesTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob other: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, otherJobID); err != nil {
-		t.Fatalf("MarkJobRunning other: %v", err)
-	}
+	claimJob(t, store, otherJobID)
 
 	var canceled []int64
 	deps := Deps{CancelRunning: func(id int64) bool { canceled = append(canceled, id); return true }}

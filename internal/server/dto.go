@@ -52,6 +52,10 @@ type LessonDTO struct {
 	FirstSeenAt         *time.Time `json:"first_seen_at"`
 	DownloadedAt        *time.Time `json:"downloaded_at"`
 	UpdatedAt           *time.Time `json:"updated_at"`
+	// HasFiles is true exactly when a delete of this lesson would have files
+	// to act on (database.Lesson.HasFiles: an output_dir, or a library record
+	// that is not empty), whatever its status. Always present.
+	HasFiles bool `json:"has_files"`
 }
 
 // JobDTO is the JSON wire shape of a database.Job.
@@ -144,6 +148,7 @@ func lessonDTO(l database.Lesson) LessonDTO {
 		FirstSeenAt:         nullTime(l.FirstSeenAt),
 		DownloadedAt:        nullTime(l.DownloadedAt),
 		UpdatedAt:           nullTime(l.UpdatedAt),
+		HasFiles:            l.HasFiles(),
 	}
 }
 

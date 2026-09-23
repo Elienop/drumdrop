@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -235,22 +237,30 @@ func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 // unknown id maps cleanly to 404 (RemoveFollowCascade's own miss error is not a
 // wrapped sql.ErrNoRows).
 //
-// Order of operations:
-//  1. Remove the queued and running jobs of the follow and its lessons
-//     (BeginFollowDelete), and kill the running downloads (deps.CancelRunning,
-//     nil-safe when no worker is attached). From here on no download that was
-//     under way can record anything (see database.ErrDownloadAbandoned).
-//  2. With ?files=true, remove the files of every lesson that records any
-//     (whatever its status), following each lesson's record exactly as the
-//     lesson delete does, and tombstone each lesson whose files are all gone.
-//     If a lesson's files could not all be removed, that lesson keeps its
-//     record of what is left, the follow and every lesson row are kept, the
-//     detail is logged, and the client gets a fixed 500: deleting the rows would
-//     leave those files tracked by nothing. Default (?files absent/false) keeps
-//     the files — delete is opt-in.
-//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx). With
-//     ?files=true the cascade refuses (409) if a lesson records files again by
-//     then (a download that started after step 1 finished meanwhile).
+// Without ?files=true (the default: delete is opt-in) the files stay: one
+// transaction removes the jobs of the follow's lessons, the lessons and the
+// follow (RemoveFollowCascade), then the running downloads are killed; what
+// they wrote is kept, as asked. Jobs the follow queued for another follow's
+// lessons are left alone.
+//
+// With ?files=true:
+//  1. Mark every lesson of the follow deleting and remove their queued,
+//     running and canceled jobs (BeginFollowDelete), then kill the running
+//     downloads (deps.CancelRunning, nil-safe when no worker is attached).
+//     From here on no download that was under way can record anything, and no
+//     new one can start for those lessons; what a stopped download wrote is
+//     removed by the worker. The delete runs to the end even if the client
+//     goes away, and always ends the marks.
+//  2. Remove the files of every lesson that records any (whatever its
+//     status), following each lesson's record exactly as the lesson delete
+//     does, and tombstone each lesson whose files are all gone. If a lesson's
+//     files could not all be removed, that lesson records only what is left,
+//     the follow and every lesson row are kept, the detail is logged, and the
+//     client gets a fixed 500: deleting the rows would leave those files
+//     tracked by nothing.
+//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx). It
+//     refuses (409) if a lesson records files again by then (one the planner
+//     found after step 1 and downloaded meanwhile).
 func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
@@ -261,48 +271,75 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Stop every download of this follow, for good.
+	if !deleteFilesRequested(r) {
+		s.removeFollowKeepingFiles(w, r, id)
+		return
+	}
+
+	// 1. Stop every download of this follow's lessons, for good.
 	lessons, running, err := s.store.BeginFollowDelete(r.Context(), id)
+	if errors.Is(err, database.ErrLessonDeleting) {
+		writeErr(w, http.StatusConflict, msgFollowDeleting)
+		return
+	}
 	if err != nil {
 		writeStoreErr(w, err, "follow not found")
 		return
 	}
+	ctx := context.WithoutCancel(r.Context())
+	ids := make([]int, 0, len(lessons))
+	for _, l := range lessons {
+		ids = append(ids, l.RailcontentID)
+	}
+	defer s.endDelete(ctx, ids...)
 	s.killRunning(running)
 
-	if !deleteFilesRequested(r) {
-		// 3. Records only; the files stay where they are.
-		if err := s.store.RemoveFollowCascade(r.Context(), id); err != nil {
-			writeErr(w, http.StatusInternalServerError, "could not delete follow")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
 	// 2. Remove every lesson's files, then its paths.
-	if !s.deleteFollowFiles(w, r, lessons) {
+	if !s.deleteFollowFiles(ctx, w, lessons) {
 		return
 	}
 	// 3. Cascade, unless a lesson records files again by now.
-	switch err := s.store.RemoveFilelessFollowCascade(r.Context(), id); {
+	running, err = s.store.RemoveFilelessFollowCascade(ctx, id)
+	switch {
 	case errors.Is(err, database.ErrFollowHasFiles):
-		writeErr(w, http.StatusConflict, "a lesson of this follow was downloaded while it was being deleted; try again")
+		writeErr(w, http.StatusConflict, msgFollowNewFiles)
 		return
 	case err != nil:
-		writeErr(w, http.StatusInternalServerError, "could not delete follow")
+		fmt.Fprintf(logOut, "drumdrop: remove follow %d: %v\n", id, err)
+		writeErr(w, http.StatusInternalServerError, msgFollowNotUpdated)
 		return
 	}
+	s.killRunning(running)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deleteFollowFiles removes the files of every lesson that records any, and
-// tombstones each one whose files are all gone. It writes the error response
-// and returns false when any lesson's files could not all be removed (that
-// lesson keeps its record) or a store step failed.
-func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lessons []database.Lesson) bool {
-	c, err := s.claims(r.Context())
+// removeFollowKeepingFiles removes follow id and its lessons' rows, keeping
+// every file, and kills the downloads it stopped.
+func (s *Server) removeFollowKeepingFiles(w http.ResponseWriter, r *http.Request, id int64) {
+	running, err := s.store.RemoveFollowCascade(r.Context(), id)
+	switch {
+	case errors.Is(err, database.ErrLessonDeleting):
+		writeErr(w, http.StatusConflict, msgFollowDeleting)
+		return
+	case err != nil:
+		fmt.Fprintf(logOut, "drumdrop: remove follow %d: %v\n", id, err)
+		writeErr(w, http.StatusInternalServerError, msgFollowNotRemoved)
+		return
+	}
+	s.killRunning(running)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteFollowFiles removes the files of every lesson that has any
+// (Lesson.HasFiles), and tombstones each one whose files are all gone. The
+// lessons are as BeginFollowDelete read them, and nothing can change them
+// meanwhile: no download can record for a lesson being deleted. It writes the
+// error response and returns false when any lesson's files could not all be
+// removed (that lesson records what is left) or a store step failed.
+func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, lessons []database.Lesson) bool {
+	c, err := s.claims(ctx)
 	if errors.Is(err, errFilesKept) {
-		writeErr(w, http.StatusInternalServerError, "could not delete every lesson's files; the follow was kept (see the server log)")
+		writeErr(w, http.StatusInternalServerError, msgFollowFilesKept)
 		return false
 	}
 	if err != nil {
@@ -311,14 +348,17 @@ func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lesso
 	}
 	kept, changed := 0, 0
 	for _, l := range lessons {
-		if !l.OutputDir.Valid && !l.LibraryEntries.Valid {
+		if !l.HasFiles() {
 			continue // no files recorded: the cascade removes the row
 		}
-		switch err := s.deleteLessonFiles(r.Context(), c, l); {
+		switch err := s.deleteLessonFiles(ctx, c, l); {
 		case errors.Is(err, errFilesKept):
 			kept++
 		case errors.Is(err, database.ErrLessonChanged):
 			changed++
+		case errors.Is(err, errRecordNotUpdated):
+			writeErr(w, http.StatusInternalServerError, msgFollowNotUpdated)
+			return false
 		case err != nil:
 			writeStoreErr(w, err, "follow not found")
 			return false
@@ -330,10 +370,10 @@ func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lesso
 	}
 	switch {
 	case kept > 0:
-		writeErr(w, http.StatusInternalServerError, "could not delete every lesson's files; the follow was kept (see the server log)")
+		writeErr(w, http.StatusInternalServerError, msgFollowFilesKept)
 		return false
 	case changed > 0:
-		writeErr(w, http.StatusConflict, "a lesson of this follow was downloaded while it was being deleted; try again")
+		writeErr(w, http.StatusConflict, msgFollowLessonChanged)
 		return false
 	}
 	return true

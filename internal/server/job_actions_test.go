@@ -50,9 +50,7 @@ func TestCancelJobTerminalConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	claimJob(t, store, id)
 	if err := store.MarkJobDone(ctx, id); err != nil {
 		t.Fatalf("MarkJobDone: %v", err)
 	}
@@ -101,9 +99,7 @@ func TestRetryJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
+	claimJob(t, store, id)
 	if err := store.MarkJobFailed(ctx, id, "boom"); err != nil {
 		t.Fatalf("MarkJobFailed: %v", err)
 	}
