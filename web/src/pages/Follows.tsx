@@ -1,11 +1,12 @@
 import * as React from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
+import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
+import { rowFocusTargets } from "@/lib/focus"
 import type { FollowDTO } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -24,31 +25,38 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { ConfirmDialog } from "@/components/ConfirmDialog"
 import { QueryStatus } from "@/components/QueryState"
 import { AddFollowDialog } from "@/pages/follows/AddFollowDialog"
 import { EditFollowDialog } from "@/pages/follows/EditFollowDialog"
+
+// A dialog opened from a row remembers the row order at that moment, so focus
+// can return to a neighbour if the row itself has left the list on close.
+interface RowDialog {
+  follow: FollowDTO
+  order: number[]
+}
+
+const editSelector = (id: number) => `[data-follow-edit="${id}"]`
+const removeSelector = (id: number) => `[data-follow-remove="${id}"]`
 
 export function Follows() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const follows = useQuery({ queryKey: qk.follows, queryFn: api.listFollows })
   const [addOpen, setAddOpen] = React.useState(false)
-  const [editing, setEditing] = React.useState<FollowDTO | null>(null)
-  const [removing, setRemoving] = React.useState<FollowDTO | null>(null)
+  const [editing, setEditing] = React.useState<RowDialog | null>(null)
+  const [removing, setRemoving] = React.useState<RowDialog | null>(null)
   const [deleteFiles, setDeleteFiles] = React.useState(false)
+  const headingRef = React.useRef<HTMLHeadingElement>(null)
+  const addButtonRef = React.useRef<HTMLButtonElement>(null)
+  const deleteFilesId = React.useId()
 
   // Reset the "also delete files" checkbox whenever the unfollow dialog closes
-  // so a fresh unfollow starts with the safe default (off).
+  // so a fresh unfollow starts with the safe default (off). A failed attempt
+  // keeps the dialog open, and so keeps the choice for the retry.
   React.useEffect(() => {
     if (!removing) setDeleteFiles(false)
   }, [removing])
@@ -58,46 +66,40 @@ export function Follows() {
   // and tombstones every lesson whose files are all gone, and only then drops
   // the follow. A 500 or 409 keeps the follow, but by then the jobs are gone
   // and some lessons may already be tombstoned. So the refresh runs on FAILURE
-  // too (onSettled): follows, summary, jobs, and the raw ["lessons"] prefix for
-  // every keyed Lessons view. Returned, so isPending holds until they land.
-  const remove = useMutation({
-    mutationFn: ({ id, files }: { id: number; files: boolean }) =>
-      api.unfollow(id, { deleteFiles: files }),
-    onSuccess: () => {
-      toast.success("Follow removed")
-      setRemoving(null)
-    },
-    onSettled: () =>
+  // too (finally): follows, summary, jobs, and the raw ["lessons"] prefix for
+  // every keyed Lessons view. The dialog stays pending until they land.
+  const unfollow = (id: number, files: boolean) =>
+    api.unfollow(id, { deleteFiles: files }).finally(() =>
       Promise.all([
         qc.invalidateQueries({ queryKey: qk.follows }),
         qc.invalidateQueries({ queryKey: qk.summary }),
         qc.invalidateQueries({ queryKey: qk.jobs() }),
         qc.invalidateQueries({ queryKey: ["lessons"] }),
       ]),
-  })
+    )
 
-  // The dialog stays open on failure: the server's answer shows next to the
-  // follow it is about, and the "also delete files" choice is kept for a retry
-  // (closing resets it, so a retry from a fresh dialog could silently drop the
-  // files half of the request). It cannot be dismissed mid-request, or the
-  // answer would land in a closed dialog and be lost. Closing clears it.
-  const removeErrorId = React.useId()
-  const removeError = remove.isError
-    ? remove.error instanceof ApiHttpError
-      ? remove.error.message
-      : "Remove failed"
-    : null
-  const closeRemove = () => {
-    if (remove.isPending) return
-    setRemoving(null)
-    remove.reset()
-  }
+  const openRowDialog = (set: (d: RowDialog) => void, follow: FollowDTO) =>
+    set({ follow, order: (follows.data ?? []).map((f) => f.id) })
+
+  // Where focus goes when a row's dialog closes: the button that opened it, the
+  // same button on a neighbouring row when the follow is gone, else the page
+  // heading.
+  const rowReturn = (d: RowDialog | null, selector: (id: number) => string) => () =>
+    d ? rowFocusTargets(d.order, d.follow.id, selector, headingRef.current) : [headingRef.current]
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold">Follows</h1>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
+        {/* tabIndex -1: the last place focus can return to when a dialog
+            closes and neither its row nor a neighbour is left. */}
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="rounded-md text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          Follows
+        </h1>
+        <Button ref={addButtonRef} size="sm" onClick={() => setAddOpen(true)}>
           <Plus />
           Add follow
         </Button>
@@ -151,9 +153,10 @@ export function Follows() {
                         variant="ghost"
                         size="sm"
                         aria-label={`Edit ${f.title}`}
+                        data-follow-edit={f.id}
                         onClick={(e) => {
                           e.stopPropagation()
-                          setEditing(f)
+                          openRowDialog(setEditing, f)
                         }}
                       >
                         <Pencil />
@@ -163,9 +166,10 @@ export function Follows() {
                         variant="ghost"
                         size="sm"
                         aria-label={`Remove ${f.title}`}
+                        data-follow-remove={f.id}
                         onClick={(e) => {
                           e.stopPropagation()
-                          setRemoving(f)
+                          openRowDialog(setRemoving, f)
                         }}
                       >
                         <Trash2 />
@@ -182,62 +186,50 @@ export function Follows() {
         </CardContent>
       </Card>
 
-      <AddFollowDialog open={addOpen} onOpenChange={setAddOpen} />
+      <AddFollowDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        returnFocus={() => [addButtonRef.current, headingRef.current]}
+      />
 
       <EditFollowDialog
-        follow={editing}
+        follow={editing?.follow ?? null}
         onOpenChange={(open) => {
           if (!open) setEditing(null)
         }}
+        returnFocus={rowReturn(editing, editSelector)}
       />
 
-      <Dialog
+      <ConfirmDialog
         open={removing !== null}
         onOpenChange={(open) => {
-          if (!open) closeRemove()
+          if (!open) setRemoving(null)
         }}
+        title={removing ? `Remove “${removing.follow.title}”?` : "Remove follow?"}
+        description="Removing it stops its queued and running downloads, stops tracking it, and clears its lesson history. Downloaded files stay where they are unless you also delete them."
+        confirmLabel="Remove"
+        pendingLabel="Removing…"
+        onConfirm={() =>
+          removing ? unfollow(removing.follow.id, deleteFiles) : Promise.resolve()
+        }
+        announce={() => toast.success("Follow removed", { description: removing?.follow.title })}
+        subject={removing?.follow.title}
+        returnFocus={rowReturn(removing, removeSelector)}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {removing ? `Remove ${removing.title}?` : "Remove follow?"}
-            </DialogTitle>
-            <DialogDescription>
-              This stops tracking it and clears its lesson history.
-            </DialogDescription>
-          </DialogHeader>
-
-          <Label className="font-normal">
+        {({ pending }) => (
+          <div className="flex items-center justify-center gap-2 sm:justify-start">
             <Checkbox
+              id={deleteFilesId}
               checked={deleteFiles}
+              disabled={pending}
               onCheckedChange={(c) => setDeleteFiles(c === true)}
             />
-            Also delete downloaded files
-          </Label>
-
-          {removeError !== null && (
-            <p id={removeErrorId} role="alert" className="text-sm text-destructive">
-              {removeError}
-            </p>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" disabled={remove.isPending} onClick={closeRemove}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={remove.isPending}
-              aria-describedby={removeError !== null ? removeErrorId : undefined}
-              onClick={() => {
-                if (removing) remove.mutate({ id: removing.id, files: deleteFiles })
-              }}
-            >
-              Remove
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <Label htmlFor={deleteFilesId} className="font-normal">
+              Also delete downloaded files
+            </Label>
+          </div>
+        )}
+      </ConfirmDialog>
     </div>
   )
 }

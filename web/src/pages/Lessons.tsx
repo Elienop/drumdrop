@@ -1,12 +1,13 @@
 import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
-import { ChevronLeft, ChevronRight, MoreHorizontal, Trash2, X } from "lucide-react"
+import { ChevronLeft, ChevronRight, MoreHorizontal, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { formatBytes, formatRelativeTime } from "@/lib/format"
+import { rowFocusTargets } from "@/lib/focus"
 import type { ActiveDownload } from "@/lib/sse-reducer"
 import type { LessonDTO, LessonStatus } from "@/types"
 import { Badge } from "@/components/ui/badge"
@@ -36,17 +37,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
 import { StatusBadge } from "@/components/StatusBadge"
 import { ProgressRow } from "@/components/ProgressRow"
 import { QueryStatus } from "@/components/QueryState"
+import { ConfirmDialog } from "@/components/ConfirmDialog"
 
 const STATUS_TABS: LessonStatus[] = [
   "pending",
@@ -57,20 +52,14 @@ const STATUS_TABS: LessonStatus[] = [
 ]
 const PAGE_SIZE = 50
 
-// hasRecordedFiles reports whether the server still records files for the
-// lesson, whatever its status: a canceled or failed re-download, or a delete
-// that removed the lesson's job but not its files, leaves a skipped, failed or
-// pending lesson that still owns its earlier files (BACKLOG D63).
-//
-// The server's own predicate is `output_dir IS NOT NULL OR library_entries IS
-// NOT NULL`, and the DTO carries only output_dir. That is enough today because
-// every writer that sets library_entries also sets output_dir (FinishDownload),
-// and every writer that clears output_dir clears library_entries with it
-// (TombstoneLesson). A server change that breaks that pairing needs a field
-// on LessonDTO, not a wider guess here.
-function hasRecordedFiles(lesson: LessonDTO): boolean {
-  return lesson.output_dir !== null
+// A dialog opened from a row remembers the row order at that moment, so focus
+// can return to a neighbour if the row itself has left the list on close.
+interface RowDialog {
+  lesson: LessonDTO
+  order: number[]
 }
+
+const actionsSelector = (id: number) => `[data-row-actions="${id}"]`
 
 export function Lessons() {
   const qc = useQueryClient()
@@ -81,8 +70,16 @@ export function Lessons() {
   const [tab, setTab] = React.useState<"all" | LessonStatus>("all")
   const [offset, setOffset] = React.useState(0)
   const [search, setSearch] = React.useState("")
-  const [skipping, setSkipping] = React.useState<LessonDTO | null>(null)
-  const [deleting, setDeleting] = React.useState<LessonDTO | null>(null)
+  const [skipping, setSkipping] = React.useState<RowDialog | null>(null)
+  const [skipReason, setSkipReason] = React.useState("")
+  const skipReasonId = React.useId()
+  const [deleting, setDeleting] = React.useState<RowDialog | null>(null)
+  const headingRef = React.useRef<HTMLHeadingElement>(null)
+
+  // A fresh Skip starts without the last one's reason.
+  React.useEffect(() => {
+    if (!skipping) setSkipReason("")
+  }, [skipping])
 
   const status = tab === "all" ? undefined : tab
 
@@ -133,20 +130,6 @@ export function Lessons() {
     },
   })
 
-  const skip = useMutation({
-    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
-      api.skipLesson(id, { reason: reason || undefined }),
-    onSuccess: () => {
-      toast.success("Lesson skipped")
-      setSkipping(null)
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
-    },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Skip failed")
-    },
-  })
-
   const cancel = useMutation({
     mutationFn: (jobId: number) => api.cancelJob(jobId),
     onSuccess: () => {
@@ -177,43 +160,38 @@ export function Lessons() {
   // jobs (killing a running download), then removes its recorded files and
   // tombstone-skips the row (skipped, paths cleared).
   //
-  // The refresh runs on FAILURE too (onSettled, not onSuccess): a 500 or 409
-  // arrives after the jobs were already removed, so the lesson's status and the
-  // jobs list changed even though the files were kept. The raw ["lessons"]
-  // prefix covers every keyed/live variant, summary the per-status counts.
-  // Returned, so isPending (and the disabled Delete) holds until the refreshed
-  // lists have landed, and a failure's message appears together with them.
-  //
-  // A failure is shown inside the dialog, not as a toast: see the dialog below.
-  const deleteLesson = useMutation({
-    mutationFn: (id: number) => api.deleteLesson(id),
-    onSuccess: () => {
-      toast.success("Lesson deleted")
-      setDeleting(null)
-    },
-    onSettled: () =>
+  // The refresh runs on FAILURE too (finally): a 500 or 409 arrives after the
+  // jobs were already removed, so the lesson's status and the jobs list changed
+  // even though files were kept. The raw ["lessons"] prefix covers every
+  // keyed/live variant, summary the per-status counts. The dialog stays
+  // pending until the refresh lands, so a failure's message appears together
+  // with the refreshed lists, and on success focus returns to a row that is
+  // already where the server says it is.
+  const deleteLesson = (id: number) =>
+    api.deleteLesson(id).finally(() =>
       Promise.all([
         qc.invalidateQueries({ queryKey: qk.jobs() }),
         qc.invalidateQueries({ queryKey: ["lessons"] }),
         qc.invalidateQueries({ queryKey: qk.summary }),
       ]),
-  })
+    )
 
-  // The dialog stays open on failure, so the user reads the server's answer
-  // next to the lesson it is about and can retry (a 409 asks for exactly that)
-  // or cancel. It cannot be dismissed mid-request, or the answer would land in
-  // a closed dialog and be lost. Closing clears the answer.
-  const deleteErrorId = React.useId()
-  const deleteError = deleteLesson.isError
-    ? deleteLesson.error instanceof ApiHttpError
-      ? deleteLesson.error.message
-      : "Delete failed"
-    : null
-  const closeDelete = () => {
-    if (deleteLesson.isPending) return
-    setDeleting(null)
-    deleteLesson.reset()
-  }
+  const skipLesson = (id: number, reason: string) =>
+    api.skipLesson(id, { reason: reason || undefined }).then(() =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: ["lessons"] }),
+        qc.invalidateQueries({ queryKey: qk.summary }),
+      ]),
+    )
+
+  // Where focus goes when a row's dialog closes: the row's Actions button, a
+  // neighbour's when the row has left the list, else the page heading.
+  const rowReturn = (d: RowDialog | null) => () =>
+    d
+      ? rowFocusTargets(d.order, d.lesson.railcontent_id, actionsSelector, headingRef.current)
+      : [headingRef.current]
+  const openRowDialog = (set: (d: RowDialog) => void, lesson: LessonDTO) =>
+    set({ lesson, order: rows.map((r) => r.railcontent_id) })
 
   const copyPath = (lesson: LessonDTO) => {
     const path = lesson.video_path ?? lesson.output_dir
@@ -248,7 +226,15 @@ export function Lessons() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold">Lessons</h1>
+        {/* tabIndex -1: the last place focus can return to when a dialog
+            closes and neither its row nor a neighbour is left. */}
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="rounded-md text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          Lessons
+        </h1>
         <Input
           type="search"
           placeholder="Search titles…"
@@ -346,6 +332,7 @@ export function Lessons() {
                               variant="ghost"
                               size="icon"
                               aria-label={`Actions for ${lesson.title}`}
+                              data-row-actions={lesson.railcontent_id}
                             >
                               <MoreHorizontal />
                             </Button>
@@ -364,7 +351,7 @@ export function Lessons() {
                                         if (jobId !== undefined) cancel.mutate(jobId)
                                       }}
                                     >
-                                      Cancel
+                                      Cancel download
                                     </DropdownMenuItem>
                                   )
                                 })()
@@ -389,7 +376,7 @@ export function Lessons() {
                                   {(lesson.status === "pending" ||
                                     lesson.status === "failed") && (
                                     <DropdownMenuItem
-                                      onSelect={() => setSkipping(lesson)}
+                                      onSelect={() => openRowDialog(setSkipping, lesson)}
                                     >
                                       Skip
                                     </DropdownMenuItem>
@@ -400,15 +387,18 @@ export function Lessons() {
                                 Copy path
                               </DropdownMenuItem>
                             </DropdownMenuGroup>
-                            {hasRecordedFiles(lesson) && (
+                            {/* Whatever the status: a canceled or failed
+                                re-download, or a delete that stopped the job
+                                but kept files, leaves a lesson that still owns
+                                files (BACKLOG D63). */}
+                            {lesson.has_files && (
                               <>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuGroup>
                                   <DropdownMenuItem
                                     variant="destructive"
-                                    onSelect={() => setDeleting(lesson)}
+                                    onSelect={() => openRowDialog(setDeleting, lesson)}
                                   >
-                                    <Trash2 />
                                     Delete
                                   </DropdownMenuItem>
                                 </DropdownMenuGroup>
@@ -451,102 +441,52 @@ export function Lessons() {
         </CardContent>
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={skipping !== null}
         onOpenChange={(open) => {
           if (!open) setSkipping(null)
         }}
+        title={skipping ? `Skip “${skipping.lesson.title}”?` : "Skip lesson?"}
+        description="Syncs leave a skipped lesson alone. Un-skip it later to let them download it."
+        confirmLabel="Skip"
+        pendingLabel="Skipping…"
+        confirmVariant="default"
+        onConfirm={() =>
+          skipping ? skipLesson(skipping.lesson.railcontent_id, skipReason) : Promise.resolve()
+        }
+        announce={() => toast.success("Lesson skipped", { description: skipping?.lesson.title })}
+        subject={skipping?.lesson.title}
+        returnFocus={rowReturn(skipping)}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Skip lesson</DialogTitle>
-            <DialogDescription>
-              {skipping ? `Skip "${skipping.title}"?` : "Skip this lesson?"}
-            </DialogDescription>
-          </DialogHeader>
-          <SkipForm
-            pending={skip.isPending}
-            onConfirm={(reason) => {
-              if (skipping) skip.mutate({ id: skipping.railcontent_id, reason })
-            }}
-            onCancel={() => setSkipping(null)}
-          />
-        </DialogContent>
-      </Dialog>
+        {({ pending }) => (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor={skipReasonId}>Reason (optional)</Label>
+            <Input
+              id={skipReasonId}
+              value={skipReason}
+              disabled={pending}
+              onChange={(e) => setSkipReason(e.target.value)}
+            />
+          </div>
+        )}
+      </ConfirmDialog>
 
-      <Dialog
+      <ConfirmDialog
         open={deleting !== null}
         onOpenChange={(open) => {
-          if (!open) closeDelete()
+          if (!open) setDeleting(null)
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {deleting ? `Delete "${deleting.title}"?` : "Delete lesson?"}
-            </DialogTitle>
-            <DialogDescription>
-              This removes the downloaded files (downloads + library) and cancels
-              any queued or running download of it. The lesson is marked skipped
-              so it is not re-downloaded; un-skip to restore it.
-            </DialogDescription>
-          </DialogHeader>
-          {deleteError !== null && (
-            <p id={deleteErrorId} role="alert" className="text-sm text-destructive">
-              {deleteError}
-            </p>
-          )}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              disabled={deleteLesson.isPending}
-              onClick={closeDelete}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={deleteLesson.isPending}
-              aria-describedby={deleteError !== null ? deleteErrorId : undefined}
-              onClick={() => {
-                if (deleting) deleteLesson.mutate(deleting.railcontent_id)
-              }}
-            >
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  )
-}
-
-function SkipForm({
-  pending,
-  onConfirm,
-  onCancel,
-}: {
-  pending: boolean
-  onConfirm: (reason: string) => void
-  onCancel: () => void
-}) {
-  const [reason, setReason] = React.useState("")
-  return (
-    <>
-      <Input
-        placeholder="Reason (optional)"
-        value={reason}
-        onChange={(e) => setReason(e.target.value)}
-        aria-label="Skip reason"
+        title={deleting ? `Delete “${deleting.lesson.title}”?` : "Delete lesson?"}
+        description="Its files are deleted from both the downloads folder and the library, and any queued or running download of it is stopped. The lesson is then marked skipped so the next sync leaves it alone; un-skip it to download it again."
+        confirmLabel="Delete"
+        pendingLabel="Deleting…"
+        onConfirm={() =>
+          deleting ? deleteLesson(deleting.lesson.railcontent_id) : Promise.resolve()
+        }
+        announce={() => toast.success("Lesson deleted", { description: deleting?.lesson.title })}
+        subject={deleting?.lesson.title}
+        returnFocus={rowReturn(deleting)}
       />
-      <DialogFooter>
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button disabled={pending} onClick={() => onConfirm(reason)}>
-          Skip
-        </Button>
-      </DialogFooter>
-    </>
+    </div>
   )
 }

@@ -1,10 +1,11 @@
 import * as React from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
+import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
+import { useDialogRequest } from "@/lib/dialog-request"
+import type { FocusTarget } from "@/lib/focus"
 import type { CreateFollowRequest, PreviewResponse } from "@/types"
-import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { InlineError } from "@/components/InlineError"
+import { PendingButton } from "@/components/PendingButton"
 
 type Kind = "node" | "instructor"
 
@@ -36,12 +39,18 @@ export const QUALITY_OPTIONS = ["best", "2160", "1440", "1080", "720", "480"] as
 // instructor), a Preview button that fetches the title + lesson_count, and an
 // Add button that registers the follow. createFollow resolves to { status,
 // data }: 201 → newly created ("Following …"), 200 → already following.
+//
+// A failure of either step shows inside the dialog (the 400 "check the URL or
+// slug" and 502 carry a clean server message), so the user can correct the
+// input; a toast would not be heard while the modal hides the rest of the page.
 export function AddFollowDialog({
   open,
   onOpenChange,
+  returnFocus,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  returnFocus: () => FocusTarget[]
 }) {
   const qc = useQueryClient()
   const [kind, setKind] = React.useState<Kind>("node")
@@ -50,6 +59,9 @@ export function AddFollowDialog({
   const [brand, setBrand] = React.useState("")
   const [quality, setQuality] = React.useState("best")
   const [preview, setPreview] = React.useState<PreviewResponse | null>(null)
+  const [step, setStep] = React.useState<"preview" | "add">("preview")
+  const { pending, error, run, onCloseAutoFocus } = useDialogRequest({ open, returnFocus })
+  const errorId = React.useId()
 
   // Reset the form whenever the dialog closes so a reopen starts clean.
   React.useEffect(() => {
@@ -69,44 +81,48 @@ export function AddFollowDialog({
     setPreview(null)
   }
 
-  const previewMut = useMutation({
-    mutationFn: () =>
-      kind === "node"
-        ? api.preview({ id })
-        : api.preview({ slug, brand: brand || undefined }),
-    onSuccess: (data) => setPreview(data),
-    onError: (err) => {
-      if (err instanceof ApiHttpError) toast.error(err.message)
-    },
-  })
-
-  const addMut = useMutation({
-    mutationFn: () => {
-      const body: CreateFollowRequest =
+  const runPreview = () => {
+    setStep("preview")
+    void run(
+      () =>
         kind === "node"
-          ? { kind: "node", id, quality }
-          : { kind: "instructor", slug, brand: brand || undefined, quality }
-      return api.createFollow(body)
-    },
-    onSuccess: ({ status, data }) => {
-      if (status === 201) toast.success(`Following ${data.title}`)
-      else toast.message(`Already following ${data.title}`)
-      qc.invalidateQueries({ queryKey: qk.follows })
-      qc.invalidateQueries({ queryKey: qk.summary })
-      onOpenChange(false)
-    },
-    onError: (err) => {
-      // 400 ("check the URL or slug") / 502 carry a clean server message; keep
-      // the dialog open so the user can correct the input.
-      if (err instanceof ApiHttpError) toast.error(err.message)
-    },
-  })
+          ? api.preview({ id })
+          : api.preview({ slug, brand: brand || undefined }),
+      { keepOpen: true, done: setPreview },
+    )
+  }
+
+  const runAdd = () => {
+    setStep("add")
+    const body: CreateFollowRequest =
+      kind === "node"
+        ? { kind: "node", id, quality }
+        : { kind: "instructor", slug, brand: brand || undefined, quality }
+    void run(
+      async () => {
+        const res = await api.createFollow(body)
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: qk.follows }),
+          qc.invalidateQueries({ queryKey: qk.summary }),
+        ])
+        return res
+      },
+      {
+        done: () => onOpenChange(false),
+        announce: ({ status, data }) => {
+          if (status === 201) toast.success(`Following ${data.title}`)
+          else toast.message(`Already following ${data.title}`)
+        },
+        subject: preview?.title,
+      },
+    )
+  }
 
   const canPreview = kind === "node" ? id.trim() !== "" : slug.trim() !== ""
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Add follow</DialogTitle>
           <DialogDescription>
@@ -175,20 +191,28 @@ export function AddFollowDialog({
           </div>
         )}
 
+        <InlineError id={errorId} error={error} />
+
         <DialogFooter>
-          <Button
+          <PendingButton
             variant="outline"
-            onClick={() => previewMut.mutate()}
-            disabled={!canPreview || previewMut.isPending}
+            pending={pending && step === "preview"}
+            pendingLabel="Previewing…"
+            disabled={!canPreview || (pending && step !== "preview")}
+            aria-describedby={error !== null && step === "preview" ? errorId : undefined}
+            onClick={runPreview}
           >
             Preview
-          </Button>
-          <Button
-            onClick={() => addMut.mutate()}
-            disabled={!preview || addMut.isPending}
+          </PendingButton>
+          <PendingButton
+            pending={pending && step === "add"}
+            pendingLabel="Adding…"
+            disabled={!preview || (pending && step !== "add")}
+            aria-describedby={error !== null && step === "add" ? errorId : undefined}
+            onClick={runAdd}
           >
             Add
-          </Button>
+          </PendingButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

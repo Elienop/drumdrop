@@ -24,6 +24,10 @@ export interface LessonDTO {
   quality: string | null
   output_dir: string | null
   video_path: string | null
+  // has_files is true exactly when deleting the lesson would have files to act
+  // on (its downloads folder or library entries are on record), whatever its
+  // status. The server owns that predicate; output_dir alone does not say it.
+  has_files: boolean
   bytes: number | null
   error: string | null
   follow_id: number | null

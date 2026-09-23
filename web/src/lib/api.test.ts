@@ -38,6 +38,22 @@ it("throws ApiHttpError with the {error} message and status", async () => {
   })
 })
 
+it("marks an error body from the server, and one without it, so the UI can fall back to its own copy", async () => {
+  fetchMock.mockResolvedValueOnce(jsonResponse({ error: "follow not found" }, 404))
+  await expect(api.getFollow(1)).rejects.toMatchObject({ fromServer: true })
+
+  // A proxy's empty 502: the message is only "HTTP 502", which names no next step.
+  fetchMock.mockResolvedValueOnce(new Response(null, { status: 502 }))
+  await expect(api.deleteLesson(1)).rejects.toMatchObject({
+    status: 502,
+    message: "HTTP 502",
+    fromServer: false,
+  })
+  // The same for the requestWithStatus path.
+  fetchMock.mockResolvedValueOnce(jsonResponse({ nope: 1 }, 500))
+  await expect(api.sync(false)).rejects.toMatchObject({ status: 500, fromServer: false })
+})
+
 it("clears the token on 401", async () => {
   setToken("bad")
   fetchMock.mockResolvedValue(jsonResponse({ error: "unauthorized" }, 401))

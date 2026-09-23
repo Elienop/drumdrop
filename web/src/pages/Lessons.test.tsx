@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest"
+import { beforeAll, describe, expect, it, vi } from "vitest"
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
+import { toast } from "sonner"
 import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
 import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
@@ -26,6 +27,7 @@ const lessons: LessonDTO[] = [
     status: "downloaded",
     quality: "1080p",
     output_dir: "/media/drumeo/100",
+    has_files: true,
     video_path: "/media/drumeo/100/video.mp4",
     bytes: 524288000,
     error: null,
@@ -42,6 +44,7 @@ const lessons: LessonDTO[] = [
     status: "pending",
     quality: "1080p",
     output_dir: null,
+    has_files: false,
     video_path: null,
     bytes: null,
     error: null,
@@ -58,6 +61,7 @@ const lessons: LessonDTO[] = [
     status: "downloading",
     quality: "1080p",
     output_dir: "/media/drumeo/300",
+    has_files: true,
     video_path: null,
     bytes: null,
     error: null,
@@ -102,6 +106,7 @@ const skippedLesson: LessonDTO = {
   status: "skipped",
   quality: "1080p",
   output_dir: null,
+  has_files: false,
   video_path: null,
   bytes: null,
   error: null,
@@ -173,11 +178,14 @@ it("offers Cancel (not Download) for a downloading lesson and hits /jobs/{id}/ca
 
   await screen.findByText("Paradiddle")
   await user.click(screen.getByRole("button", { name: /actions for paradiddle/i }))
-  // Cancel is offered; Download is not.
-  expect(await screen.findByRole("menuitem", { name: /cancel/i })).toBeInTheDocument()
-  expect(screen.queryByRole("menuitem", { name: /download/i })).not.toBeInTheDocument()
+  // "Cancel download" is offered (it cancels the download, not a dialog);
+  // Download is not.
+  expect(
+    await screen.findByRole("menuitem", { name: "Cancel download" }),
+  ).toBeInTheDocument()
+  expect(screen.queryByRole("menuitem", { name: "Download" })).not.toBeInTheDocument()
 
-  await user.click(screen.getByRole("menuitem", { name: /cancel/i }))
+  await user.click(screen.getByRole("menuitem", { name: "Cancel download" }))
   await waitFor(() => expect(canceledId).toBe("77"))
 })
 
@@ -228,58 +236,7 @@ it("shows 'Already queued' when download returns 200", async () => {
   )
 })
 
-it("deletes a downloaded lesson via DELETE /api/lessons/{id}, confirms, and invalidates the lessons list", async () => {
-  let deletedId: string | null = null
-  // Count GET /api/lessons: the page mounts one list query, so a successful
-  // delete that invalidates ["lessons"] must trigger a SECOND list fetch.
-  // Dropping the ["lessons"] invalidate from deleteLesson.onSuccess leaves
-  // listFetches at 1 and fails here.
-  let listFetches = 0
-  server.use(
-    http.get(`${ORIGIN}/api/lessons`, () => {
-      listFetches++
-      return HttpResponse.json(lessons)
-    }),
-    http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
-      deletedId = params.id as string
-      return HttpResponse.json({
-        ...lessons[0],
-        status: "skipped",
-        error: "deleted",
-        output_dir: null,
-        video_path: null,
-        bytes: null,
-      })
-    }),
-  )
-  const user = userEvent.setup()
-  renderWithProviders(
-    <>
-      <Lessons />
-      <Toaster />
-    </>,
-  )
-
-  await screen.findByText("Single Stroke Roll")
-  await waitFor(() => expect(listFetches).toBe(1))
-  // The downloaded lesson (railcontent 100) offers Delete, not Download/Skip.
-  await user.click(screen.getByRole("button", { name: /actions for single stroke roll/i }))
-  expect(await screen.findByRole("menuitem", { name: /delete/i })).toBeInTheDocument()
-  expect(screen.queryByRole("menuitem", { name: /download/i })).not.toBeInTheDocument()
-  await user.click(screen.getByRole("menuitem", { name: /delete/i }))
-
-  // Confirm in the dialog before the request fires.
-  const dialog = await screen.findByRole("dialog")
-  expect(deletedId).toBeNull()
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
-
-  await waitFor(() => expect(deletedId).toBe("100"))
-  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
-  // The invalidate refetched the list (dropped ["lessons"] invalidate stays at 1).
-  await waitFor(() => expect(listFetches).toBe(2))
-})
-
-// --- Delete: failure paths, and which lessons can be deleted ----------------
+// --- Delete ------------------------------------------------------------------
 
 // The server's fixed 500 when a lesson's files could not all be removed.
 const FILES_KEPT =
@@ -288,13 +245,23 @@ const FILES_KEPT =
 const CHANGED = "the lesson was downloaded again while it was being deleted; try again"
 
 // A re-download in flight: status downloading, but its earlier download's
-// files are still on record (output_dir set).
+// files are still on record.
 const redownloading: LessonDTO = {
   ...lessons[0],
   railcontent_id: 500,
   title: "Moeller Method",
   status: "downloading",
 }
+
+const tombstoned = (l: LessonDTO): LessonDTO => ({
+  ...l,
+  status: "skipped",
+  error: "deleted",
+  output_dir: null,
+  video_path: null,
+  bytes: null,
+  has_files: false,
+})
 
 function renderLessons() {
   const qc = newTestQueryClient()
@@ -311,11 +278,72 @@ function renderLessons() {
   return qc
 }
 
-async function openDelete(user: ReturnType<typeof userEvent.setup>, title: string) {
-  await user.click(await screen.findByRole("button", { name: `Actions for ${title}` }))
-  await user.click(await screen.findByRole("menuitem", { name: /delete/i }))
-  return screen.findByRole("dialog")
+type User = ReturnType<typeof userEvent.setup>
+
+async function openRowAction(user: User, title: string, action: RegExp) {
+  const trigger = await screen.findByRole("button", { name: `Actions for ${title}` })
+  await user.click(trigger)
+  await user.click(await screen.findByRole("menuitem", { name: action }))
+  const dialog = await screen.findByRole("alertdialog")
+  return { trigger, dialog }
 }
+
+const openDelete = async (user: User, title: string) =>
+  (await openRowAction(user, title, /^delete$/i)).dialog
+
+const confirmButton = (dialog: HTMLElement, name: RegExp = /^delete$/i) =>
+  within(dialog).getByRole("button", { name })
+
+it("deletes a downloaded lesson via DELETE /api/lessons/{id}, confirms, and invalidates the lessons list", async () => {
+  let deletedId: string | null = null
+  // Count GET /api/lessons: the page mounts one list query, so a successful
+  // delete that invalidates ["lessons"] must trigger a SECOND list fetch.
+  let listFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => {
+      listFetches++
+      return HttpResponse.json(lessons)
+    }),
+    http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
+      deletedId = params.id as string
+      return HttpResponse.json(tombstoned(lessons[0]))
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  await screen.findByText("Single Stroke Roll")
+  await waitFor(() => expect(listFetches).toBe(1))
+  // The downloaded lesson (railcontent 100) offers Delete, not Download/Skip.
+  await user.click(screen.getByRole("button", { name: /actions for single stroke roll/i }))
+  expect(await screen.findByRole("menuitem", { name: /^delete$/i })).toBeInTheDocument()
+  expect(screen.queryByRole("menuitem", { name: /^download$/i })).not.toBeInTheDocument()
+  await user.click(screen.getByRole("menuitem", { name: /^delete$/i }))
+
+  // Confirm in the alert dialog before the request fires. Its title quotes the
+  // lesson with typographic quotes.
+  const dialog = await screen.findByRole("alertdialog", {
+    name: "Delete “Single Stroke Roll”?",
+  })
+  expect(deletedId).toBeNull()
+  await user.click(confirmButton(dialog))
+
+  await waitFor(() => expect(deletedId).toBe("100"))
+  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
+  // The refresh landed before the dialog closed.
+  expect(listFetches).toBe(2)
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+})
+
+it("the Delete menu item has no icon, like every other item in the menu", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])))
+  const user = userEvent.setup()
+  renderLessons()
+
+  await user.click(await screen.findByRole("button", { name: "Actions for Single Stroke Roll" }))
+  const del = await screen.findByRole("menuitem", { name: /^delete$/i })
+  expect(del.querySelector("svg")).toBeNull()
+})
 
 it("a failed delete (500) keeps the dialog open with the server's message and refreshes lessons, jobs and summary", async () => {
   // Before the delete the lesson is re-downloading. The server removes its job
@@ -347,17 +375,18 @@ it("a failed delete (500) keeps the dialog open with the server's message and re
   expect(qc.getQueryState(qk.summary)?.isInvalidated).toBe(false)
 
   const dialog = await openDelete(user, "Moeller Method")
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+  await user.click(confirmButton(dialog))
 
   // The server's own words, inside the dialog that is still open, and they
-  // arrive together with the refreshed list (getBy, not findBy: no alert
+  // arrive together with the refreshed list (getBy, not findBy: no message
   // beside a row that still reads "downloading").
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FILES_KEPT)
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(FILES_KEPT))
   expect(within(table).getByText("skipped")).toBeInTheDocument()
-  expect(screen.getByRole("dialog")).toBe(dialog)
-  expect(
-    within(dialog).getByRole("button", { name: /^delete$/i }),
-  ).toHaveAccessibleDescription(FILES_KEPT)
+  expect(screen.getByRole("alertdialog")).toBe(dialog)
+  expect(confirmButton(dialog)).toHaveAccessibleDescription(FILES_KEPT)
+  // The server may already have acted: dismissing is "Close", not "Cancel".
+  expect(within(dialog).getByRole("button", { name: "Close" })).toBeEnabled()
+  expect(within(dialog).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
   expect(screen.queryByText(/lesson deleted/i)).not.toBeInTheDocument()
 
   // Every view reflects the server again.
@@ -367,30 +396,67 @@ it("a failed delete (500) keeps the dialog open with the server's message and re
   expect(qc.getQueryState(qk.summary)?.isInvalidated).toBe(true)
 })
 
-it("a 409 shows the server's message and the same dialog retries the delete", async () => {
+it("a failure without a server message (an empty 502) shows copy that names the next step", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () => new HttpResponse(null, { status: 502 })),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const dialog = await openDelete(user, "Single Stroke Roll")
+  await user.click(confirmButton(dialog))
+  await waitFor(() =>
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Couldn't reach the server, or it answered unexpectedly. Try again.",
+    ),
+  )
+})
+
+it("while the delete runs the dialog says so, keeps focus on the confirm button, and cannot be dismissed", async () => {
+  let answer: (r: Response) => void = () => {}
   let deletes = 0
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
     http.delete(`${ORIGIN}/api/lessons/:id`, () => {
       deletes++
-      if (deletes === 1) return HttpResponse.json({ error: CHANGED }, { status: 409 })
-      return HttpResponse.json({ ...lessons[0], status: "skipped", output_dir: null })
+      return new Promise<Response>((resolve) => (answer = resolve))
     }),
   )
   const user = userEvent.setup()
   renderLessons()
 
   const dialog = await openDelete(user, "Single Stroke Roll")
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent(CHANGED)
+  // Keyboard confirm: focus is on Cancel (the safe default), Tab to Delete.
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus()
+  await user.tab()
+  expect(confirmButton(dialog)).toHaveFocus()
+  await user.keyboard("{Enter}")
 
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
-  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
-  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
-  expect(deletes).toBe(2)
+  // Pending is visible and focus stays put: aria-disabled, never disabled
+  // (a disabled button would drop focus to <body>).
+  const pendingButton = await within(dialog).findByRole("button", { name: "Deleting…" })
+  expect(pendingButton).toHaveAttribute("aria-disabled", "true")
+  expect(pendingButton).toBeEnabled()
+  expect(pendingButton).toHaveFocus()
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled()
+
+  // Neither Escape nor a second press does anything while it runs.
+  await user.keyboard("{Escape}")
+  await user.keyboard("{Enter}")
+  expect(screen.getByRole("alertdialog")).toBe(dialog)
+  expect(deletes).toBe(1)
+
+  // The answer lands where the user can read it, and focus has not moved, so
+  // Enter retries.
+  answer(HttpResponse.json({ error: FILES_KEPT }, { status: 500 }))
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(FILES_KEPT))
+  expect(confirmButton(dialog)).toHaveFocus()
+  await user.keyboard("{Enter}")
+  await waitFor(() => expect(deletes).toBe(2))
 })
 
-it("the delete dialog cannot be dismissed while the request is in flight", async () => {
+it("the failure region is always present, keeps its message through a retry, and a repeated failure is a new announcement", async () => {
   let answer: (r: Response) => void = () => {}
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
@@ -403,17 +469,55 @@ it("the delete dialog cannot be dismissed while the request is in flight", async
   renderLessons()
 
   const dialog = await openDelete(user, "Single Stroke Roll")
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
-  expect(within(dialog).getByRole("button", { name: /^cancel$/i })).toBeDisabled()
-  await user.keyboard("{Escape}")
-  expect(screen.getByRole("dialog")).toBe(dialog)
+  // The live region exists, empty, before anything failed: a region inserted
+  // together with its text is missed by some screen readers.
+  const region = within(dialog).getByRole("alert")
+  expect(region).toBeEmptyDOMElement()
 
-  // The answer then lands where the user can read it.
+  await user.click(confirmButton(dialog))
   answer(HttpResponse.json({ error: FILES_KEPT }, { status: 500 }))
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent(FILES_KEPT)
+  await waitFor(() => expect(region).toHaveTextContent(FILES_KEPT))
+  const first = region.firstElementChild
+
+  // Retry: while it runs, the message stays (the dialog does not shrink and
+  // regrow under the pointer).
+  await user.click(confirmButton(dialog))
+  await within(dialog).findByRole("button", { name: "Deleting…" })
+  expect(region).toHaveTextContent(FILES_KEPT)
+  expect(region.firstElementChild).toBe(first)
+
+  // The same failure again: same region, new node, so it is announced again.
+  answer(HttpResponse.json({ error: FILES_KEPT }, { status: 500 }))
+  await within(dialog).findByRole("button", { name: /^delete$/i })
+  expect(within(dialog).getByRole("alert")).toBe(region)
+  expect(region).toHaveTextContent(FILES_KEPT)
+  expect(region.firstElementChild).not.toBe(first)
 })
 
-it("closing the dialog after a failure clears the message", async () => {
+it("a 409 shows the server's message and the same dialog retries the delete", async () => {
+  let deletes = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () => {
+      deletes++
+      if (deletes === 1) return HttpResponse.json({ error: CHANGED }, { status: 409 })
+      return HttpResponse.json(tombstoned(lessons[0]))
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const dialog = await openDelete(user, "Single Stroke Roll")
+  await user.click(confirmButton(dialog))
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(CHANGED))
+
+  await user.click(confirmButton(dialog))
+  expect(await screen.findByText(/lesson deleted/i)).toBeInTheDocument()
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  expect(deletes).toBe(2)
+})
+
+it("closing the dialog after a failure clears the message and returns focus to the row's Actions button", async () => {
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
     http.delete(`${ORIGIN}/api/lessons/:id`, () =>
@@ -423,29 +527,108 @@ it("closing the dialog after a failure clears the message", async () => {
   const user = userEvent.setup()
   renderLessons()
 
-  let dialog = await openDelete(user, "Single Stroke Roll")
-  await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
-  await within(dialog).findByRole("alert")
-  await user.click(within(dialog).getByRole("button", { name: /^cancel$/i }))
-  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+  let { trigger, dialog } = await openRowAction(user, "Single Stroke Roll", /^delete$/i)
+  await user.click(confirmButton(dialog))
+  await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(FILES_KEPT))
+  await user.click(within(dialog).getByRole("button", { name: "Close" }))
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  await waitFor(() => expect(trigger).toHaveFocus())
+  // Nothing left the page unclickable (Radix's modal layers restore it).
+  expect(document.body.style.pointerEvents).not.toBe("none")
 
-  dialog = await openDelete(user, "Single Stroke Roll")
-  expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument()
+  ;({ trigger, dialog } = await openRowAction(user, "Single Stroke Roll", /^delete$/i))
+  expect(within(dialog).getByRole("alert")).toBeEmptyDOMElement()
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeInTheDocument()
 })
 
-describe("Delete is offered exactly when the lesson still records files, whatever its status", () => {
+it("Escape on the delete dialog returns focus to the row's Actions button", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { trigger } = await openRowAction(user, "Paradiddle", /^delete$/i)
+  await user.keyboard("{Escape}")
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  await waitFor(() => expect(trigger).toHaveFocus())
+})
+
+it("after a delete removes the row, focus goes to the next row's Actions button, and to the heading when no row is left", async () => {
+  const second: LessonDTO = { ...lessons[0], railcontent_id: 101, title: "Flam Accent" }
+  let listed: LessonDTO[] = [lessons[0], second]
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(listed)),
+    http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
+      // As in a status tab: the deleted lesson leaves the list.
+      listed = listed.filter((l) => String(l.railcontent_id) !== params.id)
+      return HttpResponse.json(tombstoned(lessons[0]))
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  let { dialog } = await openRowAction(user, "Single Stroke Roll", /^delete$/i)
+  await user.click(confirmButton(dialog))
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  const next = screen.getByRole("button", { name: "Actions for Flam Accent" })
+  await waitFor(() => expect(next).toHaveFocus())
+
+  ;({ dialog } = await openRowAction(user, "Flam Accent", /^delete$/i))
+  await user.click(confirmButton(dialog))
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  await waitFor(() =>
+    expect(screen.getByRole("heading", { level: 1, name: "Lessons" })).toHaveFocus(),
+  )
+})
+
+it("announces a successful delete only once the dialog is gone and focus has returned", async () => {
+  const seen: { dialogOpen: boolean; focus: Element | null; hidden: boolean }[] = []
+  const spy = vi.spyOn(toast, "success").mockImplementation(() => {
+    seen.push({
+      dialogOpen: document.querySelector('[role="alertdialog"]') !== null,
+      focus: document.activeElement,
+      // While a modal is open Radix marks the rest of the page aria-hidden, the
+      // toaster included: a toast then is shown but not heard.
+      hidden: document.querySelector('[aria-hidden="true"][data-aria-hidden]') !== null,
+    })
+    return 0
+  })
+  try {
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+      http.delete(`${ORIGIN}/api/lessons/:id`, () => HttpResponse.json(tombstoned(lessons[0]))),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    const { trigger, dialog } = await openRowAction(user, "Single Stroke Roll", /^delete$/i)
+    await user.click(confirmButton(dialog))
+    await waitFor(() => expect(seen).toHaveLength(1))
+    expect(seen[0]).toEqual({ dialogOpen: false, focus: trigger, hidden: false })
+    expect(spy).toHaveBeenCalledWith("Lesson deleted", { description: "Single Stroke Roll" })
+  } finally {
+    spy.mockRestore()
+  }
+})
+
+describe("Delete is offered exactly when the server says the lesson has files, whatever its status", () => {
+  // output_dir is deliberately the OPPOSITE of has_files in both helpers: the
+  // server's has_files is the predicate, output_dir alone is not.
   const withFiles = (status: LessonDTO["status"], error: string | null): LessonDTO => ({
     ...lessons[0],
     railcontent_id: 600,
     title: `Has files (${status}, ${error ?? "no error"})`,
     status,
     error,
+    output_dir: null,
+    has_files: true,
   })
   const noFiles = (status: LessonDTO["status"]): LessonDTO => ({
     ...lessons[1],
     railcontent_id: 700,
     title: `No files (${status})`,
     status,
+    output_dir: "/media/drumeo/700",
+    has_files: false,
   })
 
   it.each([
@@ -461,29 +644,76 @@ describe("Delete is offered exactly when the lesson still records files, whateve
       http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lesson])),
       http.delete(`${ORIGIN}/api/lessons/:id`, ({ params }) => {
         deletedId = params.id as string
-        return HttpResponse.json({ ...lesson, status: "skipped", output_dir: null })
+        return HttpResponse.json(tombstoned(lesson))
       }),
     )
     const user = userEvent.setup()
     renderLessons()
 
     const dialog = await openDelete(user, lesson.title)
-    await user.click(within(dialog).getByRole("button", { name: /^delete$/i }))
+    await user.click(confirmButton(dialog))
     await waitFor(() => expect(deletedId).toBe("600"))
   })
 
-  it.each([noFiles("skipped"), noFiles("pending"), noFiles("failed"), noFiles("downloading")])(
-    "does not offer Delete for $title",
-    async (lesson) => {
-      server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lesson])))
-      const user = userEvent.setup()
-      renderLessons()
+  it.each([
+    noFiles("skipped"),
+    noFiles("pending"),
+    noFiles("failed"),
+    noFiles("downloading"),
+    noFiles("downloaded"),
+  ])("does not offer Delete for $title", async (lesson) => {
+    server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lesson])))
+    const user = userEvent.setup()
+    renderLessons()
 
-      await user.click(
-        await screen.findByRole("button", { name: `Actions for ${lesson.title}` }),
-      )
-      await screen.findByRole("menuitem", { name: /copy path/i })
-      expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument()
-    },
+    await user.click(
+      await screen.findByRole("button", { name: `Actions for ${lesson.title}` }),
+    )
+    await screen.findByRole("menuitem", { name: /copy path/i })
+    expect(screen.queryByRole("menuitem", { name: /^delete$/i })).not.toBeInTheDocument()
+  })
+})
+
+// --- Skip --------------------------------------------------------------------
+
+it("a failed skip shows the server's message inside the dialog, not as a toast", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[1]])),
+    http.post(`${ORIGIN}/api/lessons/:id/skip`, () =>
+      HttpResponse.json({ error: "lesson not found" }, { status: 404 }),
+    ),
   )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
+  expect(dialog).toHaveAccessibleName("Skip “Double Stroke Roll”?")
+  await user.click(confirmButton(dialog, /^skip$/i))
+  await waitFor(() =>
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("lesson not found"),
+  )
+  // Only inside the dialog: no toast carries it.
+  expect(screen.getAllByText("lesson not found")).toHaveLength(1)
+  expect(screen.getByRole("alertdialog")).toBe(dialog)
+})
+
+it("skips with the typed reason, closes, returns focus and then announces it", async () => {
+  let body: { reason?: string } | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[1]])),
+    http.post(`${ORIGIN}/api/lessons/:id/skip`, async ({ request }) => {
+      body = (await request.json()) as { reason?: string }
+      return HttpResponse.json({ ...lessons[1], status: "skipped" })
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { trigger, dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
+  await user.type(within(dialog).getByLabelText("Reason (optional)"), "not for me")
+  await user.click(confirmButton(dialog, /^skip$/i))
+  expect(await screen.findByText("Lesson skipped")).toBeInTheDocument()
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+  expect(body).toEqual({ reason: "not for me" })
+  await waitFor(() => expect(trigger).toHaveFocus())
 })

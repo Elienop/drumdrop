@@ -6,11 +6,28 @@ import type {
 
 export class ApiHttpError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  // fromServer is false when the response carried no {"error": "..."} body, so
+  // `message` is only the synthesized "HTTP <status>" (a proxy's 502 page, an
+  // empty 500). Copy shown to the user falls back to its own sentence then,
+  // because "HTTP 502" names no next step (see errorMessage in errors.ts).
+  fromServer: boolean
+  constructor(status: number, message: string, fromServer = true) {
     super(message)
     this.status = status
+    this.fromServer = fromServer
     this.name = "ApiHttpError"
   }
+}
+
+// httpError builds the error for a non-2xx response from its parsed body.
+function httpError(status: number, data: unknown): ApiHttpError {
+  const msg =
+    data && typeof data === "object" && "error" in data && typeof data.error === "string"
+      ? data.error
+      : null
+  return msg !== null
+    ? new ApiHttpError(status, msg)
+    : new ApiHttpError(status, `HTTP ${status}`, false)
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -26,10 +43,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (res.status === 204) return undefined as T
   const text = await res.text()
   const data = text ? JSON.parse(text) : undefined
-  if (!res.ok) {
-    const msg = data && typeof data.error === "string" ? data.error : `HTTP ${res.status}`
-    throw new ApiHttpError(res.status, msg)
-  }
+  if (!res.ok) throw httpError(res.status, data)
   return data as T
 }
 
@@ -107,9 +121,6 @@ export async function requestWithStatus<T>(
   if (res.status === 401) clearToken()
   const text = await res.text()
   const data = text ? JSON.parse(text) : undefined
-  if (!res.ok) {
-    const msg = data && typeof data.error === "string" ? data.error : `HTTP ${res.status}`
-    throw new ApiHttpError(res.status, msg)
-  }
+  if (!res.ok) throw httpError(res.status, data)
   return { status: res.status, data: data as T }
 }
