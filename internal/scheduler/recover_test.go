@@ -42,7 +42,8 @@ func TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(lessonDir), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(other, lessonDir); err != nil {
+			// Relative, so it stays inside downloads: os.Root follows it.
+			if err := os.Symlink(filepath.Join("..", "Other", "05 - Five"), lessonDir); err != nil {
 				t.Fatal(err)
 			}
 			var err error
