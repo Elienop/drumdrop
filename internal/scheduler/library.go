@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/elienop/drumdrop/internal/library"
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
@@ -130,44 +130,7 @@ func CheckLibraryDir(downloadsDir, libraryDir string) error {
 // name would not fit (fitEpisodeBase) and reports the base it used, which the
 // worker's episode-nfo write takes from the move's result.
 func plexEpisodeBase(show, title string, season, episode int) string {
-	return fmt.Sprintf("%s%02d - %s", plexEpisodePrefix(musora.Sanitize(show), season), episode, musora.Sanitize(title))
-}
-
-// plexEpisodePrefix is the part of every episode base that names the show and
-// season: "<showFolder> - s0Ne". The legacy fallback (legacyEpisodeBases) reads
-// recorded videos against it, so it is the one place that format lives.
-func plexEpisodePrefix(showFolder string, season int) string {
-	return fmt.Sprintf("%s - s%02de", showFolder, season)
-}
-
-// plexSeasonName is the season folder the plex-tv move files a show's episodes
-// under ("Season 01").
-func plexSeasonName(season int) string {
-	return fmt.Sprintf("Season %02d", season)
-}
-
-// plexSeasonNumber parses a season folder name back into its number. It accepts
-// only a name plexSeasonName itself produces (checked by formatting the number
-// back), so a default-layout lesson folder ("NN - Title") never parses.
-func plexSeasonNumber(name string) (season int, ok bool) {
-	digits, found := strings.CutPrefix(name, "Season ")
-	if !found {
-		return 0, false
-	}
-	n, err := strconv.Atoi(digits)
-	if err != nil || n < 0 || plexSeasonName(n) != name {
-		return 0, false
-	}
-	return n, true
-}
-
-// IsPlexSeasonDir reports whether dir is a plex-tv season folder, the folder the
-// plex-tv move shares between every episode of a show. The delete uses it to tell
-// a shared season folder (remove one episode's entries) from a lesson's own
-// folder (remove the folder), whatever DRUMDROP_LAYOUT says today.
-func IsPlexSeasonDir(dir string) bool {
-	_, ok := plexSeasonNumber(filepath.Base(dir))
-	return ok
+	return fmt.Sprintf("%s%02d - %s", library.EpisodePrefix(musora.Sanitize(show), season), episode, musora.Sanitize(title))
 }
 
 // isLessonVideoName reports whether name is a video file DownloadLesson produces

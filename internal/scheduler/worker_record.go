@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/library"
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
@@ -142,10 +143,10 @@ func (w *Worker) discardAbandoned(id int, dir string, placed []string) {
 	}
 	var errs []error
 	for _, p := range placed {
-		errs = append(errs, RemoveUnderRoot(w.roots(), p))
+		errs = append(errs, library.RemoveUnderRoot(w.roots(), p))
 	}
-	if !IsPlexSeasonDir(dir) {
-		errs = append(errs, RemoveUnderRoot(w.roots(), dir))
+	if !library.IsSeasonDir(dir) {
+		errs = append(errs, library.RemoveUnderRoot(w.roots(), dir))
 	}
 	if err := errors.Join(errs...); err != nil {
 		fmt.Fprintf(w.log(), "  ⚠ %d was deleted while downloading; what it wrote could not all be removed: %v\n", id, err)

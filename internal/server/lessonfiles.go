@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/elienop/drumdrop/internal/database"
-	"github.com/elienop/drumdrop/internal/scheduler"
+	"github.com/elienop/drumdrop/internal/library"
 )
 
 // logOut receives the server's own diagnostics (the detail behind a fixed
@@ -25,14 +25,14 @@ var errFilesKept = errors.New("the lesson's files could not all be removed")
 // what was recorded, never today's DRUMDROP_LAYOUT, so a layout switch can
 // never turn a one-episode delete into a season wipe:
 //   - the library entries the lesson owns in plex-tv season folders
-//     (scheduler.PlanLessonEntries): exactly its record, or for a lesson moved
+//     (library.PlanLessonEntries): exactly its record, or for a lesson moved
 //     before the record existed, its name-matched episode entries. An entry
 //     another lesson also claims is kept and logged, never removed. A season
 //     folder itself is never removed;
 //   - its own folder, when output_dir is not a season folder (the default
 //     layout, or a plex-tv lesson recorded in downloads): removed whole.
 //
-// Every removal goes through scheduler.RemoveUnderRoot, confined by os.Root to
+// Every removal goes through library.RemoveUnderRoot, confined by os.Root to
 // the downloads or library root it sits inside: a path outside both, a root
 // itself, or a path reached through a symlinked folder that leads outside is
 // refused. A missing path is already gone. The trade-off: a symlinked folder
@@ -48,7 +48,7 @@ func removeLessonFiles(downloadsDir, libraryDir string, l database.Lesson, other
 			roots = append(roots, r)
 		}
 	}
-	plan, err := scheduler.PlanLessonEntries(l, others)
+	plan, err := library.PlanLessonEntries(l, others)
 	if err != nil {
 		return nil, err
 	}
@@ -61,13 +61,13 @@ func removeLessonFiles(downloadsDir, libraryDir string, l database.Lesson, other
 	}
 	var errs []error
 	for _, p := range plan.Remove {
-		if rerr := scheduler.RemoveUnderRoot(roots, p); rerr != nil {
+		if rerr := library.RemoveUnderRoot(roots, p); rerr != nil {
 			remaining = append(remaining, p)
 			errs = append(errs, rerr)
 		}
 	}
-	if l.OutputDir.Valid && !scheduler.IsPlexSeasonDir(l.OutputDir.String) {
-		if rerr := scheduler.RemoveUnderRoot(roots, l.OutputDir.String); rerr != nil {
+	if l.OutputDir.Valid && !library.IsSeasonDir(l.OutputDir.String) {
+		if rerr := library.RemoveUnderRoot(roots, l.OutputDir.String); rerr != nil {
 			errs = append(errs, rerr)
 		}
 	}

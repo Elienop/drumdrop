@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/library"
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
@@ -108,21 +109,21 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 		roots = []string{libraryDir}
 	}
 
-	seasonDir := filepath.Join(libraryDir, musora.Sanitize(show), plexSeasonName(season))
+	seasonDir := filepath.Join(libraryDir, musora.Sanitize(show), library.SeasonName(season))
 	plan, err := planPlexTVMove(lessonDir, scratchBase, seasonDir, show, title, season, episode)
 	if err != nil {
 		return plexMoveResult{}, err
 	}
-	c, err := newClaims(lib.self.RailcontentID, lib.others)
+	c, err := library.NewClaims(lib.self.RailcontentID, lib.others)
 	if err != nil {
 		return plexMoveResult{}, fmt.Errorf("refusing to move: %w", err)
 	}
 
 	var notes []error
-	previous, perr := c.lessonEntries(lib.self)
+	previous, perr := c.Plan(lib.self)
 	if perr != nil {
 		notes = append(notes, fmt.Errorf("the previous download's library files are not known, so none were removed: %w", perr))
-		previous = LessonEntries{}
+		previous = library.LessonEntries{}
 	}
 	for _, p := range previous.Kept {
 		notes = append(notes, fmt.Errorf("left %q in the library: it looks like this lesson's previous download, but another lesson claims it", p))
@@ -139,7 +140,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 	// the episode behind.
 	var left []string
 	for _, p := range previous.Remove {
-		if err := RemoveUnderRoot(roots, p); err != nil {
+		if err := library.RemoveUnderRoot(roots, p); err != nil {
 			left = append(left, p)
 			notes = append(notes, fmt.Errorf("previous download could not be removed from the library, left at %q: %w", p, err))
 		}
@@ -153,7 +154,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 		if _, err := os.Lstat(st.dst); err != nil {
 			continue
 		}
-		if err := RemoveUnderRoot(roots, st.dst); err != nil {
+		if err := library.RemoveUnderRoot(roots, st.dst); err != nil {
 			return plexMoveResult{}, errors.Join(append(notes, fmt.Errorf("an entry no lesson records is in the way at %q and could not be removed: %w", st.dst, err))...)
 		}
 		notes = append(notes, fmt.Errorf("replaced %q, which no lesson records", st.dst))
@@ -197,7 +198,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 // the lesson's own previous entries (PlanLessonEntries' Remove), which it may
 // replace: no other record names one of them, and a legacy row's name match on
 // one does not outrank this lesson's record, as in the delete.
-func checkPlexConflicts(steps []plexMoveStep, c *claims, ours []string) error {
+func checkPlexConflicts(steps []plexMoveStep, c *library.Claims, ours []string) error {
 	own := make(map[string]bool, len(ours))
 	for _, p := range ours {
 		own[p] = true
@@ -207,7 +208,7 @@ func checkPlexConflicts(steps []plexMoveStep, c *claims, ours []string) error {
 		if own[st.dst] {
 			continue
 		}
-		ids, err := c.claimants(st.dst)
+		ids, err := c.Claimants(st.dst)
 		if err != nil {
 			return fmt.Errorf("refusing to move: %w", err)
 		}

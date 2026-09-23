@@ -1,4 +1,4 @@
-package scheduler
+package library
 
 import (
 	"errors"
@@ -49,15 +49,15 @@ type LessonEntries struct {
 // entry of a season folder, and when a legacy lesson's episode name can not be
 // told apart from a look-alike (see legacyEpisodeBases).
 func PlanLessonEntries(self database.Lesson, others []database.Lesson) (LessonEntries, error) {
-	c, err := newClaims(self.RailcontentID, others)
+	c, err := NewClaims(self.RailcontentID, others)
 	if err != nil {
 		return LessonEntries{}, err
 	}
-	return c.lessonEntries(self)
+	return c.Plan(self)
 }
 
-// claims indexes what every OTHER lesson row claims in season folders.
-type claims struct {
+// Claims indexes what every OTHER lesson row claims in season folders.
+type Claims struct {
 	// recorded maps a path to the ids of the lessons whose record names it.
 	recorded map[string][]int
 	// legacy maps a season folder to the rows filed there without a record.
@@ -67,9 +67,9 @@ type claims struct {
 	listings map[string]map[string]bool
 }
 
-// newClaims indexes others, skipping the row whose id is self.
-func newClaims(self int, others []database.Lesson) (*claims, error) {
-	c := &claims{recorded: map[string][]int{}, legacy: map[string][]database.Lesson{}, listings: map[string]map[string]bool{}}
+// NewClaims indexes others, skipping the row whose id is self.
+func NewClaims(self int, others []database.Lesson) (*Claims, error) {
+	c := &Claims{recorded: map[string][]int{}, legacy: map[string][]database.Lesson{}, listings: map[string]map[string]bool{}}
 	for _, o := range others {
 		if o.RailcontentID == self {
 			continue
@@ -84,7 +84,7 @@ func newClaims(self int, others []database.Lesson) (*claims, error) {
 			}
 			continue
 		}
-		if o.OutputDir.Valid && IsPlexSeasonDir(o.OutputDir.String) {
+		if o.OutputDir.Valid && IsSeasonDir(o.OutputDir.String) {
 			dir := filepath.Clean(o.OutputDir.String)
 			c.legacy[dir] = append(c.legacy[dir], o)
 		}
@@ -93,7 +93,7 @@ func newClaims(self int, others []database.Lesson) (*claims, error) {
 }
 
 // listing returns dir's entries (name -> isDir), reading it once.
-func (c *claims) listing(dir string) (map[string]bool, error) {
+func (c *Claims) listing(dir string) (map[string]bool, error) {
 	if l, ok := c.listings[dir]; ok {
 		return l, nil
 	}
@@ -109,11 +109,11 @@ func (c *claims) listing(dir string) (map[string]bool, error) {
 	return l, nil
 }
 
-// claimants returns the ids of the other lessons that claim path: by record,
+// Claimants returns the ids of the other lessons that claim path: by record,
 // or, for an entry that exists, by a legacy row's name match. A legacy row
 // whose episode name is uncertain claims the entries of every candidate name,
 // so the fallback errs towards keeping.
-func (c *claims) claimants(path string) ([]int, error) {
+func (c *Claims) Claimants(path string) ([]int, error) {
 	ids := append([]int(nil), c.recorded[path]...)
 	dir, name := filepath.Dir(path), filepath.Base(path)
 	rows := c.legacy[dir]
@@ -140,8 +140,8 @@ func (c *claims) claimants(path string) ([]int, error) {
 	return ids, nil
 }
 
-// lessonEntries is PlanLessonEntries over an existing index.
-func (c *claims) lessonEntries(self database.Lesson) (LessonEntries, error) {
+// Plan is PlanLessonEntries over an existing index.
+func (c *Claims) Plan(self database.Lesson) (LessonEntries, error) {
 	var out LessonEntries
 	paths, recorded, err := self.PlacedEntries()
 	if err != nil {
@@ -163,7 +163,7 @@ func (c *claims) lessonEntries(self database.Lesson) (LessonEntries, error) {
 		}
 		return out, nil
 	}
-	if !self.OutputDir.Valid || !IsPlexSeasonDir(self.OutputDir.String) {
+	if !self.OutputDir.Valid || !IsSeasonDir(self.OutputDir.String) {
 		return out, nil
 	}
 	dir := filepath.Clean(self.OutputDir.String)
@@ -185,7 +185,7 @@ func (c *claims) lessonEntries(self database.Lesson) (LessonEntries, error) {
 			continue
 		}
 		p := filepath.Join(dir, name)
-		ids, err := c.claimants(p)
+		ids, err := c.Claimants(p)
 		if err != nil {
 			return LessonEntries{}, err
 		}
@@ -202,7 +202,7 @@ func (c *claims) lessonEntries(self database.Lesson) (LessonEntries, error) {
 // plex-tv season folder, so a damaged row can never aim a removal elsewhere.
 func checkRecordedEntry(id int, p string) error {
 	name := filepath.Base(p)
-	if !filepath.IsAbs(p) || filepath.Clean(p) != p || name == "." || name == ".." || !IsPlexSeasonDir(filepath.Dir(p)) {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p || name == "." || name == ".." || !IsSeasonDir(filepath.Dir(p)) {
 		return fmt.Errorf("lesson %d records %q, which is not an entry of a season folder; refusing to touch it", id, p)
 	}
 	return nil
@@ -220,9 +220,9 @@ func checkRecordedEntry(id int, p string) error {
 // not exact, every candidate (the derived one included) is returned, so another
 // lesson's claim errs towards covering too much.
 func legacyEpisodeBases(l database.Lesson, seasonDir string, listing map[string]bool) (bases []string, exact bool) {
-	// Every caller passes a folder IsPlexSeasonDir accepted.
-	season, _ := plexSeasonNumber(filepath.Base(seasonDir))
-	prefix := plexEpisodePrefix(filepath.Base(filepath.Dir(seasonDir)), season)
+	// Every caller passes a folder IsSeasonDir accepted.
+	season, _ := SeasonNumber(filepath.Base(seasonDir))
+	prefix := EpisodePrefix(filepath.Base(filepath.Dir(seasonDir)), season)
 	position := 1
 	if l.Position.Valid {
 		position = int(l.Position.Int64)

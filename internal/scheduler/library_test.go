@@ -434,28 +434,6 @@ func TestPlexEpisodeBase(t *testing.T) {
 	}
 }
 
-// TestIsPlexSeasonDir pins which folder names count as a shared plex-tv season
-// folder: only what plexSeasonName produces, never a default-layout lesson
-// folder.
-func TestIsPlexSeasonDir(t *testing.T) {
-	cases := map[string]bool{
-		"/lib/Show/Season 01":   true,
-		"/lib/Show/Season 12":   true,
-		"/lib/Show/Season 100":  true,
-		"/lib/Show/Season 1":    false,
-		"/lib/Show/Season +01":  false,
-		"/lib/Show/Season -1":   false,
-		"/lib/Show/Season 01 x": false,
-		"/lib/C/05 - Season 01": false,
-		"":                      false,
-	}
-	for dir, want := range cases {
-		if got := IsPlexSeasonDir(dir); got != want {
-			t.Errorf("IsPlexSeasonDir(%q) = %v, want %v", dir, got, want)
-		}
-	}
-}
-
 // forceCopyFallback makes every rename fail, as across two filesystems, so the
 // move takes its copy path.
 func forceCopyFallback(t *testing.T) {

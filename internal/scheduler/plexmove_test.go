@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/library"
 )
 
 // scratchLesson writes a finished download's scratch folder "NN - title" under
@@ -82,7 +83,7 @@ func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	// The delete, planned from that record, removes exactly what was placed.
 	self := recordedRow(1, season)
 	self.LibraryEntries = database.EncodeLibraryEntries(res.owned())
-	plan, err := PlanLessonEntries(self, []database.Lesson{self, other})
+	plan, err := library.PlanLessonEntries(self, []database.Lesson{self, other})
 	if err != nil {
 		t.Fatalf("PlanLessonEntries: %v", err)
 	}
