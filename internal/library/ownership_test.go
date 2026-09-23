@@ -5,87 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
-	"sort"
 	"strings"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
 )
-
-// seedSeason creates dir and, inside it, every name: a folder (holding one
-// file) when the name ends in "/", else a file whose content is its name.
-func seedSeason(t *testing.T, dir string, names ...string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
-	for _, name := range names {
-		if folder, ok := strings.CutSuffix(name, "/"); ok {
-			if err := os.MkdirAll(filepath.Join(dir, folder), 0o755); err != nil {
-				t.Fatalf("mkdir %s: %v", folder, err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, folder, "f.pdf"), []byte(folder), 0o644); err != nil {
-				t.Fatalf("write in %s: %v", folder, err)
-			}
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-}
-
-// paths joins every name (a trailing "/" dropped) onto dir.
-func paths(dir string, names ...string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		out = append(out, filepath.Join(dir, strings.TrimSuffix(n, "/")))
-	}
-	return out
-}
-
-// recordedRow is a lesson filed in seasonDir that records exactly names.
-func recordedRow(id int, seasonDir string, names ...string) database.Lesson {
-	return database.Lesson{
-		RailcontentID:  id,
-		Status:         database.StatusDownloaded,
-		OutputDir:      sql.NullString{String: seasonDir, Valid: true},
-		LibraryEntries: database.EncodeLibraryEntries(paths(seasonDir, names...)),
-	}
-}
-
-// legacyRow is a lesson moved into seasonDir before the record existed: no
-// library_entries, only its title, position and video.
-func legacyRow(id int, title string, position int, seasonDir, video string) database.Lesson {
-	l := database.Lesson{
-		RailcontentID: id,
-		Title:         title,
-		Status:        database.StatusDownloaded,
-		Position:      sql.NullInt64{Int64: int64(position), Valid: true},
-		OutputDir:     sql.NullString{String: seasonDir, Valid: true},
-	}
-	if video != "" {
-		l.VideoPath = sql.NullString{String: filepath.Join(seasonDir, video), Valid: true}
-	}
-	return l
-}
-
-func sorted(s []string) []string {
-	out := append([]string(nil), s...)
-	sort.Strings(out)
-	return out
-}
-
-func assertExist(t *testing.T, want bool, ps ...string) {
-	t.Helper()
-	for _, p := range ps {
-		_, err := os.Lstat(p)
-		if got := err == nil; got != want {
-			t.Errorf("%s exists = %v, want %v (err=%v)", p, got, want, err)
-		}
-	}
-}
 
 // fiveLookAlikes are four lessons that share episode 5 of one show, each title
 // the first plus a tag or a suffix: the collision the name matcher could not
@@ -99,10 +23,10 @@ var fiveLookAlikes = map[string][]string{
 
 var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}
 
-// TestPlanLessonEntriesByRecordIsExact covers the owner's ruling for recorded
-// lessons: each of four look-alikes at one episode number owns exactly its
-// recorded entries, in every direction, and no other lesson's.
-func TestPlanLessonEntriesByRecordIsExact(t *testing.T) {
+// TestPlanByRecordIsExact covers the owner's ruling for recorded lessons: each
+// of four look-alikes at one episode number owns exactly its recorded entries,
+// in every direction, and no other lesson's.
+func TestPlanByRecordIsExact(t *testing.T) {
 	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
 	var rows []database.Lesson
 	for i, title := range fiveTitles {
@@ -110,7 +34,7 @@ func TestPlanLessonEntriesByRecordIsExact(t *testing.T) {
 		rows = append(rows, recordedRow(i+1, season, fiveLookAlikes[title]...))
 	}
 	for i, title := range fiveTitles {
-		got, err := PlanLessonEntries(rows[i], rows)
+		got, err := plan(t, libraryOf(season), rows[i], rows)
 		if err != nil {
 			t.Fatalf("%s: %v", title, err)
 		}
@@ -120,44 +44,171 @@ func TestPlanLessonEntriesByRecordIsExact(t *testing.T) {
 	}
 }
 
-// TestPlanLessonEntriesKeepsAPathTwoRecordsName proves an entry two records
-// name (identical titles at one episode) is ambiguous: neither lesson may
-// remove it.
-func TestPlanLessonEntriesKeepsAPathTwoRecordsName(t *testing.T) {
+// TestPlanKeepsAPathTwoRecordsName proves an entry two records name (identical
+// titles at one episode) is ambiguous: neither lesson may remove it.
+func TestPlanKeepsAPathTwoRecordsName(t *testing.T) {
 	season := filepath.Join(t.TempDir(), "Show", "Season 01")
 	a := recordedRow(1, season, "Show - s01e05 - Same.mp4", "Show - s01e05 - A-only.nfo")
 	b := recordedRow(2, season, "Show - s01e05 - Same.mp4")
-	got, err := PlanLessonEntries(a, []database.Lesson{a, b})
+	got, err := plan(t, libraryOf(season), a, []database.Lesson{a, b})
 	if err != nil {
-		t.Fatalf("PlanLessonEntries: %v", err)
+		t.Fatalf("Plan: %v", err)
 	}
 	if !reflect.DeepEqual(got.Remove, paths(season, "Show - s01e05 - A-only.nfo")) || !reflect.DeepEqual(got.Kept, paths(season, "Show - s01e05 - Same.mp4")) {
 		t.Errorf("plan = %+v, want the shared mp4 kept and only A's nfo removed", got)
 	}
 }
 
-// TestPlanLessonEntriesRefusesADamagedRecord proves a record that is not a
-// list of plain season-folder entries is refused, never acted on.
-func TestPlanLessonEntriesRefusesADamagedRecord(t *testing.T) {
+// TestPlanKeepsTheSameFileUnderAnotherSpelling covers a filesystem that reads
+// two names as one file (case-insensitive: "Groove" and "GROOVE"): an entry
+// that IS a file another lesson records, under another spelling, is claimed.
+// A hard link stands in for the case fold: two names, one file.
+func TestPlanKeepsTheSameFileUnderAnotherSpelling(t *testing.T) {
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Groove.mp4", "Show - s01e05 - GROOVE.nfo")
+	if err := os.Link(filepath.Join(season, "Show - s01e05 - Groove.mp4"), filepath.Join(season, "Show - s01e05 - GROOVE.mp4")); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+	a := recordedRow(1, season, "Show - s01e05 - Groove.mp4")
+	b := recordedRow(2, season, "Show - s01e05 - GROOVE.mp4", "Show - s01e05 - GROOVE.nfo")
+	got, err := plan(t, libraryOf(season), b, []database.Lesson{a, b})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if !reflect.DeepEqual(got.Kept, paths(season, "Show - s01e05 - GROOVE.mp4")) ||
+		!reflect.DeepEqual(got.Remove, paths(season, "Show - s01e05 - GROOVE.nfo")) {
+		t.Errorf("plan = %+v, want the file lesson 1 records (under another name) kept", got)
+	}
+	// And the move's question: an existing entry at a name no record spells
+	// the same way is still claimed when it is the same file.
+	c, err := NewClaims(libraryOf(season), []database.Lesson{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := c.Claimants(filepath.Join(season, "Show - s01e05 - GROOVE.mp4"), 2, true)
+	if err != nil || !reflect.DeepEqual(ids, []int{1}) {
+		t.Errorf("Claimants = (%v, %v), want [1]", ids, err)
+	}
+	// A different file at that name is not.
+	if ids, err := c.Claimants(filepath.Join(season, "Show - s01e05 - GROOVE.nfo"), 2, true); err != nil || len(ids) != 0 {
+		t.Errorf("Claimants of an unclaimed file = (%v, %v), want none", ids, err)
+	}
+}
+
+// TestRecordSurvivesTheLibraryMoving proves a record is read under the library
+// folder configured NOW: a record written while the library was at old/ still
+// names the lesson's files after it moved to new/, and a record never depends
+// on how the library path was spelled.
+func TestRecordSurvivesTheLibraryMoving(t *testing.T) {
+	tmp := t.TempDir()
+	oldSeason := filepath.Join(tmp, "old", "Show", "Season 01")
+	newSeason := filepath.Join(tmp, "new", "Show", "Season 01")
+	seedSeason(t, newSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	self := recordedRow(1, oldSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	got, err := plan(t, filepath.Join(tmp, "new"), self, []database.Lesson{self})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if want := sorted(paths(newSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")); !reflect.DeepEqual(sorted(got.Remove), want) {
+		t.Errorf("plan = %+v, want the files under the new library %v", got, want)
+	}
+	// A relative library root reads the same files.
+	t.Chdir(tmp)
+	got, err = plan(t, "new", self, []database.Lesson{self})
+	if err != nil || !reflect.DeepEqual(sorted(got.Remove), sorted(paths(newSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo"))) {
+		t.Errorf("relative root: plan = (%+v, %v), want the same absolute files", got, err)
+	}
+}
+
+// TestLegacyRowIsReadUnderTheLibraryToday proves a lesson moved before the
+// record existed is found in its season folder under the library configured
+// now, as the move filed it at <library>/<show>/<Season NN>.
+func TestLegacyRowIsReadUnderTheLibraryToday(t *testing.T) {
+	tmp := t.TempDir()
+	oldSeason := filepath.Join(tmp, "old", "Show", "Season 01")
+	newSeason := filepath.Join(tmp, "new", "Show", "Season 01")
+	seedSeason(t, newSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e06 - Six.mp4")
+	self := legacyRow(1, "Five", 5, oldSeason, "Show - s01e05 - Five.mp4")
+	got, err := plan(t, filepath.Join(tmp, "new"), self, []database.Lesson{self})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if want := sorted(paths(newSeason, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")); !reflect.DeepEqual(sorted(got.Remove), want) {
+		t.Errorf("plan = %+v, want %v", got, want)
+	}
+}
+
+// TestPlanRefusesWithoutALibrary proves a lesson with files in a season folder
+// is refused, not guessed at, when no library folder is configured; a lesson
+// in its own folder needs none.
+func TestPlanRefusesWithoutALibrary(t *testing.T) {
+	season := "/lib/Show/Season 01"
+	for _, self := range []database.Lesson{
+		recordedRow(1, season, "Show - s01e05 - Five.mp4"),
+		legacyRow(1, "Five", 5, season, "Show - s01e05 - Five.mp4"),
+	} {
+		if got, err := plan(t, "", self, []database.Lesson{self}); err == nil {
+			t.Errorf("planned %+v with no library, want a refusal", got)
+		}
+	}
+	own := database.Lesson{RailcontentID: 1, OutputDir: sql.NullString{String: "/dl/F/05 - A", Valid: true}, LibraryEntries: sql.NullString{String: "[]", Valid: true}}
+	if got, err := plan(t, "", own, nil); err != nil || len(got.Remove)+len(got.Kept) != 0 {
+		t.Errorf("own folder, empty record, no library: plan = (%+v, %v), want nothing", got, err)
+	}
+}
+
+// TestRecordRefusesADamagedRecord proves a record that is not a list of plain
+// "<show>/Season NN/<name>" entries inside the library is refused, never acted
+// on, and that another lesson's damaged record refuses too: its claims are
+// unknown.
+func TestRecordRefusesADamagedRecord(t *testing.T) {
 	season := "/lib/Show/Season 01"
 	for _, bad := range []string{
+		`["/lib/Show/Season 01/x.mp4"]`,
 		`["/etc/passwd"]`,
-		`["relative/Season 01/x.mp4"]`,
-		`["/lib/Show/Season 01/../../etc"]`,
-		`["/lib/Show/Season 01"]`,
-		`["/lib/Show/Season 01/"]`,
+		`["Show/Season 01/../../etc"]`,
+		`["../Show/Season 01/x.mp4"]`,
+		`["Show/Season 01"]`,
+		`["Show/Season 01/"]`,
+		`["Show/Season 01/a/b"]`,
+		`["Show/05 - A/x.mp4"]`,
+		`["./Show/Season 01/x.mp4"]`,
+		`["Show//Season 01/x.mp4"]`,
+		`[""]`,
+		`null`,
 		`not json`,
 	} {
 		l := database.Lesson{RailcontentID: 1, OutputDir: sql.NullString{String: season, Valid: true}, LibraryEntries: sql.NullString{String: bad, Valid: true}}
-		if got, err := PlanLessonEntries(l, nil); err == nil {
+		if got, err := plan(t, "/lib", l, nil); err == nil {
 			t.Errorf("record %s planned %+v, want a refusal", bad, got)
 		}
 	}
-	// Another lesson's damaged record refuses too: its claims are unknown.
 	good := recordedRow(1, season, "Show - s01e05 - A.mp4")
 	other := database.Lesson{RailcontentID: 2, LibraryEntries: sql.NullString{String: "{", Valid: true}}
-	if _, err := PlanLessonEntries(good, []database.Lesson{other}); err == nil {
-		t.Error("planned with another lesson's damaged record, want a refusal")
+	if _, err := NewClaims("/lib", []database.Lesson{good, other}); err == nil {
+		t.Error("indexed another lesson's damaged record, want a refusal")
+	}
+}
+
+// TestEntryForAndResolveRoundTrip pins the record's form: relative to the
+// library, forward slashes, and refused outside a season folder.
+func TestEntryForAndResolveRoundTrip(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "lib")
+	p := filepath.Join(root, "Show", "Season 01", "Show - s01e05 - A [B].mp4")
+	e, err := EntryFor(root, p)
+	if err != nil || e != "Show/Season 01/Show - s01e05 - A [B].mp4" {
+		t.Fatalf("EntryFor = (%q, %v)", e, err)
+	}
+	if got := Resolve(root, e); got != p {
+		t.Errorf("Resolve = %q, want %q", got, p)
+	}
+	for _, bad := range []string{root, filepath.Join(root, "Show"), filepath.Join(root, "Show", "Season 01"), filepath.Join(root, "Show", "05 - A", "x.mp4"), filepath.Join(root, "..", "x", "Season 01", "y")} {
+		if e, err := EntryFor(root, bad); err == nil {
+			t.Errorf("EntryFor(%q) = %q, want a refusal", bad, e)
+		}
+	}
+	if got, err := EntriesFor(root, nil); err != nil || got == nil || len(got) != 0 {
+		t.Errorf("EntriesFor(nil) = (%#v, %v), want an empty, non-nil record", got, err)
 	}
 }
 
@@ -258,12 +309,31 @@ func TestLegacyEpisodeEntry(t *testing.T) {
 	}
 }
 
-// TestPlanLessonEntriesLegacyFallback covers a lesson moved before the record
-// existed: a song still loses every version, its nfo, poster and folders (the
-// D51 point), while every entry another lesson row claims (by record, or by its
-// own legacy match) is kept and reported, in both directions.
-func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
+// TestLegacyEpisodeEntryLeavesASongOfAnotherLesson covers a song whose title
+// extends a legacy lesson's ("Five [Live]" beside "Five"): its version files
+// "<Five> [Live] [Drumless].mp4" read as "Five" plus a label, but the "[Live]"
+// lesson's own nfo says whose they are.
+func TestLegacyEpisodeEntryLeavesASongOfAnotherLesson(t *testing.T) {
+	base := "S - s01e05 - Five"
+	listing := map[string]bool{base + " [Live].nfo": false}
+	for _, name := range []string{base + " [Live] [Drumless].mp4", base + " [Live] [Original].mp4", base + " [Live].mp4"} {
+		if legacyEpisodeEntry(base, name, false, listing) {
+			t.Errorf("%q given to %q, want it left to the [Live] lesson", name, base)
+		}
+	}
+	// With no such lesson, they are this song's versions.
+	if !legacyEpisodeEntry(base, base+" [Live] [Drumless].mp4", false, nil) {
+		t.Errorf("a version label holding a bracket not recognised with no other lesson")
+	}
+}
+
+// TestPlanLegacyFallback covers a lesson moved before the record existed: a
+// song still loses every version, its nfo, poster and folders (the D51 point),
+// while every entry another lesson row claims (by record, or by its own legacy
+// match) is kept and reported, in both directions.
+func TestPlanLegacyFallback(t *testing.T) {
 	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	root := libraryOf(season)
 	song := []string{
 		"Show - s01e05 - Five [Drumless].mp4", "Show - s01e05 - Five [Original].mp4",
 		"Show - s01e05 - Five.nfo", "Show - s01e05 - Five-poster.jpg",
@@ -284,7 +354,7 @@ func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
 	point5Row := legacyRow(4, "Five.5", 5, season, "Show - s01e05 - Five.5.mp4")
 	rows := []database.Lesson{songRow, liveRow, partRow, point5Row}
 
-	got, err := PlanLessonEntries(songRow, rows)
+	got, err := plan(t, root, songRow, rows)
 	if err != nil {
 		t.Fatalf("song: %v", err)
 	}
@@ -298,7 +368,7 @@ func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
 	// The other direction: by names alone "Five [Live].mp4" could be the song's
 	// version too, so the live lesson keeps it as well. Ambiguous: nobody
 	// removes it.
-	got, err = PlanLessonEntries(liveRow, rows)
+	got, err = plan(t, root, liveRow, rows)
 	if err != nil {
 		t.Fatalf("live: %v", err)
 	}
@@ -307,7 +377,7 @@ func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
 		t.Errorf("live plan = %+v, want its poster removed and its ambiguous video kept", got)
 	}
 
-	got, err = PlanLessonEntries(point5Row, rows)
+	got, err = plan(t, root, point5Row, rows)
 	if err != nil {
 		t.Fatalf("five.5: %v", err)
 	}
@@ -317,7 +387,7 @@ func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
 
 	// Without the other rows (they were deleted), the song's grammar alone
 	// still never reaches the '-' and '.' look-alikes.
-	got, err = PlanLessonEntries(songRow, nil)
+	got, err = plan(t, root, songRow, nil)
 	if err != nil {
 		t.Fatalf("song alone: %v", err)
 	}
@@ -328,73 +398,78 @@ func TestPlanLessonEntriesLegacyFallback(t *testing.T) {
 	}
 }
 
-// TestPlanLessonEntriesLegacyRefusesToGuess proves a legacy lesson whose
-// episode name can not be told apart is refused, not guessed.
-func TestPlanLessonEntriesLegacyRefusesToGuess(t *testing.T) {
+// TestPlanLegacyRefusesToGuess proves a legacy lesson whose episode name can
+// not be told apart is refused, not guessed.
+func TestPlanLegacyRefusesToGuess(t *testing.T) {
 	season := filepath.Join(t.TempDir(), "Show", "Season 01")
 	seedSeason(t, season, "Show - s01e05 - A [B].mp4", "Show - s01e05 - A [B].nfo", "Show - s01e05 - A.nfo")
 	row := legacyRow(1, "Renamed", 5, season, "Show - s01e05 - A [B].mp4")
-	if got, err := PlanLessonEntries(row, nil); err == nil {
+	if got, err := plan(t, libraryOf(season), row, nil); err == nil {
 		t.Errorf("planned %+v, want a refusal", got)
 	}
 	// A lesson whose own folder is not a season folder owns no season entries.
 	own := database.Lesson{RailcontentID: 1, OutputDir: sql.NullString{String: "/dl/F/05 - A", Valid: true}}
-	if got, err := PlanLessonEntries(own, nil); err != nil || len(got.Remove)+len(got.Kept) != 0 {
+	if got, err := plan(t, "/lib", own, nil); err != nil || len(got.Remove)+len(got.Kept) != 0 {
 		t.Errorf("default-layout lesson plan = (%+v, %v), want nothing", got, err)
 	}
 }
 
-// TestRemoveUnderRootConfinesTheRemoval proves the removal can not leave the
-// root it was given: through a symlinked folder, outside every root, or at a
-// root itself it refuses; a symlink that is itself the entry goes, its target
-// stays; a missing path is already gone.
-func TestRemoveUnderRootConfinesTheRemoval(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinks need privileges on Windows")
-	}
-	tmp := t.TempDir()
-	lib := filepath.Join(tmp, "lib")
-	outside := filepath.Join(tmp, "outside")
-	seedSeason(t, outside, "precious.nfo", "target/")
-	if err := os.MkdirAll(filepath.Join(lib, "Show"), 0o755); err != nil {
+// TestForgetDropsALessonsClaims proves a lesson whose files a delete removed
+// no longer counts against the next lesson: a path two records named goes
+// with the second.
+func TestForgetDropsALessonsClaims(t *testing.T) {
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Same.mp4")
+	a := recordedRow(1, season, "Show - s01e05 - Same.mp4")
+	b := recordedRow(2, season, "Show - s01e05 - Same.mp4")
+	c, err := NewClaims(libraryOf(season), []database.Lesson{a, b})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(lib, "Show", "Season 01")); err != nil {
-		t.Fatal(err)
+	if got, _ := c.Plan(b); len(got.Remove) != 0 {
+		t.Fatalf("before Forget: %+v, want the shared path kept", got)
 	}
-	roots := []string{lib}
+	c.Forget(1)
+	if got, _ := c.Plan(b); !reflect.DeepEqual(got.Remove, paths(season, "Show - s01e05 - Same.mp4")) {
+		t.Errorf("after Forget(1): %+v, want the path removed", got)
+	}
+	if ids := c.Holds(season, 2); len(ids) != 0 {
+		t.Errorf("Holds after Forget = %v, want none", ids)
+	}
+}
 
-	if err := RemoveUnderRoot(roots, filepath.Join(lib, "Show", "Season 01", "precious.nfo")); err == nil {
-		t.Error("removed through a symlinked season folder, want a refusal")
+// TestHoldsAndIsLessonFolder pin the two checks a delete makes before it
+// removes a lesson's own folder whole: the folder is named like one, and holds
+// nothing another row records.
+func TestHoldsAndIsLessonFolder(t *testing.T) {
+	season := "/lib/Show/Season 01"
+	rows := []database.Lesson{
+		recordedRow(1, season, "Show - s01e05 - A.mp4"),
+		{RailcontentID: 2, OutputDir: sql.NullString{String: "/dl/F/05 - B", Valid: true}, VideoPath: sql.NullString{String: "/dl/F/05 - B/05 - B.mp4", Valid: true}},
 	}
-	assertExist(t, true, filepath.Join(outside, "precious.nfo"))
-	for _, p := range []string{outside, lib, filepath.Join(lib, ".."), ""} {
-		if err := RemoveUnderRoot(roots, p); err == nil {
-			t.Errorf("RemoveUnderRoot(%q) = nil, want a refusal", p)
+	c, err := NewClaims("/lib", rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir, want := range map[string][]int{
+		"/lib/Show":        {1},
+		"/lib":             {1},
+		"/dl/F":            {2},
+		"/dl/F/05 - B":     {2},
+		"/dl/F/05 - B2":    nil,
+		"/lib/Show/Seas":   nil,
+		"/dl/F/05 - B/sub": nil,
+	} {
+		if got := c.Holds(dir, 0); len(got)+len(want) > 0 && !reflect.DeepEqual(got, want) {
+			t.Errorf("Holds(%q) = %v, want %v", dir, got, want)
 		}
 	}
-	// A root itself is refused by name. (os.Root would refuse "." too, but only
-	// as a bare "invalid argument" that names nothing.)
-	if err := RemoveUnderRoot(roots, lib); err == nil || !strings.Contains(err.Error(), "is not safely inside any of") {
-		t.Errorf("RemoveUnderRoot(root) = %v, want the named refusal", err)
+	if got := c.Holds("/dl/F/05 - B", 2); len(got) != 0 {
+		t.Errorf("Holds counts the lesson itself: %v", got)
 	}
-	if err := RemoveUnderRoot(nil, filepath.Join(lib, "Show")); err == nil {
-		t.Error("removed with no root, want a refusal")
+	for dir, want := range map[string]bool{"/dl/F/05 - B": true, "/dl/F/123 - X": true, "/lib/Show": false, "/lib/Show/Season 01": false, "/dl/F/5 - B": false, "/dl/F/05 -": false, "/dl/F/05 - ": false} {
+		if got := IsLessonFolder(dir); got != want {
+			t.Errorf("IsLessonFolder(%q) = %v, want %v", dir, got, want)
+		}
 	}
-	if err := RemoveUnderRoot(roots, filepath.Join(lib, "Show", "missing.mp4")); err != nil {
-		t.Errorf("missing path = %v, want nil", err)
-	}
-	// The symlink entry itself is removed; what it points at stays.
-	if err := RemoveUnderRoot(roots, filepath.Join(lib, "Show", "Season 01")); err != nil {
-		t.Fatalf("remove the link: %v", err)
-	}
-	assertExist(t, false, filepath.Join(lib, "Show", "Season 01"))
-	assertExist(t, true, filepath.Join(outside, "precious.nfo"), filepath.Join(outside, "target", "f.pdf"))
-	// The second root is used when the first does not hold the path.
-	dl := filepath.Join(tmp, "dl")
-	seedSeason(t, dl, "05 - Lesson/")
-	if err := RemoveUnderRoot([]string{lib, dl}, filepath.Join(dl, "05 - Lesson")); err != nil {
-		t.Fatalf("remove under the second root: %v", err)
-	}
-	assertExist(t, false, filepath.Join(dl, "05 - Lesson"))
 }

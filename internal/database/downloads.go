@@ -26,11 +26,13 @@ var ErrLessonChanged = errors.New("lesson changed while it was being deleted")
 // untracked. Nothing was deleted.
 var ErrFollowHasFiles = errors.New("follow still has lessons with recorded files")
 
-// PlacedEntries decodes the lesson's library_entries record: the absolute paths
-// the plex-tv move placed in a season folder for it. recorded is false when the
-// column is NULL (no record: a default-layout lesson, or one moved before the
-// record existed). A value that is not a JSON array of non-empty strings is an
-// error, never an empty record, so a damaged row can not pass for "owns nothing".
+// PlacedEntries decodes the lesson's library_entries record: the entries the
+// plex-tv move placed in a season folder for it, each relative to the library
+// folder ("<show>/Season NN/<name>"; internal/library checks and resolves
+// them). recorded is false when the column is NULL (no record: a
+// default-layout lesson, or one moved before the record existed). A value that
+// is not a JSON array of non-empty strings is an error, never an empty record,
+// so a damaged row can not pass for "owns nothing".
 func (l Lesson) PlacedEntries() (paths []string, recorded bool, err error) {
 	if !l.LibraryEntries.Valid {
 		return nil, false, nil
@@ -64,8 +66,10 @@ func EncodeLibraryEntries(paths []string) sql.NullString {
 }
 
 // DownloadRecord is what FinishDownload records for a finished download.
-// LibraryEntries nil records no library entries (NULL); non-nil (even empty)
-// records exactly those paths.
+// LibraryEntries nil leaves the lesson's library record as it is (a download
+// that did not move into a season folder: whatever the lesson recorded there is
+// still on disk and still its own); non-nil (even empty) records exactly those
+// entries.
 type DownloadRecord struct {
 	Quality        string
 	OutputDir      string
@@ -116,7 +120,8 @@ func (s *Store) StartDownload(ctx context.Context, jobID int64, id int) error {
 
 // FinishDownload records a successful download and closes its job, in one
 // transaction: the lesson becomes 'downloaded' with rec's quality, paths, byte
-// count and library entries (error cleared, downloaded_at stamped), and the job
+// count and library entries (see DownloadRecord; error cleared, downloaded_at
+// stamped), and the job
 // becomes 'done'. It lands only while the job and lesson still exist; otherwise
 // nothing is written and it returns ErrDownloadAbandoned.
 func (s *Store) FinishDownload(ctx context.Context, jobID int64, id int, rec DownloadRecord) error {
@@ -128,13 +133,13 @@ func (s *Store) FinishDownload(ctx context.Context, jobID int64, id int, rec Dow
 			        output_dir = ?,
 			        video_path = ?,
 			        bytes = ?,
-			        library_entries = ?,
+			        library_entries = CASE WHEN ? THEN library_entries ELSE ? END,
 			        error = NULL,
 			        downloaded_at = CURRENT_TIMESTAMP,
 			        updated_at = CURRENT_TIMESTAMP
 			  WHERE railcontent_id = ?`,
 			StatusDownloaded, rec.Quality, rec.OutputDir, rec.VideoPath, rec.Bytes,
-			EncodeLibraryEntries(rec.LibraryEntries), id,
+			rec.LibraryEntries == nil, EncodeLibraryEntries(rec.LibraryEntries), id,
 		); err != nil {
 			return fmt.Errorf("mark lesson %d downloaded: %w", id, err)
 		}

@@ -1,10 +1,13 @@
 package library
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -18,78 +21,167 @@ import (
 // lessons can share an episode number in one show (positions are first-come per
 // lesson), so a name can not say whose an entry is. The owner's ruling
 // (decision #66): files are known by record, not guessed from names. A lesson
-// moved into a season folder records the exact paths the move placed
-// (lessons.library_entries), and a delete or a re-download acts on exactly
-// those.
+// moved into a season folder records the exact entries the move placed
+// (lessons.library_entries, see Record), and a delete or a re-download acts on
+// exactly those.
 //
-// A lesson moved before the record existed (library_entries NULL) falls back to
-// name matching (legacyEpisodeEntry), which can not prove ownership; so the
-// fallback skips every entry another lesson row claims, and reports it.
+// A lesson moved before the record existed (library_entries NULL, a "legacy"
+// row) falls back to name matching (legacyEpisodeEntry), which can not prove
+// ownership; so the fallback skips every entry another lesson row claims, and
+// reports it.
+//
+// "Claims" is decided by the real file, not only by its name: an existing entry
+// that is the same file (os.SameFile) as one another lesson claims under
+// another spelling, as on a case-insensitive filesystem ("Groove" and
+// "GROOVE"), is claimed too.
 
-// LessonEntries is what one lesson owns in plex-tv season folders, as far as
-// can be proven.
-type LessonEntries struct {
-	// Remove are the absolute paths that belong to the lesson and to no other.
+// Entries is what one lesson owns in plex-tv season folders, as far as can be
+// proven. Both lists hold absolute paths under the library folder.
+type Entries struct {
+	// Remove are the entries that belong to the lesson and to no other.
 	Remove []string
-	// Kept are paths that look like the lesson's but that another lesson row
+	// Kept are entries that look like the lesson's but that another lesson row
 	// also claims. They are never removed; the caller reports them.
 	Kept []string
 }
 
-// PlanLessonEntries works out which season-folder entries lesson self owns:
-//   - with a record: exactly the recorded paths, except one another lesson's
-//     record also names (Kept);
-//   - without one, filed in a season folder (a legacy plex-tv lesson): the
-//     folder's entries that the legacy name grammar gives to self, except any
-//     another row claims (its record, or its own legacy match) (Kept);
-//   - otherwise (a lesson's own folder, or no files): nothing.
-//
-// others is every lesson row with files; self is skipped if present. It fails,
-// rather than guess, when a record is damaged or names something that is not an
-// entry of a season folder, and when a legacy lesson's episode name can not be
-// told apart from a look-alike (see legacyEpisodeBases).
-func PlanLessonEntries(self database.Lesson, others []database.Lesson) (LessonEntries, error) {
-	c, err := NewClaims(self.RailcontentID, others)
-	if err != nil {
-		return LessonEntries{}, err
-	}
-	return c.Plan(self)
-}
-
-// Claims indexes what every OTHER lesson row claims in season folders.
+// Claims indexes what every lesson row claims in the library, for the
+// ownership questions of one move or one delete. Build it once, from every row
+// that records files (database.Store.ListLessonsWithFiles); ask about one
+// lesson at a time, which never counts that lesson's own claims against it.
 type Claims struct {
-	// recorded maps a path to the ids of the lessons whose record names it.
+	// root is the library folder configured now ("" when none is).
+	root string
+	// recorded maps an entry's absolute path to the ids of the lessons whose
+	// record names it.
 	recorded map[string][]int
-	// legacy maps a season folder to the rows filed there without a record.
+	// byID is each lesson's recorded entries (absolute), for Forget.
+	byID map[int][]string
+	// legacy maps a season folder to the rows filed there without a record,
+	// each read as it would be under root today (see legacyRow).
 	legacy map[string][]database.Lesson
+	// paths is every row's output_dir and video_path (absolute), for Holds.
+	paths []ownedPath
 	// listings caches each season folder's entries (name -> isDir), read on
 	// first use; a missing folder lists as empty.
 	listings map[string]map[string]bool
+	// folders caches, per season folder, the names every lesson claims there
+	// (by record, or by a legacy row's name match).
+	folders map[string]map[string][]int
+	// stats caches Lstat of claimed entries for the identity checks (nil for
+	// one that does not exist).
+	stats map[string]os.FileInfo
 }
 
-// NewClaims indexes others, skipping the row whose id is self.
-func NewClaims(self int, others []database.Lesson) (*Claims, error) {
-	c := &Claims{recorded: map[string][]int{}, legacy: map[string][]database.Lesson{}, listings: map[string]map[string]bool{}}
-	for _, o := range others {
-		if o.RailcontentID == self {
-			continue
-		}
-		paths, recorded, err := o.PlacedEntries()
+// ownedPath is one path a lesson row records outside its record.
+type ownedPath struct {
+	id   int
+	path string
+}
+
+// NewClaims indexes rows under the library folder root (absolute, or "" when
+// no library is configured). It fails, rather than guess, when a row's record
+// is damaged: that lesson's claims are unknown, so nothing may be decided.
+func NewClaims(root string, rows []database.Lesson) (*Claims, error) {
+	if root != "" {
+		root = absPath(root)
+	}
+	c := &Claims{
+		root:     root,
+		recorded: map[string][]int{},
+		byID:     map[int][]string{},
+		legacy:   map[string][]database.Lesson{},
+		listings: map[string]map[string]bool{},
+		folders:  map[string]map[string][]int{},
+		stats:    map[string]os.FileInfo{},
+	}
+	for _, row := range rows {
+		entries, recorded, err := Record(row)
 		if err != nil {
 			return nil, err
 		}
+		id := row.RailcontentID
+		for _, p := range []sql.NullString{row.OutputDir, row.VideoPath} {
+			if p.Valid && p.String != "" {
+				c.paths = append(c.paths, ownedPath{id: id, path: absPath(p.String)})
+			}
+		}
 		if recorded {
-			for _, p := range paths {
-				c.recorded[p] = append(c.recorded[p], o.RailcontentID)
+			if root == "" {
+				continue // Plan and the move refuse to act without a library
+			}
+			for _, e := range entries {
+				p := Resolve(root, e)
+				c.recorded[p] = append(c.recorded[p], id)
+				c.byID[id] = append(c.byID[id], p)
 			}
 			continue
 		}
-		if o.OutputDir.Valid && IsSeasonDir(o.OutputDir.String) {
-			dir := filepath.Clean(o.OutputDir.String)
-			c.legacy[dir] = append(c.legacy[dir], o)
+		if row.OutputDir.Valid && IsSeasonDir(row.OutputDir.String) {
+			norm := c.legacyRow(row)
+			c.legacy[norm.OutputDir.String] = append(c.legacy[norm.OutputDir.String], norm)
 		}
 	}
 	return c, nil
+}
+
+// Forget drops every claim of lesson id: its files are gone (a delete
+// tombstoned it), so later questions must not count them. The folder caches
+// are dropped too, as the files it removed changed the listings.
+func (c *Claims) Forget(id int) {
+	for _, p := range c.byID[id] {
+		c.recorded[p] = slices.DeleteFunc(c.recorded[p], func(x int) bool { return x == id })
+		if len(c.recorded[p]) == 0 {
+			delete(c.recorded, p)
+		}
+	}
+	delete(c.byID, id)
+	for dir, rows := range c.legacy {
+		c.legacy[dir] = slices.DeleteFunc(rows, func(l database.Lesson) bool { return l.RailcontentID == id })
+	}
+	c.paths = slices.DeleteFunc(c.paths, func(o ownedPath) bool { return o.id == id })
+	c.listings = map[string]map[string]bool{}
+	c.folders = map[string]map[string][]int{}
+	c.stats = map[string]os.FileInfo{}
+}
+
+// lstat is os.Lstat through the cache: nil when path does not exist (or can
+// not be read, which the identity check treats alike: no evidence).
+func (c *Claims) lstat(path string) os.FileInfo {
+	if info, ok := c.stats[path]; ok {
+		return info
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		info = nil
+	}
+	c.stats[path] = info
+	return info
+}
+
+// seasonFolder is where a row's season folder is under the library folder
+// configured now. The plex-tv move files every lesson at exactly
+// <library>/<show>/<Season NN>, so the last two parts of the recorded folder
+// say where it is, whatever the library was called when it was recorded.
+func (c *Claims) seasonFolder(outputDir string) string {
+	d := absPath(outputDir)
+	if c.root == "" {
+		return d
+	}
+	return filepath.Join(c.root, filepath.Base(filepath.Dir(d)), filepath.Base(d))
+}
+
+// legacyRow is a row without a record read under the library folder
+// configured now: its output_dir becomes seasonFolder, and a video recorded in
+// that folder moves with it.
+func (c *Claims) legacyRow(l database.Lesson) database.Lesson {
+	orig := absPath(l.OutputDir.String)
+	dir := c.seasonFolder(l.OutputDir.String)
+	l.OutputDir.String = dir
+	if l.VideoPath.Valid && l.VideoPath.String != "" && filepath.Dir(absPath(l.VideoPath.String)) == orig {
+		l.VideoPath.String = filepath.Join(dir, filepath.Base(l.VideoPath.String))
+	}
+	return l
 }
 
 // listing returns dir's entries (name -> isDir), reading it once.
@@ -109,53 +201,110 @@ func (c *Claims) listing(dir string) (map[string]bool, error) {
 	return l, nil
 }
 
-// Claimants returns the ids of the other lessons that claim path: by record,
-// or, for an entry that exists, by a legacy row's name match. A legacy row
-// whose episode name is uncertain claims the entries of every candidate name,
-// so the fallback errs towards keeping.
-func (c *Claims) Claimants(path string) ([]int, error) {
-	ids := append([]int(nil), c.recorded[path]...)
-	dir, name := filepath.Dir(path), filepath.Base(path)
-	rows := c.legacy[dir]
-	if len(rows) == 0 {
-		return ids, nil
+// folderClaims returns, for the season folder dir, every name a lesson claims
+// there and whose: the recorded entries in it, and the existing entries a
+// legacy row filed there matches by name. A legacy row whose episode name is
+// uncertain claims the entries of every candidate name, so the fallback errs
+// towards keeping. With legacy false only the records count.
+func (c *Claims) folderClaims(dir string, legacy bool) (map[string][]int, error) {
+	key := dir
+	if !legacy {
+		key = "\x00records\x00" + dir
 	}
-	listing, err := c.listing(dir)
-	if err != nil {
-		return nil, err
+	if f, ok := c.folders[key]; ok {
+		return f, nil
 	}
-	isDir, exists := listing[name]
-	if !exists {
-		return ids, nil
+	f := map[string][]int{}
+	for p, ids := range c.recorded {
+		if filepath.Dir(p) == dir {
+			f[filepath.Base(p)] = append(f[filepath.Base(p)], ids...)
+		}
 	}
-	for _, row := range rows {
-		bases, _ := legacyEpisodeBases(row, dir, listing)
-		for _, b := range bases {
-			if legacyEpisodeEntry(b, name, isDir, listing) {
-				ids = append(ids, row.RailcontentID)
-				break
+	if rows := c.legacy[dir]; legacy && len(rows) > 0 {
+		listing, err := c.listing(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			bases, _ := legacyEpisodeBases(row, dir, listing)
+			for name, isDir := range listing {
+				for _, b := range bases {
+					if legacyEpisodeEntry(b, name, isDir, listing) {
+						f[name] = append(f[name], row.RailcontentID)
+						break
+					}
+				}
 			}
 		}
 	}
-	return ids, nil
+	c.folders[key] = f
+	return f, nil
 }
 
-// Plan is PlanLessonEntries over an existing index.
-func (c *Claims) Plan(self database.Lesson) (LessonEntries, error) {
-	var out LessonEntries
-	paths, recorded, err := self.PlacedEntries()
+// Claimants returns the ids of the lessons other than self that claim path, an
+// entry of a season folder: one whose record names it; with legacy, one whose
+// name match (a legacy row) reaches it; and, for an existing entry, one that
+// claims another name in the same folder that is the same file as path.
+func (c *Claims) Claimants(path string, self int, legacy bool) ([]int, error) {
+	path = absPath(path)
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	claimed, err := c.folderClaims(dir, legacy)
+	if err != nil {
+		return nil, err
+	}
+	ids := append([]int(nil), claimed[name]...)
+	if info, lerr := os.Lstat(path); lerr == nil {
+		for other, oids := range claimed {
+			if other == name {
+				continue
+			}
+			if oinfo := c.lstat(filepath.Join(dir, other)); oinfo != nil && os.SameFile(info, oinfo) {
+				ids = append(ids, oids...)
+			}
+		}
+	}
+	return withoutID(ids, self), nil
+}
+
+// withoutID returns ids minus self, sorted and without repeats.
+func withoutID(ids []int, self int) []int {
+	out := slices.DeleteFunc(ids, func(x int) bool { return x == self })
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// Plan works out which season-folder entries lesson self owns:
+//   - with a record: exactly the recorded entries, except one another lesson's
+//     record also names, or that is the same file as one it names (Kept). A
+//     legacy name match never outranks a record: every record was written by
+//     a move that refused to overwrite what a legacy row claimed;
+//   - without one, filed in a season folder (a legacy plex-tv lesson): the
+//     folder's entries that the legacy name grammar gives to self, except any
+//     another row claims (its record, or its own legacy match) (Kept);
+//   - otherwise (a lesson's own folder, or no files): nothing.
+//
+// It fails, rather than guess, when self's record is damaged, when self's
+// files are in a season folder but no library folder is configured, and when
+// a legacy lesson's episode name can not be told apart from a look-alike (see
+// legacyEpisodeBases).
+func (c *Claims) Plan(self database.Lesson) (Entries, error) {
+	var out Entries
+	entries, recorded, err := Record(self)
 	if err != nil {
 		return out, err
 	}
+	season := self.OutputDir.Valid && IsSeasonDir(self.OutputDir.String)
+	if (recorded && len(entries) > 0 || !recorded && season) && c.root == "" {
+		return out, fmt.Errorf("lesson %d has files in a library season folder, but no library folder is configured (DRUMDROP_LIBRARY_DIR); refusing to guess where they are", self.RailcontentID)
+	}
 	if recorded {
-		// A record is proof: only another RECORD naming the same path makes it
-		// ambiguous. A legacy guess can not outrank it (every record was written
-		// by a move that refused to overwrite what a legacy row claimed).
-		for _, p := range paths {
-			if err := checkRecordedEntry(self.RailcontentID, p); err != nil {
-				return LessonEntries{}, err
+		for _, e := range entries {
+			p := Resolve(c.root, e)
+			ids, err := c.Claimants(p, self.RailcontentID, false)
+			if err != nil {
+				return Entries{}, err
 			}
-			if len(c.recorded[p]) > 0 {
+			if len(ids) > 0 {
 				out.Kept = append(out.Kept, p)
 			} else {
 				out.Remove = append(out.Remove, p)
@@ -163,17 +312,18 @@ func (c *Claims) Plan(self database.Lesson) (LessonEntries, error) {
 		}
 		return out, nil
 	}
-	if !self.OutputDir.Valid || !IsSeasonDir(self.OutputDir.String) {
+	if !season {
 		return out, nil
 	}
-	dir := filepath.Clean(self.OutputDir.String)
+	row := c.legacyRow(self)
+	dir := row.OutputDir.String
 	listing, err := c.listing(dir)
 	if err != nil {
 		return out, err
 	}
-	bases, exact := legacyEpisodeBases(self, dir, listing)
+	bases, exact := legacyEpisodeBases(row, dir, listing)
 	if !exact {
-		return LessonEntries{}, fmt.Errorf("lesson %d has no record of its files, and its episode in %q could be any of %q; refusing to guess", self.RailcontentID, dir, bases)
+		return Entries{}, fmt.Errorf("lesson %d has no record of its files, and its episode in %q could be any of %q; refusing to guess", self.RailcontentID, dir, bases)
 	}
 	names := make([]string, 0, len(listing))
 	for name := range listing {
@@ -185,9 +335,9 @@ func (c *Claims) Plan(self database.Lesson) (LessonEntries, error) {
 			continue
 		}
 		p := filepath.Join(dir, name)
-		ids, err := c.Claimants(p)
+		ids, err := c.Claimants(p, self.RailcontentID, true)
 		if err != nil {
-			return LessonEntries{}, err
+			return Entries{}, err
 		}
 		if len(ids) > 0 {
 			out.Kept = append(out.Kept, p)
@@ -198,14 +348,34 @@ func (c *Claims) Plan(self database.Lesson) (LessonEntries, error) {
 	return out, nil
 }
 
-// checkRecordedEntry refuses a recorded path that is not a plain entry of a
-// plex-tv season folder, so a damaged row can never aim a removal elsewhere.
-func checkRecordedEntry(id int, p string) error {
-	name := filepath.Base(p)
-	if !filepath.IsAbs(p) || filepath.Clean(p) != p || name == "." || name == ".." || !IsSeasonDir(filepath.Dir(p)) {
-		return fmt.Errorf("lesson %d records %q, which is not an entry of a season folder; refusing to touch it", id, p)
+// Holds returns the ids of the lessons other than self that record a path at
+// or inside dir: their output_dir, their video, or one of their library
+// entries. A lesson folder that holds another lesson's files is never one to
+// remove whole.
+func (c *Claims) Holds(dir string, self int) []int {
+	dir = absPath(dir)
+	var ids []int
+	for _, o := range c.paths {
+		if Inside(dir, o.path) {
+			ids = append(ids, o.id)
+		}
 	}
-	return nil
+	for p, pids := range c.recorded {
+		if Inside(dir, p) {
+			ids = append(ids, pids...)
+		}
+	}
+	return withoutID(ids, self)
+}
+
+// lessonFolderName is the shape of every lesson folder drumdrop creates:
+// "NN - <title>" (see the scheduler's lessonDir).
+var lessonFolderName = regexp.MustCompile(`^[0-9]{2,} - .`)
+
+// IsLessonFolder reports whether dir is named like a lesson folder
+// ("05 - Title"), the only kind of folder a delete removes whole.
+func IsLessonFolder(dir string) bool {
+	return lessonFolderName.MatchString(filepath.Base(dir))
 }
 
 // legacyEpisodeBases returns the candidate episode names ("<show> - s01e05 -
@@ -273,8 +443,11 @@ var subtitleExts = map[string]bool{"vtt": true, "srt": true, "ass": true, "ssa":
 // move gave the episode base: exactly the shapes DownloadLesson produces, with
 // the scratch base swapped for base:
 //   - "<base>.mp4", "<base>.nfo", "<base>-poster.jpg", "<base>.<lang>.<subtitle>";
-//   - "<base> [Label].mp4", a song version, unless "<base> [Label].nfo" exists
-//     (then it is another lesson whose title is this one plus " [Label]");
+//   - "<base> [Label].mp4", a song version, unless another lesson's episode
+//     starts inside it: some "<base> [X]" (X any prefix of the label that
+//     ends in "]", the label itself included) has its own "<base> [X].nfo"
+//     (then "<base> [X]" is another lesson, whose title is this one plus
+//     " [X]", and this is one of ITS versions or its video);
 //   - the folders "<base> resources", "<base> play-along", "<base> sheet-music".
 //
 // Anything else (another title that merely starts with this one, "…Five-Part
@@ -296,8 +469,17 @@ func legacyEpisodeEntry(base, name string, isDir bool, listing map[string]bool) 
 		if !ok || label == "" {
 			return false
 		}
-		isDirNFO, hasNFO := listing[base+" ["+label+"].nfo"]
-		return !hasNFO || isDirNFO
+		// "<base> [" + label[:i] + "]" for every "]" in the label, and the whole
+		// label: a lesson "<base> [Live]" owns "<base> [Live] [Drumless].mp4".
+		for i := 0; i <= len(label); i++ {
+			if i < len(label) && label[i] != ']' {
+				continue
+			}
+			if isDirNFO, hasNFO := listing[base+" ["+label[:i]+"].nfo"]; hasNFO && !isDirNFO {
+				return false
+			}
+		}
+		return true
 	}
 	if sub, ok := strings.CutPrefix(rest, "."); ok {
 		lang, ext, ok := strings.Cut(sub, ".")
@@ -315,42 +497,4 @@ func isLangCode(s string) bool {
 		}
 	}
 	return true
-}
-
-// RemoveUnderRoot removes path (a file, a symlink itself, or a folder with its
-// contents) through the first of roots it sits strictly inside, using os.Root,
-// so no symlinked folder on the way can make it act outside that root: such a
-// path is refused ("path escapes from parent"). A missing path is success. It
-// refuses a path inside none of the roots, and the roots themselves.
-func RemoveUnderRoot(roots []string, path string) error {
-	for _, root := range roots {
-		rel, ok := relUnder(root, path)
-		if !ok {
-			continue
-		}
-		r, err := os.OpenRoot(root)
-		if err != nil {
-			return fmt.Errorf("open root %q to remove %q: %w", root, path, err)
-		}
-		defer r.Close()
-		if err := r.RemoveAll(rel); err != nil {
-			return fmt.Errorf("remove %q: %w", path, err)
-		}
-		return nil
-	}
-	return fmt.Errorf("%q is not safely inside any of %q; refusing to remove it", path, roots)
-}
-
-// relUnder returns path relative to root when it is strictly inside it: a
-// non-empty root, and a relative path that is not ".", "..", ".."-prefixed or
-// absolute.
-func relUnder(root, path string) (string, bool) {
-	if root == "" || path == "" {
-		return "", false
-	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", false
-	}
-	return rel, true
 }

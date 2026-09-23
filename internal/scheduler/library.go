@@ -24,7 +24,7 @@ const LayoutPlexTV = "plex-tv"
 var rename = os.Rename
 
 // moveToLibrary moves lessonDir into libraryDir at lessonDir's path relative to
-// downloadsDir, returning the new (library) dir. It tries os.Rename first
+// downloadsDir, returning the new (library) dir. It tries a rename first
 // (instant and atomic on the same filesystem); on a cross-filesystem rename
 // error it falls back to copying the tree then removing the source. The
 // downloads folder is gone after a successful move.
@@ -42,10 +42,12 @@ var rename = os.Rename
 //
 // It rejects a lessonDir that is not under downloadsDir (rel ".", "..", an
 // absolute Rel result) before any write, so a stray path can never land outside
-// the library. The destination parent is created; an existing destination (a
-// re-download) is removed first so the move replaces it. It returns the new dir
-// and an error for the caller to LOG — the caller treats the move as non-fatal
-// and must never fail the job on it.
+// the library. Everything it creates or removes in the library goes through
+// os.Root: the destination's parent must resolve inside the library (a
+// symlinked course folder is refused, not followed), and an existing
+// destination (a re-download) is removed there so the move replaces it. It
+// returns the new dir and an error for the caller to LOG — the caller treats
+// the move as non-fatal and must never fail the job on it.
 func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, err error) {
 	// Move to the same path relative to the downloads root. Reject a lessonDir
 	// that escapes the root (".." prefix or an absolute Rel result) before any
@@ -62,41 +64,67 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 	// Destination == source (e.g. libraryDir == downloadsDir, spelled the same or
 	// reached another way: a symlink, the same host folder bind-mounted twice):
 	// the lesson is already where it would be moved to. Return it as a no-op
-	// success — the file stays put. WITHOUT this guard the RemoveAll(dstDir) below
-	// would delete the source before the rename, then both the rename and the
-	// copy fall-back fail against a now-missing source and the lesson is
-	// permanently lost. Identity (os.SameFile) decides, not spelling.
+	// success — the file stays put. WITHOUT this guard the removal below would
+	// delete the source before the rename, then both the rename and the copy
+	// fall-back fail against a now-missing source and the lesson is permanently
+	// lost. Identity (os.SameFile) decides, not spelling.
 	if filepath.Clean(dstDir) == filepath.Clean(lessonDir) || sameDir(dstDir, lessonDir) {
 		return dstDir, nil
 	}
 
-	// Create the destination's PARENT (not dstDir itself) so the rename moves the
-	// whole lesson folder in as the leaf. A pre-existing destination (re-download)
-	// is removed so the move replaces it rather than failing or nesting.
-	if err := os.MkdirAll(filepath.Dir(dstDir), 0o755); err != nil {
-		return "", fmt.Errorf("create library parent %q: %w", filepath.Dir(dstDir), err)
+	// Open the destination's PARENT inside the library (created if missing), so
+	// the rename moves the whole lesson folder in as the leaf, and nothing is
+	// created or removed through a symlink leading out of the library.
+	parent, closeParent, err := openLibraryParent(libraryDir, filepath.Dir(rel))
+	if err != nil {
+		return "", err
 	}
-	if err := os.RemoveAll(dstDir); err != nil {
+	defer closeParent()
+	leaf := filepath.Base(rel)
+	if err := parent.RemoveAll(leaf); err != nil {
 		return "", fmt.Errorf("remove existing library dir %q: %w", dstDir, err)
 	}
 
 	if rerr := rename(lessonDir, dstDir); rerr == nil {
 		return dstDir, nil
-	} else if cerr := copyTree(lessonDir, dstDir); cerr != nil {
+	} else if cerr := copyTreeInto(parent, leaf, lessonDir); cerr != nil {
 		// Cross-filesystem (or otherwise unrenamable): copy the tree, then drop the
 		// source. The copy only read the source, so the whole lesson is still in
 		// downloads; take the partial copy back out of the library.
 		err := fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
-		return "", errors.Join(err, discardPartialCopy(dstDir))
+		return "", errors.Join(err, discardPartialCopy(parent, leaf))
 	}
-	if err := syncDir(filepath.Dir(dstDir)); err != nil {
+	if err := syncIn(parent, "."); err != nil {
 		err = fmt.Errorf("flush library folder %q after the copy: %w", filepath.Dir(dstDir), err)
-		return "", errors.Join(err, discardPartialCopy(dstDir))
+		return "", errors.Join(err, discardPartialCopy(parent, leaf))
 	}
 	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
 		return dstDir, downloadsLeftoverErr(lessonDir, rmerr)
 	}
 	return dstDir, nil
+}
+
+// openLibraryParent creates the folder rel inside libraryDir and opens it as
+// an os.Root, refusing one that resolves outside the library (a symlinked
+// folder on the way). closeFn releases both handles.
+func openLibraryParent(libraryDir, rel string) (dir *os.Root, closeFn func(), err error) {
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		return nil, nil, fmt.Errorf("create library folder %q: %w", libraryDir, err)
+	}
+	lib, err := os.OpenRoot(libraryDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open library folder %q: %w", libraryDir, err)
+	}
+	if err := lib.MkdirAll(rel, 0o755); err != nil {
+		lib.Close()
+		return nil, nil, fmt.Errorf("create %q inside the library %q: %w", rel, libraryDir, err)
+	}
+	dir, err = lib.OpenRoot(rel)
+	if err != nil {
+		lib.Close()
+		return nil, nil, fmt.Errorf("open %q inside the library %q: %w", rel, libraryDir, err)
+	}
+	return dir, func() { dir.Close(); lib.Close() }, nil
 }
 
 // sameDir reports whether a and b both exist and are the same folder, however

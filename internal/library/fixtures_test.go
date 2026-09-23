@@ -1,4 +1,4 @@
-package scheduler
+package library
 
 import (
 	"database/sql"
@@ -10,9 +10,6 @@ import (
 
 	"github.com/elienop/drumdrop/internal/database"
 )
-
-// The season-folder fixtures below mirror internal/library's, for the move and
-// worker tests here.
 
 // seedSeason creates dir and, inside it, every name: a folder (holding one
 // file) when the name ends in "/", else a file whose content is its name.
@@ -46,40 +43,26 @@ func paths(dir string, names ...string) []string {
 	return out
 }
 
-// recordedRow is a lesson filed in seasonDir (<lib>/<show>/<Season NN>) whose
-// record names exactly names, relative to the library as the move writes them.
-func recordedRow(id int, seasonDir string, names ...string) database.Lesson {
-	return database.Lesson{
-		RailcontentID:  id,
-		Status:         database.StatusDownloaded,
-		OutputDir:      sql.NullString{String: seasonDir, Valid: true},
-		LibraryEntries: database.EncodeLibraryEntries(recordOf(seasonDir, names...)),
-	}
+// libraryOf is the library folder a season folder <lib>/<show>/<Season NN>
+// sits in.
+func libraryOf(seasonDir string) string {
+	return filepath.Dir(filepath.Dir(seasonDir))
 }
 
-// recordOf is the record entries for names in seasonDir (<lib>/<show>/<Season
-// NN>): "<show>/<Season NN>/<name>", as the move writes them. Never nil.
-func recordOf(seasonDir string, names ...string) []string {
+// recordedRow is a lesson filed in seasonDir whose record names exactly names
+// (relative to the library folder, as the move writes them).
+func recordedRow(id int, seasonDir string, names ...string) database.Lesson {
 	entries := make([]string, 0, len(names))
 	prefix := filepath.Base(filepath.Dir(seasonDir)) + "/" + filepath.Base(seasonDir) + "/"
 	for _, n := range names {
 		entries = append(entries, prefix+strings.TrimSuffix(n, "/"))
 	}
-	return entries
-}
-
-// owned is every library entry a move result says the lesson owns (absolute).
-func owned(r plexMoveResult) []string {
-	return append(append([]string(nil), r.placed...), r.kept...)
-}
-
-// cleaned is every path cleaned (a root's own folder is flushed as "<dir>/.").
-func cleaned(ps []string) []string {
-	out := make([]string, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, filepath.Clean(p))
+	return database.Lesson{
+		RailcontentID:  id,
+		Status:         database.StatusDownloaded,
+		OutputDir:      sql.NullString{String: seasonDir, Valid: true},
+		LibraryEntries: database.EncodeLibraryEntries(entries),
 	}
-	return out
 }
 
 // legacyRow is a lesson moved into seasonDir before the record existed: no
@@ -98,6 +81,16 @@ func legacyRow(id int, title string, position int, seasonDir, video string) data
 	return l
 }
 
+// plan is NewClaims(root, rows).Plan(self).
+func plan(t *testing.T, root string, self database.Lesson, rows []database.Lesson) (Entries, error) {
+	t.Helper()
+	c, err := NewClaims(root, rows)
+	if err != nil {
+		return Entries{}, err
+	}
+	return c.Plan(self)
+}
+
 func sorted(s []string) []string {
 	out := append([]string(nil), s...)
 	sort.Strings(out)
@@ -113,15 +106,3 @@ func assertExist(t *testing.T, want bool, ps ...string) {
 		}
 	}
 }
-
-// fiveLookAlikes are four lessons that share episode 5 of one show, each title
-// the first plus a tag or a suffix: the collision the name matcher could not
-// tell apart.
-var fiveLookAlikes = map[string][]string{
-	"Five":           {"Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e05 - Five-poster.jpg", "Show - s01e05 - Five resources/"},
-	"Five [Live]":    {"Show - s01e05 - Five [Live].mp4", "Show - s01e05 - Five [Live].nfo", "Show - s01e05 - Five [Live]-poster.jpg", "Show - s01e05 - Five [Live] resources/"},
-	"Five-Part Fill": {"Show - s01e05 - Five-Part Fill.mp4", "Show - s01e05 - Five-Part Fill.nfo", "Show - s01e05 - Five-Part Fill resources/"},
-	"Five.5":         {"Show - s01e05 - Five.5.mp4", "Show - s01e05 - Five.5.nfo", "Show - s01e05 - Five.5.en.vtt"},
-}
-
-var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}

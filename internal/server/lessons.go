@@ -190,12 +190,11 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	s.killRunning(running)
 
-	others, err := s.store.ListLessonsWithFiles(r.Context())
-	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
-		return
+	c, err := s.claims(r.Context())
+	if err == nil {
+		err = s.deleteLessonFiles(r.Context(), c, l)
 	}
-	switch err := s.deleteLessonFiles(r.Context(), l, others); {
+	switch {
 	case errors.Is(err, errFilesKept):
 		writeErr(w, http.StatusInternalServerError, "could not delete the lesson's files; the lesson was kept (see the server log)")
 		return

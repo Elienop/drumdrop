@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // TestServerHostPath covers the container→host download-path rewrite that backs
 // the UI's "Copy path": with a host downloads dir configured the container
@@ -39,5 +42,20 @@ func TestServerHostPath(t *testing.T) {
 	out := "/etc/passwd"
 	if got := s.hostPath(strp(out)); deref(got) != out {
 		t.Errorf("hostPath(outside root) = %q, want unchanged %q", deref(got), out)
+	}
+}
+
+// TestServerHostPathReadsARelativeRow proves a row recorded before the roots
+// were made absolute (under the relative ./downloads default) is still mapped:
+// it is read against the working directory, as the OS reads it, and compared
+// with the absolute downloads root the server now has.
+func TestServerHostPathReadsARelativeRow(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	s := &Server{cfg: Config{DownloadsDir: filepath.Join(tmp, "downloads"), HostDownloadsDir: "/mnt/host/dl"}}
+	in := filepath.Join("downloads", "Course", "01 - One")
+	want := filepath.Join("/mnt/host/dl", "Course", "01 - One")
+	if got := s.hostPath(&in); got == nil || *got != want {
+		t.Errorf("hostPath(%q) = %v, want %q", in, got, want)
 	}
 }

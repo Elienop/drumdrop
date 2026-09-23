@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/library"
 )
 
 // mkLessonDir creates root/<rel> with a sample video file and returns the lesson
@@ -36,15 +37,43 @@ func dirLesson(id int, outputDir string) database.Lesson {
 	}
 }
 
-// recordedLesson is a plex-tv lesson whose record names exactly names in season.
+// recordedLesson is a plex-tv lesson whose record names exactly names in season
+// (<library>/<show>/<Season NN>), relative to the library as the move writes
+// them.
 func recordedLesson(id int, season string, names ...string) database.Lesson {
 	l := dirLesson(id, season)
-	var entries []string
-	for _, n := range names {
-		entries = append(entries, filepath.Join(season, strings.TrimSuffix(n, "/")))
-	}
-	l.LibraryEntries = database.EncodeLibraryEntries(entries)
+	l.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, names...))
 	return l
+}
+
+// recordOf is the record entries for names in season: "<show>/<Season NN>/<name>".
+func recordOf(season string, names ...string) []string {
+	entries := make([]string, 0, len(names))
+	prefix := filepath.Base(filepath.Dir(season)) + "/" + filepath.Base(season) + "/"
+	for _, n := range names {
+		entries = append(entries, prefix+strings.TrimSuffix(n, "/"))
+	}
+	return entries
+}
+
+// removeFiles runs a delete of lesson l's files the way a handler does: the
+// claims of every row with files (others, plus l itself as the store would
+// list it) under a server configured with downloads and library.
+func removeFiles(downloads, lib string, l database.Lesson, others []database.Lesson) ([]string, error) {
+	rows := append([]database.Lesson(nil), others...)
+	listed := false
+	for _, o := range others {
+		listed = listed || o.RailcontentID == l.RailcontentID
+	}
+	if !listed {
+		rows = append(rows, l)
+	}
+	c, err := library.NewClaims(lib, rows)
+	if err != nil {
+		return nil, err
+	}
+	srv := &Server{cfg: Config{DownloadsDir: downloads, LibraryDir: lib}}
+	return srv.removeLessonFiles(c, l)
 }
 
 // legacyLesson is a plex-tv lesson moved before the record existed: only its
@@ -88,7 +117,7 @@ func TestRemoveLessonFilesOwnFolder(t *testing.T) {
 				library = ""
 			}
 			outputDir := mkLessonDir(t, root, "Inst/Course/01 - Lesson")
-			if _, err := removeLessonFiles(downloads, library, dirLesson(1, outputDir), nil); err != nil {
+			if _, err := removeFiles(downloads, library, dirLesson(1, outputDir), nil); err != nil {
 				t.Fatalf("removeLessonFiles: %v", err)
 			}
 			if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
@@ -104,7 +133,7 @@ func TestRemoveLessonFilesOwnFolder(t *testing.T) {
 func TestRemoveLessonFilesRejectsOutsideBothRoots(t *testing.T) {
 	downloads, library, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	victim := mkLessonDir(t, outside, "keep")
-	if _, err := removeLessonFiles(downloads, library, dirLesson(1, victim), nil); err == nil {
+	if _, err := removeFiles(downloads, library, dirLesson(1, victim), nil); err == nil {
 		t.Error("removeLessonFiles on a path under neither root returned nil, want error")
 	}
 	if _, err := os.Stat(victim); err != nil {
@@ -120,7 +149,7 @@ func TestRemoveLessonFilesRejectsRootEqual(t *testing.T) {
 	seedEntries(t, downloads, "keep.txt")
 	seedEntries(t, library, "keep.txt")
 	for _, root := range []string{downloads, library} {
-		if _, err := removeLessonFiles(downloads, library, dirLesson(1, root), nil); err == nil {
+		if _, err := removeFiles(downloads, library, dirLesson(1, root), nil); err == nil {
 			t.Errorf("removeLessonFiles(output_dir == %q) returned nil, want error (would wipe the root)", root)
 		}
 	}
@@ -138,7 +167,7 @@ func TestRemoveLessonFilesMissingTolerated(t *testing.T) {
 		dirLesson(2, filepath.Join(library, "Inst/05 - Gone")),
 		recordedLesson(3, season, "Show - s01e05 - Gone.mp4"),
 	} {
-		if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+		if _, err := removeFiles(downloads, library, l, nil); err != nil {
 			t.Errorf("lesson %d: removeLessonFiles on a missing path = %v, want nil", l.RailcontentID, err)
 		}
 	}
@@ -175,7 +204,7 @@ func TestRemoveLessonFilesCollisionsInEveryDirection(t *testing.T) {
 						rows = append(rows, recordedLesson(j+1, season, fiveLookAlikes[tt]...))
 					}
 				}
-				if _, err := removeLessonFiles(downloads, library, rows[i], rows); err != nil {
+				if _, err := removeFiles(downloads, library, rows[i], rows); err != nil {
 					t.Fatalf("removeLessonFiles(%s): %v", title, err)
 				}
 				assertGone(t, season, fiveLookAlikes[title]...)
@@ -202,7 +231,7 @@ func TestRemoveLessonFilesByRecordAfterATitleChange(t *testing.T) {
 	seedEntries(t, season, "Show - s01e05 - New Name.mp4", "Show - s01e06 - Six.mp4")
 	l := recordedLesson(1, season, mine...)
 	l.Title = "New Name"
-	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+	if _, err := removeFiles(downloads, library, l, nil); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, mine...)
@@ -218,7 +247,7 @@ func TestRemoveLessonFilesNoVideoLessonByRecord(t *testing.T) {
 	mine := []string{"Show - s01e04 - Sheets.nfo", "Show - s01e04 - Sheets resources/", "Show - s01e04 - Sheets sheet-music/"}
 	seedEntries(t, season, mine...)
 	seedEntries(t, season, "Show - s01e05 - Five.mp4")
-	if _, err := removeLessonFiles(downloads, library, recordedLesson(1, season, mine...), nil); err != nil {
+	if _, err := removeFiles(downloads, library, recordedLesson(1, season, mine...), nil); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, mine...)
@@ -234,7 +263,7 @@ func TestRemoveLessonFilesKeepsAnEntryTwoRecordsName(t *testing.T) {
 	log := captureLog(t)
 	a := recordedLesson(1, season, "Show - s01e05 - Same.mp4", "Show - s01e05 - Same.nfo")
 	b := recordedLesson(2, season, "Show - s01e05 - Same.mp4")
-	if _, err := removeLessonFiles(downloads, library, a, []database.Lesson{a, b}); err != nil {
+	if _, err := removeFiles(downloads, library, a, []database.Lesson{a, b}); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, "Show - s01e05 - Same.nfo")
@@ -251,8 +280,8 @@ func TestRemoveLessonFilesRefusesADamagedRecord(t *testing.T) {
 	season := filepath.Join(library, "Show", "Season 01")
 	seedEntries(t, season, "Show - s01e05 - Five.mp4")
 	l := dirLesson(1, season)
-	l.LibraryEntries = database.EncodeLibraryEntries([]string{filepath.Join(season, "Show - s01e05 - Five.mp4"), library})
-	if _, err := removeLessonFiles(downloads, library, l, nil); err == nil {
+	l.LibraryEntries = database.EncodeLibraryEntries([]string{"Show/Season 01/Show - s01e05 - Five.mp4", "../.."})
+	if _, err := removeFiles(downloads, library, l, nil); err == nil {
 		t.Error("removeLessonFiles(record naming the library root) = nil, want a refusal")
 	}
 	assertPresent(t, season, "Show - s01e05 - Five.mp4")
@@ -273,7 +302,7 @@ func TestRemoveLessonFilesRefusesASymlinkedSeasonFolder(t *testing.T) {
 	if err := os.Symlink(outside, season); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := removeLessonFiles(downloads, library, recordedLesson(1, season, "Show - s01e05 - Five.mp4"), nil); err == nil {
+	if _, err := removeFiles(downloads, library, recordedLesson(1, season, "Show - s01e05 - Five.mp4"), nil); err == nil {
 		t.Error("removeLessonFiles through a symlinked season folder = nil, want a refusal")
 	}
 	assertPresent(t, outside, "Show - s01e05 - Five.mp4")
@@ -311,12 +340,12 @@ func TestRemoveLessonFilesReportsWhatRemains(t *testing.T) {
 	seedEntries(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
 	l := recordedLesson(1, season, stuck, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
 
-	remaining, err := removeLessonFiles(downloads, library, l, nil)
+	remaining, err := removeFiles(downloads, library, l, nil)
 	if err == nil {
 		t.Fatal("removeLessonFiles = nil, want the removal error")
 	}
 	assertGone(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
-	if want := []string{filepath.Join(season, stuck)}; !reflect.DeepEqual(remaining, want) {
+	if want := recordOf(season, stuck); !reflect.DeepEqual(remaining, want) {
 		t.Errorf("remaining = %v, want %v", remaining, want)
 	}
 }
@@ -396,7 +425,7 @@ func TestRemoveLessonFilesLegacySong(t *testing.T) {
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
 	l := legacyLesson(1, "Five", 5, season, "Songs - s01e05 - Five [Drumless].mp4")
-	if _, err := removeLessonFiles(downloads, library, l, []database.Lesson{l}); err != nil {
+	if _, err := removeFiles(downloads, library, l, []database.Lesson{l}); err != nil {
 		t.Fatalf("removeLessonFiles(song): %v", err)
 	}
 	assertGone(t, season, target...)
@@ -426,7 +455,7 @@ func TestRemoveLessonFilesLegacyLessonWithSubfolders(t *testing.T) {
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
 	l := legacyLesson(1, "Three", 3, season, "Course - s01e03 - Three.mp4")
-	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+	if _, err := removeFiles(downloads, library, l, nil); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, target...)
@@ -450,7 +479,7 @@ func TestRemoveLessonFilesLegacyTitleEndingInTag(t *testing.T) {
 	seedEntries(t, season, append(append([]string{}, target...), siblings...)...)
 
 	l := legacyLesson(1, "Groove [Live]", 7, season, target[0])
-	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+	if _, err := removeFiles(downloads, library, l, nil); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, season, target...)
@@ -466,7 +495,7 @@ func TestRemoveLessonFilesSeasonFolderIsNeverWiped(t *testing.T) {
 	season := filepath.Join(library, "Show", "Season 01")
 	seedEntries(t, season, "Show - s01e01 - One.mp4", "Show - s01e01 - One.nfo", "Show - s01e02 - Two.mp4")
 
-	if _, err := removeLessonFiles(downloads, library, legacyLesson(1, "One", 1, season, ""), nil); err != nil {
+	if _, err := removeFiles(downloads, library, legacyLesson(1, "One", 1, season, ""), nil); err != nil {
 		t.Fatalf("removeLessonFiles(season, no video): %v", err)
 	}
 	assertGone(t, season, "Show - s01e01 - One.mp4", "Show - s01e01 - One.nfo")
@@ -484,7 +513,7 @@ func TestRemoveLessonFilesLegacyRefusesToGuess(t *testing.T) {
 	names := []string{"Show - s01e05 - Five [A] [B].mp4", "Show - s01e05 - Five [A] [B]-poster.jpg"}
 	seedEntries(t, season, names...)
 	l := legacyLesson(1, "Retitled", 5, season, names[0])
-	if _, err := removeLessonFiles(downloads, library, l, nil); err == nil {
+	if _, err := removeFiles(downloads, library, l, nil); err == nil {
 		t.Error("removeLessonFiles(ambiguous legacy lesson) = nil, want a refusal")
 	}
 	assertPresent(t, season, names...)
@@ -499,7 +528,7 @@ func TestRemoveLessonFilesLegacyLeftInDownloads(t *testing.T) {
 	seedEntries(t, lessonDir, "03 - Three.mp4", "03 - Three.nfo", "resources/", "play-along/")
 	l := dirLesson(1, lessonDir)
 	l.VideoPath = sql.NullString{String: filepath.Join(lessonDir, "03 - Three.mp4"), Valid: true}
-	if _, err := removeLessonFiles(downloads, library, l, nil); err != nil {
+	if _, err := removeFiles(downloads, library, l, nil); err != nil {
 		t.Fatalf("removeLessonFiles: %v", err)
 	}
 	assertGone(t, downloads, "Course/03 - Three/")

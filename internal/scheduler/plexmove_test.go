@@ -82,10 +82,18 @@ func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 
 	// The delete, planned from that record, removes exactly what was placed.
 	self := recordedRow(1, season)
-	self.LibraryEntries = database.EncodeLibraryEntries(res.owned())
-	plan, err := library.PlanLessonEntries(self, []database.Lesson{self, other})
+	rec, err := res.record(lib)
 	if err != nil {
-		t.Fatalf("PlanLessonEntries: %v", err)
+		t.Fatalf("record: %v", err)
+	}
+	self.LibraryEntries = database.EncodeLibraryEntries(rec)
+	c, err := library.NewClaims(lib, []database.Lesson{self, other})
+	if err != nil {
+		t.Fatalf("NewClaims: %v", err)
+	}
+	plan, err := c.Plan(self)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
 	}
 	if !reflect.DeepEqual(sorted(plan.Remove), sorted(want)) || len(plan.Kept) != 0 {
 		t.Errorf("delete plan %+v, want exactly %v", plan, want)
@@ -161,8 +169,8 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 					}
 					assertExist(t, false, p) // the previous download's other entries are gone
 				}
-				if want := paths(season, base+".mp4", base+".nfo"); !reflect.DeepEqual(sorted(res.owned()), sorted(want)) {
-					t.Errorf("owned %v, want %v", res.owned(), want)
+				if want := paths(season, base+".mp4", base+".nfo"); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
+					t.Errorf("owned %v, want %v", owned(res), want)
 				}
 			})
 		}
@@ -343,7 +351,7 @@ func TestMoveToLibraryPlexTVFolderCopyFailsPartWayIsRemoved(t *testing.T) {
 	makeUnreadable(t, late)
 
 	res, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{})
-	if err == nil || res.seasonDir != "" || len(res.owned()) != 0 {
+	if err == nil || res.seasonDir != "" || len(owned(res)) != 0 {
 		t.Fatalf("= (%+v, %v), want (nothing, the copy failure)", res, err)
 	}
 	assertNoEpisodeIn(t, seasonDir)
@@ -400,11 +408,15 @@ func TestCopyFileRefusesANonRegularSource(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(tmp, "copy.mp4")
-	if err := copyFile(link, dst, 0o644); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Errorf("copyFile(symlink) = %v, want a refusal", err)
+	root, err := os.OpenRoot(tmp)
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertExist(t, false, dst)
+	defer root.Close()
+	if err := copyFileInto(root, "copy.mp4", link, 0o644); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("copyFileInto(symlink) = %v, want a refusal", err)
+	}
+	assertExist(t, false, filepath.Join(tmp, "copy.mp4"))
 }
 
 // TestDiscardPartialCopyReportsOnlyWhatIsThere proves a leftover is reported
@@ -412,15 +424,20 @@ func TestCopyFileRefusesANonRegularSource(t *testing.T) {
 // never created, a name too long to exist included.
 func TestDiscardPartialCopyReportsOnlyWhatIsThere(t *testing.T) {
 	dir := t.TempDir()
-	for _, p := range []string{filepath.Join(dir, "missing"), filepath.Join(dir, strings.Repeat("n", 300))} {
-		if err := discardPartialCopy(p); err != nil {
-			t.Errorf("discardPartialCopy(%q) = %v, want nil (nothing there)", filepath.Base(p)[:10], err)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, name := range []string{"missing", strings.Repeat("n", 300)} {
+		if err := discardPartialCopy(root, name); err != nil {
+			t.Errorf("discardPartialCopy(%q) = %v, want nil (nothing there)", name[:7], err)
 		}
 	}
 	stuck := filepath.Join(dir, "stuck")
 	seedSeason(t, stuck, "f")
 	makeUndeletable(t, stuck)
-	if err := discardPartialCopy(stuck); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("left at %q", stuck)) {
+	if err := discardPartialCopy(root, "stuck"); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("left at %q", stuck)) {
 		t.Errorf("discardPartialCopy(stuck) = %v, want the leftover named", err)
 	}
 }
@@ -450,7 +467,7 @@ func TestCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 	}
 	for _, want := range append(res.placed, filepath.Join(season, episodeBase+" resources", "song.pdf"), season) {
 		found := false
-		for _, s := range synced {
+		for _, s := range cleaned(synced) {
 			found = found || s == want
 		}
 		if !found {
@@ -499,7 +516,7 @@ func TestMoveToLibraryCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 	want := append(paths(newDir, lessonFiles...), newDir, filepath.Dir(newDir))
 	for _, w := range want {
 		found := false
-		for _, s := range synced {
+		for _, s := range cleaned(synced) {
 			found = found || s == w
 		}
 		if !found {
@@ -534,8 +551,13 @@ func TestMoveToLibrarySymlinkedLessonFolderKeepsTheLesson(t *testing.T) {
 	}
 	assertExist(t, true, filepath.Join(real, "05 - Five.mp4"), filepath.Join(real, "05 - Five.nfo"), lessonDir)
 	assertExist(t, false, filepath.Join(tmp, "lib", "Course", "05 - Five"))
-	if err := copyFile(lessonDir, filepath.Join(tmp, "x"), 0o644); err == nil {
-		t.Error("copyFile copied a symlink, want a refusal")
+	root, err := os.OpenRoot(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := copyFileInto(root, "x", lessonDir, 0o644); err == nil {
+		t.Error("copyFileInto copied a symlink, want a refusal")
 	}
 }
 

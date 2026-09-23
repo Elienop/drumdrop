@@ -4,10 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"slices"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/library"
@@ -25,7 +22,10 @@ import (
 // wrote is removed (discardAbandoned), so no file is left untracked.
 func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, dir string) (bytes int64, ok bool) {
 	id := job.RailcontentID
-	rec := database.DownloadRecord{Quality: quality, LibraryEntries: carriedEntries(w.log(), prev)}
+	// A download that does not move into a season folder keeps the lesson's
+	// library record as it is (LibraryEntries nil): those entries are still on
+	// disk and still the lesson's.
+	rec := database.DownloadRecord{Quality: quality}
 	var placed []string
 	recorded := false
 	switch {
@@ -41,14 +41,24 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 			break
 		}
 		show := plexShow(follow, job, lesson)
-		res, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir,
-			plexLibrary{self: prev, others: others, roots: w.roots()})
+		// The <episodedetails> nfo replaces the download's <movie> one before
+		// the move places it, so a Plex TV-Shows library (which can't match
+		// Drumeo to TheTVDB) gets the real episode title/season/episode from
+		// local metadata, and nothing is written in the season folder after.
+		res, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir, plexLibrary{
+			self: prev, others: others, roots: w.roots(),
+			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),
+		})
 		if err != nil {
 			fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 		}
-		// Whatever happened, owned() is what the lesson has in the library now:
-		// the placed entries, and any previous ones it still owns.
-		rec.LibraryEntries = res.owned()
+		// Whatever happened, the record is what the lesson has in the library
+		// now: the placed entries, and any previous ones it still owns.
+		entries, rerr := res.record(w.Cfg.LibraryDir)
+		if rerr != nil {
+			fmt.Fprintf(w.log(), "  ⚠ move to library %d: its library record is left as it was: %v\n", id, rerr)
+		}
+		rec.LibraryEntries = entries
 		placed = res.placed
 		if res.seasonDir == "" {
 			break // the lesson is whole in the scratch folder: record it there
@@ -61,16 +71,6 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 			}
 		}
 		recorded = true
-		// Overwrite the moved <movie> nfo with an <episodedetails> nfo so a Plex
-		// TV-Shows library (which can't match Drumeo to TheTVDB) gets the real
-		// episode title/season/episode from local metadata. Only at a path the
-		// move placed (and so recorded). Non-fatal, like the aux-artifact fetches.
-		nfoPath := filepath.Join(res.seasonDir, res.episodeBase+".nfo")
-		if !slices.Contains(res.placed, nfoPath) {
-			fmt.Fprintf(w.log(), "  ⚠ episode nfo %d: the move placed no %q, so none was written\n", id, nfoPath)
-		} else if err := os.WriteFile(nfoPath, []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)), 0o644); err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ episode nfo %d: %v\n", id, err)
-		}
 	case w.Cfg.LibraryDir != "":
 		// Default layout: move the whole "NN - title" leaf into the library at
 		// the same path relative to DownloadsDir. A non-empty newDir holds the
@@ -104,22 +104,6 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 	return rec.Bytes, true
 }
 
-// carriedEntries is the library record a download keeps from the lesson's
-// previous one when it does not replace it (the default layout, or a plex-tv
-// move that never ran): those entries are still on disk and still the lesson's.
-// nil when there is no record; a damaged record is logged and dropped.
-func carriedEntries(log io.Writer, prev database.Lesson) []string {
-	paths, recorded, err := prev.PlacedEntries()
-	if err != nil {
-		fmt.Fprintf(log, "  ⚠ lesson %d: %v\n", prev.RailcontentID, err)
-		return nil
-	}
-	if !recorded {
-		return nil
-	}
-	return paths
-}
-
 // roots are the folders the worker may remove entries under.
 func (w *Worker) roots() []string {
 	var roots []string
@@ -143,10 +127,10 @@ func (w *Worker) discardAbandoned(id int, dir string, placed []string) {
 	}
 	var errs []error
 	for _, p := range placed {
-		errs = append(errs, library.RemoveUnderRoot(w.roots(), p))
+		errs = append(errs, library.Remove(w.roots(), p))
 	}
 	if !library.IsSeasonDir(dir) {
-		errs = append(errs, library.RemoveUnderRoot(w.roots(), dir))
+		errs = append(errs, library.Remove(w.roots(), dir))
 	}
 	if err := errors.Join(errs...); err != nil {
 		fmt.Fprintf(w.log(), "  ⚠ %d was deleted while downloading; what it wrote could not all be removed: %v\n", id, err)

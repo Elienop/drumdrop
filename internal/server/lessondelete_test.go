@@ -26,11 +26,10 @@ func seedPlexLesson(t *testing.T, store *database.Store, followID int64, rcID in
 	}
 	seedEntries(t, season, names...)
 	rec := database.DownloadRecord{Quality: "1080", OutputDir: season, Bytes: 5, LibraryEntries: []string{}}
+	rec.LibraryEntries = recordOf(season, names...)
 	for _, n := range names {
-		p := filepath.Join(season, strings.TrimSuffix(n, "/"))
-		rec.LibraryEntries = append(rec.LibraryEntries, p)
 		if rec.VideoPath == "" && strings.HasSuffix(n, ".mp4") {
-			rec.VideoPath = p
+			rec.VideoPath = filepath.Join(season, n)
 		}
 	}
 	finishWithNewJob(t, store, followID, rcID, rec)
@@ -193,7 +192,7 @@ func TestDeleteLessonKeepsTheLessonWhenAFileCannotBeRemoved(t *testing.T) {
 	assertGone(t, season, "Show - s01e05 - Five.mp4")
 	l := mustLesson(t, store, 1)
 	entries, recorded, err := l.PlacedEntries()
-	if l.Status != database.StatusDownloaded || !l.OutputDir.Valid || err != nil || !recorded || !reflect.DeepEqual(entries, []string{filepath.Join(season, stuck)}) {
+	if l.Status != database.StatusDownloaded || !l.OutputDir.Valid || err != nil || !recorded || !reflect.DeepEqual(entries, recordOf(season, stuck)) {
 		t.Errorf("lesson = %+v (entries %v, err %v), want still downloaded, recording only %q", l, entries, err, stuck)
 	}
 	if !strings.Contains(log.String(), filepath.Join(season, stuck)) || !strings.Contains(log.String(), "permission denied") {
@@ -291,7 +290,7 @@ func TestDeleteLessonDownloadedAgainMeanwhileIs409(t *testing.T) {
 	if err := store.MarkJobRunning(ctx, running); err != nil {
 		t.Fatalf("MarkJobRunning: %v", err)
 	}
-	fresh := database.DownloadRecord{Quality: "720", OutputDir: season, VideoPath: filepath.Join(season, "Show - s01e05 - Five (new).mp4"), LibraryEntries: []string{filepath.Join(season, "Show - s01e05 - Five (new).mp4")}}
+	fresh := database.DownloadRecord{Quality: "720", OutputDir: season, VideoPath: filepath.Join(season, "Show - s01e05 - Five (new).mp4"), LibraryEntries: recordOf(season, "Show - s01e05 - Five (new).mp4")}
 	// The kill is the one moment the handler hands control out between reading
 	// the row and finishing it: a new download lands there.
 	deps := Deps{CancelRunning: func(int64) bool { finishWithNewJob(t, store, f, 1, fresh); return true }}

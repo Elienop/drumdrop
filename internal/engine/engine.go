@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 
@@ -84,6 +85,20 @@ func Config(out, quality string, resourcesOnly bool) (scheduler.Config, error) {
 	// prefer the English/original audio track over Musora's es/pt dubs; "any"/"all"
 	// opt out. It is global, with no per-follow override.
 	cfg.AudioLang = config.AudioLang()
+	// Both roots are made absolute once, here, so every path recorded from them
+	// is absolute and every containment check compares like with like, whatever
+	// the working directory of a later command (the downloads default is the
+	// relative ./downloads).
+	for _, dir := range []*string{&cfg.DownloadsDir, &cfg.LibraryDir} {
+		if *dir == "" {
+			continue
+		}
+		abs, err := filepath.Abs(*dir)
+		if err != nil {
+			return scheduler.Config{}, fmt.Errorf("resolve %q against the working directory: %w", *dir, err)
+		}
+		*dir = abs
+	}
 	if err := scheduler.CheckLibraryDir(cfg.DownloadsDir, cfg.LibraryDir); err != nil {
 		return scheduler.Config{}, err
 	}

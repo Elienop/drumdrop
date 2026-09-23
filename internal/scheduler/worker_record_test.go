@@ -54,20 +54,20 @@ func TestWorkerPlexTvRecordsWhatTheMovePlaced(t *testing.T) {
 	}
 	rec := onlyRecord(t, store)
 	base := "Beginner Course - s01e05 - Lesson A"
-	want := paths(season, base+".mp4", base+".nfo")
+	want := recordOf(season, base+".mp4", base+".nfo")
 	if rec.outputDir != season || !reflect.DeepEqual(sorted(rec.entries), sorted(want)) {
 		t.Errorf("record = %+v, want the season folder and exactly %v", rec, want)
 	}
-	if got, _ := os.ReadFile(want[1]); !strings.Contains(string(got), "<episodedetails>") {
+	if got, _ := os.ReadFile(filepath.Join(season, base+".nfo")); !strings.Contains(string(got), "<episodedetails>") {
 		t.Errorf("episode nfo = %q, want the rewritten <episodedetails>", got)
 	}
 }
 
 // TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace proves the episode nfo
-// is only ever written over the nfo the move itself placed. A download that
-// produced none moves without one, and the name it would have used, which the
-// move never checked, may be another lesson's file: it is left alone, and the
-// lesson records only what was placed.
+// is only ever written over the download's own nfo, before the move places it.
+// A download that produced none moves without one, and the name it would have
+// used may be another lesson's file: it is left alone, and the lesson records
+// only what was placed.
 func TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace(t *testing.T) {
 	w, store, dl, _, season := plexWorker(t)
 	dl.afterWrite = func(dir string) {
@@ -85,7 +85,7 @@ func TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(season, base+".nfo")); string(got) != base+".nfo" {
 		t.Errorf("the other lesson's nfo = %q, want it untouched", got)
 	}
-	if rec := onlyRecord(t, store); !reflect.DeepEqual(rec.entries, paths(season, base+".mp4")) {
+	if rec := onlyRecord(t, store); !reflect.DeepEqual(rec.entries, recordOf(season, base+".mp4")) {
 		t.Errorf("entries = %v, want only the placed video", rec.entries)
 	}
 }
@@ -136,7 +136,7 @@ func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	if rec.outputDir != scratch || rec.videoPath != filepath.Join(scratch, "05 - Lesson A.mp4") {
 		t.Errorf("record = %+v, want the scratch folder", rec)
 	}
-	if !reflect.DeepEqual(rec.entries, paths(season, mine...)) {
+	if !reflect.DeepEqual(rec.entries, recordOf(season, mine...)) {
 		t.Errorf("entries = %v, want the previous entry still owned", rec.entries)
 	}
 	if got, _ := os.ReadFile(filepath.Join(season, base+".mp4")); string(got) != base+".mp4" {
@@ -160,8 +160,8 @@ func TestWorkerPlexTvDoesNotMoveWithoutTheOtherLessons(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	rec := onlyRecord(t, store)
-	if !strings.HasPrefix(rec.outputDir, w.Cfg.DownloadsDir) || !reflect.DeepEqual(rec.entries, paths(season, "Beginner Course - s01e05 - Lesson A.mp4")) {
-		t.Errorf("record = %+v, want scratch plus the previous record", rec)
+	if !strings.HasPrefix(rec.outputDir, w.Cfg.DownloadsDir) || rec.entries != nil {
+		t.Errorf("record = %+v, want scratch, and the previous record left as it is", rec)
 	}
 	if _, err := os.Stat(lib); !os.IsNotExist(err) {
 		t.Errorf("library written (err=%v), want untouched", err)
@@ -172,19 +172,24 @@ func TestWorkerPlexTvDoesNotMoveWithoutTheOtherLessons(t *testing.T) {
 }
 
 // TestWorkerDefaultLayoutCarriesTheLibraryRecord proves a default-layout
-// download keeps the lesson's previous library record (after a layout switch
+// download leaves the lesson's library record as it is (after a layout switch
 // its episode entries are still on disk and still its own) instead of
-// dropping them untracked.
+// dropping them untracked: it records no entries at all (nil), which
+// FinishDownload reads as "unchanged". A damaged record is carried the same
+// way, never parsed and dropped.
 func TestWorkerDefaultLayoutCarriesTheLibraryRecord(t *testing.T) {
-	w, store, _, _, season := plexWorker(t)
-	w.Cfg.Layout = ""
-	prev := recordedRow(100, season, "Beginner Course - s01e05 - Lesson A.mp4")
-	store.lessons[100] = prev
-	if _, err := w.RunOnce(context.Background(), 0); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if rec := onlyRecord(t, store); !reflect.DeepEqual(rec.entries, paths(season, "Beginner Course - s01e05 - Lesson A.mp4")) {
-		t.Errorf("entries = %v, want the previous record carried", rec.entries)
+	for _, value := range []string{`["Beginner Course/Season 01/Beginner Course - s01e05 - Lesson A.mp4"]`, `not json`} {
+		w, store, _, _, season := plexWorker(t)
+		w.Cfg.Layout = ""
+		prev := recordedRow(100, season)
+		prev.LibraryEntries = sql.NullString{String: value, Valid: true}
+		store.lessons[100] = prev
+		if _, err := w.RunOnce(context.Background(), 0); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if rec := onlyRecord(t, store); rec.entries != nil {
+			t.Errorf("%s: entries = %v, want nil (the record left as it is)", value, rec.entries)
+		}
 	}
 }
 

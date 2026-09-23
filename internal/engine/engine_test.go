@@ -170,3 +170,24 @@ func TestConfigRefusesALibraryThatIsTheDownloadsFolder(t *testing.T) {
 		t.Errorf("Config(library == downloads, same path) = %v, want nil", err)
 	}
 }
+
+// TestConfigMakesTheRootsAbsolute proves a relative downloads or library
+// folder (the ./downloads default, or DRUMDROP_LIBRARY_DIR=lib) is resolved
+// once against the working directory, so every path recorded from it is
+// absolute and a later command run from elsewhere still finds the lessons.
+func TestConfigMakesTheRootsAbsolute(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	t.Setenv("DRUMDROP_LIBRARY_DIR", "lib")
+	cfg := mustConfig(t, "downloads", "", false)
+	if want := filepath.Join(tmp, "downloads"); cfg.DownloadsDir != want {
+		t.Errorf("DownloadsDir = %q, want %q", cfg.DownloadsDir, want)
+	}
+	if want := filepath.Join(tmp, "lib"); cfg.LibraryDir != want {
+		t.Errorf("LibraryDir = %q, want %q", cfg.LibraryDir, want)
+	}
+	t.Setenv("DRUMDROP_LIBRARY_DIR", "")
+	if cfg := mustConfig(t, "downloads", "", false); cfg.LibraryDir != "" {
+		t.Errorf("unset library = %q, want it left unset", cfg.LibraryDir)
+	}
+}

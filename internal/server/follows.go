@@ -300,17 +300,21 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 // and returns false when any lesson's files could not all be removed (that
 // lesson keeps its record) or a store step failed.
 func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lessons []database.Lesson) bool {
-	others, err := s.store.ListLessonsWithFiles(r.Context())
+	c, err := s.claims(r.Context())
+	if errors.Is(err, errFilesKept) {
+		writeErr(w, http.StatusInternalServerError, "could not delete every lesson's files; the follow was kept (see the server log)")
+		return false
+	}
 	if err != nil {
 		writeStoreErr(w, err, "follow not found")
 		return false
 	}
 	kept, changed := 0, 0
-	for i, l := range lessons {
+	for _, l := range lessons {
 		if !l.OutputDir.Valid && !l.LibraryEntries.Valid {
 			continue // no files recorded: the cascade removes the row
 		}
-		switch err := s.deleteLessonFiles(r.Context(), l, others); {
+		switch err := s.deleteLessonFiles(r.Context(), c, l); {
 		case errors.Is(err, errFilesKept):
 			kept++
 		case errors.Is(err, database.ErrLessonChanged):
@@ -321,7 +325,7 @@ func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lesso
 		default:
 			// Its files are gone: it claims nothing any more, so the next
 			// lesson's ownership checks must not count it.
-			others = withoutLesson(others, lessons[i].RailcontentID)
+			c.Forget(l.RailcontentID)
 		}
 	}
 	switch {
@@ -333,17 +337,6 @@ func (s *Server) deleteFollowFiles(w http.ResponseWriter, r *http.Request, lesso
 		return false
 	}
 	return true
-}
-
-// withoutLesson returns lessons minus the row with railcontent id id.
-func withoutLesson(lessons []database.Lesson, id int) []database.Lesson {
-	out := lessons[:0:0]
-	for _, l := range lessons {
-		if l.RailcontentID != id {
-			out = append(out, l)
-		}
-	}
-	return out
 }
 
 // deleteFilesRequested reports whether the request asked to also delete on-disk

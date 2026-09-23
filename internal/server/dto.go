@@ -171,7 +171,13 @@ func (s *Server) hostPath(p *string) *string {
 	if p == nil || s.cfg.HostDownloadsDir == "" || s.cfg.DownloadsDir == "" {
 		return p
 	}
-	rel, err := filepath.Rel(s.cfg.DownloadsDir, *p)
+	// A row recorded under a relative downloads folder (the ./downloads default,
+	// before the roots were made absolute) is read as the OS reads it.
+	stored := *p
+	if abs, err := filepath.Abs(stored); err == nil {
+		stored = abs
+	}
+	rel, err := filepath.Rel(s.cfg.DownloadsDir, stored)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return p // not under the container downloads root: leave as-is
 	}

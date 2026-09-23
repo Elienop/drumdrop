@@ -669,6 +669,9 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     downloads folder can't be removed is recorded in the library, in both layouts. Copied
     files, and the folders the copy creates, are flushed to disk before the downloads copy
     is removed, and the copy refuses a symlinked lesson folder instead of following it.
+    Every write into the library goes through `os.Root` opened on the destination folder
+    (which must resolve inside the library), and a copied entry is created with `O_EXCL`
+    (files) or `Mkdir` (folders), so no write follows a symlink planted in the library.
     Library == downloads is decided by identity, not spelling: the move is a no-op for an
     alias (a symlink, or one folder bound twice) too, and every command refuses to start
     with such a library (`engine.Config`). A plex-tv re-download first removes exactly what
@@ -690,19 +693,26 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
     shared season folder.
   - *Now:* files are known by record (owner ruling #66). The plex-tv move records the exact
     season-folder entries it placed with the lesson (`lessons.library_entries`, migration
-    004), and a delete or a re-download acts on exactly those, whatever the title is now:
+    004), relative to the library (`<Show>/Season NN/<entry>`, so a record survives the
+    library being mounted or spelled differently), and a delete or a re-download acts on
+    exactly those, whatever the title is now:
     both versions of a song, its nfo, poster and folders go, and nothing another lesson
     recorded, even at the same episode number or under a title that extends this one
     (`Five`, `Five [Live]`, `Five-Part Fill`, `Five.5`). A lesson moved before the record
-    existed falls back to name matching (`scheduler.PlanLessonEntries`): only the names the
-    move produces, skipping (and logging) anything another lesson claims, and refusing
-    rather than guessing when its episode name is ambiguous. The move never overwrites or
-    removes an entry another lesson claims (it refuses, writing nothing), and it accepts any
-    title, brackets included. The delete picks its method from where the lesson was recorded
-    (`scheduler.IsPlexSeasonDir`), not from the layout setting, and removes through
-    `os.Root`, so it stays inside the downloads and library dirs.
-  - *Evidence:* `go test -count=1 -run 'RemoveLessonFiles|DeleteLesson|DeleteFollow|PlanLessonEntries|LegacyEpisode|MoveToLibraryPlexTV|WorkerPlexTv|Migration004'
-    ./internal/server/ ./internal/scheduler/ ./internal/database/`
+    existed falls back to name matching (`library.Claims.Plan`), read under the library as it
+    is configured today: only the names the move produces, skipping (and logging) anything
+    another lesson claims, and refusing rather than guessing when its episode name is
+    ambiguous. "Claims" is decided by the real file (`os.SameFile`), so a hard link or
+    another spelling of a claimed entry is claimed too. The move never overwrites or removes
+    an entry another lesson claims (it refuses, writing nothing); an entry at one of its
+    names that no lesson claims is replaced and logged (owner ruling, 2026-09-23). It
+    accepts any title, brackets included. The delete picks its method from where the lesson
+    was recorded (`library.IsSeasonDir`), not from the layout setting, and removes through
+    `os.Root` under the longest matching root, so it stays inside the downloads and library
+    dirs. A damaged record (not `<Show>/Season NN/<entry>` paths) refuses every delete and
+    plex-tv move rather than guessing; the README gives the one-line repair.
+  - *Evidence:* `go test -count=1 -run 'RemoveLessonFiles|DeleteLesson|DeleteFollow|Plan|Record|Remove|LegacyEpisode|MoveToLibraryPlexTV|WorkerPlexTv|Migration004'
+    ./internal/server/ ./internal/scheduler/ ./internal/database/ ./internal/library/`
   - *Left open:* D57 (two lessons can share an episode number), D58 (a legacy lesson's
     previous files can be left behind when its folder changes).
 - **D55 · A plex-tv lesson with no video couldn't be deleted from the library.** This branch

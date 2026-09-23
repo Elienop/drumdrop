@@ -235,8 +235,9 @@ copy is kept and recorded. Anything drumdrop could not clean up is logged with i
 
 drumdrop refuses to start when `DRUMDROP_LIBRARY_DIR` is the downloads dir reached by
 another path (a symlink, or one host folder bound twice), because a move would then delete
-the only copy. The same path written the same way is allowed, and every move is then a
-no-op.
+the only copy. The same path written the same way is allowed. In the default layout every
+move is then a no-op; in the plex-tv layout lessons are still filed into `<Show>/Season 01/`
+folders inside that one dir.
 
 Deleting a lesson (or a follow with its files) only ever removes files inside the downloads
 and library dirs. A path that reaches outside them through a symlinked folder is refused,
@@ -270,7 +271,17 @@ Each course becomes one *show*, each lesson an *episode*:
 - drumdrop **records the exact files and folders** each move places in the season folder,
   and acts on that record. Two lessons can share an episode number in one show, and one
   title can extend another (`Five` and `Five [Live]`), so a name alone can't say whose a file
-  is.
+  is. The record is kept relative to `DRUMDROP_LIBRARY_DIR` (`<Show>/Season 01/<entry>`), so
+  it stays true if the library is mounted at another path or the setting is spelled another
+  way. Whether a file is claimed is decided by the file itself, not its spelling: the same
+  file reached under another name (a hard link, or another letter case on a
+  case-insensitive disk) counts as claimed too.
+- If a lesson's record is ever **damaged** (not a list of `<Show>/Season NN/<entry>` paths,
+  say after editing the database by hand), drumdrop can't tell what that lesson owns, so it
+  refuses every delete and every plex-tv move until the record is fixed, rather than guess;
+  the server log names the lesson. To fix it, clear that lesson's record and it falls back
+  to name matching: `sqlite3 <config-dir>/drumdrop.db "UPDATE lessons SET library_entries =
+  NULL WHERE railcontent_id = <id>"`.
 - **Deleting** a lesson removes exactly what it recorded, even if its title has changed
   since; the season folder and every other lesson's files stay. A lesson moved by a version
   before the record existed is matched by name instead: `<episode>.mp4`, `.nfo`,
@@ -280,7 +291,10 @@ Each course becomes one *show*, each lesson an *episode*:
   refused rather than guessed.
 - A **re-download** replaces what the lesson's previous download recorded. It never
   overwrites or removes another lesson's file: if one of its names is taken by another
-  lesson, the move is refused and the lesson stays whole in downloads (logged). A file at one
+  lesson, the move is refused and the lesson stays whole in downloads (logged). Every write
+  and removal in the library goes through the library folder itself, so a symlink planted
+  in it can't send one outside: the season folder must resolve inside the library, and each
+  copied file is created afresh rather than written through whatever is at its name. A file at one
   of its names that no lesson claims (say, one kept when a follow was deleted without its
   files) is replaced, and that is logged. A name too long for the filesystem (255 bytes)
   has its title shortened; if even that can't fit, the move is refused.
@@ -289,8 +303,10 @@ Each course becomes one *show*, each lesson an *episode*:
   whole in downloads). With no `DRUMDROP_LIBRARY_DIR` the setting does nothing.
 - The `.nfo` written here is a Kodi/Plex **`<episodedetails>`** doc (not the default
   `<movie>`): it carries the episode `<title>`, `<showtitle>`, `<season>`/`<episode>`,
-  `<aired>` (publish date), the instructor `<actor>`, and the lesson plot/runtime. Writing
-  it is non-fatal — a write failure logs a warning and the download still succeeds.
+  `<aired>` (publish date), the instructor `<actor>`, and the lesson plot/runtime. It
+  replaces the download's own `.nfo` before the move, so it is placed and recorded like
+  every other entry. Writing it is non-fatal: a failure logs a warning, the download still
+  succeeds, and the episode keeps the download's `<movie>` nfo.
 
 **On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
 switch its agent to one that reads `.nfo` files — the
