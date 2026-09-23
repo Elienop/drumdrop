@@ -49,11 +49,11 @@ services:
       # In this layout the .nfo is a Kodi/Plex <episodedetails> doc (not <movie>),
       # carrying the episode title/showtitle/season/episode/aired/instructor.
       # On the PLEX side: create a *TV Shows* library pointing at DRUMDROP_LIBRARY_DIR
-      # and enable the *Local Media Assets* agent for it (Settings > Agents, or mark
-      # the show "personal media") — required so episode titles come from the local
-      # <episodedetails> nfos; the show will not match TheTVDB. Older Plex/Kodi setups
-      # may need the XBMCnfoTVImporter plugin instead. Empty/unset (or "default")
-      # keeps today's layout.
+      # and switch its agent to one that reads .nfo files (the XBMCnfoTVImporter
+      # plugin is what the working setup uses), then Refresh Metadata. The show will
+      # not match TheTVDB, so episode titles must come from the local <episodedetails>
+      # nfos; Local Media Assets alone was not enough in testing (Plex kept showing
+      # "Episode N"). Empty/unset (or "default") keeps today's layout.
       # - DRUMDROP_LAYOUT=plex-tv
       # Set this to the SAME host path you bind-mount to /downloads above, and the
       # UI's "Copy path" yields a host path (paste-ready in your file manager)
