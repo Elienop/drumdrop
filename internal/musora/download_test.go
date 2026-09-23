@@ -243,7 +243,11 @@ func TestDownloadLessonCanceledDuringTheFetchesStops(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		cancel() // the Skip lands while the poster is fetched
-		<-r.Context().Done()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second): // a fetch that ignores the cancel
+			_, _ = w.Write([]byte("data"))
+		}
 	}))
 	defer srv.Close()
 
