@@ -1,6 +1,6 @@
 import * as React from "react"
 import { afterEach, expect, it, vi } from "vitest"
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Toaster } from "@/components/ui/sonner"
 import { ApiHttpError } from "@/lib/api"
@@ -60,7 +60,7 @@ it("confirming moves focus to the confirm button, even when the press did not (S
   expect(confirm).toHaveFocus()
   // Cancel was focused a moment ago and is now disabled: focus did not stay there.
   expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled()
-  req.resolve()
+  await act(async () => req.resolve())
 })
 
 it("after the lock expires the dialog can be closed, and a late failure arrives as a toast naming the item", async () => {
@@ -125,7 +125,7 @@ it("a late result does not leak into the next dialog", async () => {
   first.reject(new ApiHttpError(500, "first failed"))
   expect(await screen.findByText("first failed")).toBeInTheDocument()
   expect(within(dialog).getByRole("alert")).toBeEmptyDOMElement()
-  second.resolve()
+  await act(async () => second.resolve())
 })
 
 it("confirming re-anchors the dialog by its bottom edge where it already is, so the footer cannot move", async () => {
@@ -148,5 +148,5 @@ it("confirming re-anchors the dialog by its bottom edge where it already is, so 
   fireEvent(window, new Event("resize"))
   await waitFor(() => expect(dialog).not.toHaveAttribute("data-anchored"))
   expect(dialog.style.bottom).toBe("")
-  req.resolve()
+  await act(async () => req.resolve())
 })
