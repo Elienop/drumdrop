@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom"
 import { RotateCcw, X } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
+import { errorMessage } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import type { JobDTO, JobStatus } from "@/types"
@@ -80,7 +81,7 @@ export function Queue() {
     onError: (err) => {
       if (err instanceof ApiHttpError && err.status === 409)
         toast.message("Job already finished")
-      else toast.error(err instanceof Error ? err.message : "Cancel failed")
+      else toast.error("Couldn't cancel the job", { description: errorMessage(err) })
     },
   })
 
@@ -93,7 +94,7 @@ export function Queue() {
     onError: (err) => {
       if (err instanceof ApiHttpError && err.status === 409)
         toast.message("Job is not retryable")
-      else toast.error(err instanceof Error ? err.message : "Retry failed")
+      else toast.error("Couldn't retry the job", { description: errorMessage(err) })
     },
   })
 
@@ -134,7 +135,7 @@ export function Queue() {
               loading={jobs.isPending}
               error={jobs.error}
               onRetry={() => jobs.refetch()}
-              fallbackMessage="Failed to load jobs"
+              fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then retry."
             />
           ) : rows.length > 0 ? (
             <TooltipProvider>

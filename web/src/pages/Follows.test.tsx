@@ -1,6 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
+import { Route, Routes, useLocation } from "react-router-dom"
 import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
 import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
@@ -69,9 +70,11 @@ it("previews a node then adds it, surfacing a 201 'Following' toast and closing 
 
   await user.click(within(dialog).getByRole("button", { name: /^add$/i }))
 
-  // Anchor so this cannot match the 200 case's "Already following ..." text —
-  // otherwise blanking the 201 branch would still pass.
-  expect(await screen.findByText(/^following stick control/i)).toBeInTheDocument()
+  // The outcome is the toast's title and the follow's name its description,
+  // like every other toast. Checked against the 200 case's "Already
+  // following" too, so blanking the 201 branch cannot pass.
+  expect(await screen.findByText("Follow added")).toBeInTheDocument()
+  expect(screen.getByText("Stick Control", { selector: "[data-description]" })).toBeInTheDocument()
   expect(screen.queryByText(/already following/i)).not.toBeInTheDocument()
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
 })
@@ -139,7 +142,8 @@ it("shows the 'Already following' toast when create returns 200", async () => {
   await within(dialog).findByText(/9 lessons/i)
   await user.click(within(dialog).getByRole("button", { name: /^add$/i }))
 
-  expect(await screen.findByText(/already following stick control/i)).toBeInTheDocument()
+  expect(await screen.findByText("Already following")).toBeInTheDocument()
+  expect(screen.getByText("Stick Control", { selector: "[data-description]" })).toBeInTheDocument()
 })
 
 it("edits a follow's quality via PATCH /api/follows/{id}, shows a toast, and invalidates the follows list", async () => {
@@ -243,8 +247,11 @@ it("unfollows with ?files=true when 'Also delete downloaded files' is checked", 
 
   await user.click(await screen.findByRole("button", { name: /remove stick control/i }))
   const dialog = await screen.findByRole("alertdialog")
+  expect(within(dialog).getByRole("button", { name: /^remove$/i })).toBeInTheDocument()
   await user.click(within(dialog).getByRole("checkbox", { name: /also delete downloaded files/i }))
-  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+  // The confirm now says what it will do (and "Remove" alone is gone).
+  expect(within(dialog).queryByRole("button", { name: /^remove$/i })).not.toBeInTheDocument()
+  await user.click(within(dialog).getByRole("button", { name: "Remove and delete files" }))
 
   await waitFor(() => expect(deletedUrl).not.toBeNull())
   expect(new URL(deletedUrl!).searchParams.get("files")).toBe("true")
@@ -302,14 +309,14 @@ it("a failed unfollow (500) keeps the dialog open with the server's message and 
   const dialog = await screen.findByRole("alertdialog")
   const files = within(dialog).getByRole("checkbox", { name: /also delete downloaded files/i })
   await user.click(files)
-  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+  await user.click(within(dialog).getByRole("button", { name: "Remove and delete files" }))
 
   await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(FOLLOW_KEPT))
   // The message arrives together with the refreshed list, not before it.
   expect(qc.getQueryState(qk.follows)?.fetchStatus).toBe("idle")
   expect(screen.getByRole("alertdialog")).toBe(dialog)
   expect(
-    within(dialog).getByRole("button", { name: /^remove$/i }),
+    within(dialog).getByRole("button", { name: "Remove and delete files" }),
   ).toHaveAccessibleDescription(FOLLOW_KEPT)
   expect(screen.queryByText(/follow removed/i)).not.toBeInTheDocument()
 
@@ -321,7 +328,7 @@ it("a failed unfollow (500) keeps the dialog open with the server's message and 
   // The files choice survives the failure, so a retry asks for the same thing.
   expect(files).toBeChecked()
   expect(files).toBeEnabled()
-  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+  await user.click(within(dialog).getByRole("button", { name: "Remove and delete files" }))
   await waitFor(() => expect(deletedUrls).toHaveLength(2))
   expect(new URL(deletedUrls[1]).searchParams.get("files")).toBe("true")
 })
@@ -482,4 +489,171 @@ it("a failed quality edit shows the server's message inside the dialog, not as a
 
   await user.click(within(dialog).getByRole("button", { name: /^cancel$/i }))
   await waitFor(() => expect(opener).toHaveFocus())
+})
+
+// --- Keyboard access to a follow's lessons ------------------------------------
+
+function Where() {
+  const location = useLocation()
+  return <p>At {location.pathname + location.search}</p>
+}
+
+it("a follow's title is a link to its lessons, reachable and followed by keyboard", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+  const user = userEvent.setup()
+  renderWithProviders(
+    <Routes>
+      <Route path="/" element={<Follows />} />
+      <Route path="/lessons" element={<Where />} />
+    </Routes>,
+  )
+
+  const link = await screen.findByRole("link", { name: "Stick Control" })
+  expect(link).toHaveAttribute("href", "/lessons?follow=1")
+  await user.tab() // Add follow
+  await user.tab()
+  expect(link).toHaveFocus()
+  await user.keyboard("{Enter}")
+  expect(await screen.findByText("At /lessons?follow=1")).toBeInTheDocument()
+})
+
+// --- Add follow: the preview belongs to the exact input it was built from ------
+
+function renderAdd() {
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Follows />
+      <Toaster />
+    </>,
+  )
+  return user
+}
+
+const previewOf = ({ request }: { request: Request }) => {
+  const id = new URL(request.url).searchParams.get("id")
+  return HttpResponse.json({ root_id: Number(id), title: `Node ${id}`, lesson_count: 9, kind: "node" })
+}
+
+it("editing the input after a preview hides it and disables Add; Add sends exactly the previewed input", async () => {
+  let created: CreateFollowRequest | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, previewOf),
+    http.post(`${ORIGIN}/api/follows`, async ({ request }) => {
+      created = (await request.json()) as CreateFollowRequest
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  const add = within(dialog).getByRole("button", { name: /^add$/i })
+
+  await user.type(input, "12345")
+  await user.click(within(dialog).getByRole("button", { name: /preview/i }))
+  expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
+  expect(add).toBeEnabled()
+
+  await user.type(input, "6") // now 123456: not what was previewed
+  expect(within(dialog).queryByText("Node 12345")).not.toBeInTheDocument()
+  expect(add).toBeDisabled()
+
+  await user.type(input, "{Backspace}") // back to exactly 12345
+  expect(within(dialog).getByText("Node 12345")).toBeInTheDocument()
+  expect(add).toBeEnabled()
+  await user.click(add)
+  await waitFor(() => expect(created).not.toBeNull())
+  expect(created).toMatchObject({ kind: "node", id: "12345" })
+})
+
+it("a preview that lands after the kind was switched is not shown and does not enable Add", async () => {
+  let answer: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, async (info) => {
+      await new Promise<void>((resolve) => (answer = resolve))
+      return previewOf(info)
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345")
+  await user.click(within(dialog).getByRole("button", { name: /preview/i }))
+  await within(dialog).findByRole("button", { name: /previewing/i })
+
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByLabelText(/slug/i), "jared-falk")
+  await act(async () => answer())
+  await waitFor(() =>
+    expect(within(dialog).getByRole("button", { name: /^preview$/i })).not.toHaveAttribute(
+      "aria-disabled",
+    ),
+  )
+  expect(within(dialog).queryByText("Node 12345")).not.toBeInTheDocument()
+  expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
+})
+
+// --- Remove: already removed elsewhere -----------------------------------------
+
+it("a 404 on remove (removed elsewhere first) closes the dialog as done", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)),
+    http.delete(`${ORIGIN}/api/follows/:id`, () =>
+      HttpResponse.json({ error: "follow not found" }, { status: 404 }),
+    ),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /remove stick control/i }))
+  const dialog = await screen.findByRole("alertdialog")
+  await user.click(within(dialog).getByRole("button", { name: /^remove$/i }))
+
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  expect(await screen.findByText("Already removed")).toBeInTheDocument()
+  expect(screen.queryByText("follow not found")).not.toBeInTheDocument()
+})
+
+// --- Add and Edit dialogs ----------------------------------------------------------
+
+it("Edit's Cancel reads Close while a save runs (closing does not cancel it), and Add has a Cancel too", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)),
+    http.patch(`${ORIGIN}/api/follows/:id`, () => new Promise<Response>(() => {})),
+  )
+  const user = renderAdd()
+
+  await user.click(await screen.findByRole("button", { name: /edit stick control/i }))
+  let dialog = await screen.findByRole("dialog")
+  // The footer's button (the dialog's ✕ is also named "Close").
+  const footer = () => within(dialog.querySelector<HTMLElement>('[data-slot="dialog-footer"]')!)
+  expect(footer().getByRole("button", { name: "Cancel" })).toBeInTheDocument()
+  await user.click(within(dialog).getByRole("button", { name: /^save$/i }))
+  expect(await footer().findByRole("button", { name: "Close" })).toBeInTheDocument()
+  expect(footer().queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+  await user.click(footer().getByRole("button", { name: "Close" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  await user.click(screen.getByRole("button", { name: /add follow/i }))
+  dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+})
+
+it("Add and Edit are flex columns, so their empty message region costs no space", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+  const user = renderAdd()
+
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  let dialog = await screen.findByRole("dialog")
+  expect(dialog).toHaveClass("flex", "flex-col")
+  expect(dialog).not.toHaveClass("grid")
+  await user.keyboard("{Escape}")
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+
+  await user.click(screen.getByRole("button", { name: /edit stick control/i }))
+  dialog = await screen.findByRole("dialog")
+  expect(dialog).toHaveClass("flex", "flex-col")
+  expect(dialog).not.toHaveClass("grid")
 })

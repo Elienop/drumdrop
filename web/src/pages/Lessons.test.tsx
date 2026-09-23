@@ -28,6 +28,7 @@ const lessons: LessonDTO[] = [
     quality: "1080p",
     output_dir: "/media/drumeo/100",
     has_files: true,
+    deleting: false,
     video_path: "/media/drumeo/100/video.mp4",
     bytes: 524288000,
     error: null,
@@ -45,6 +46,7 @@ const lessons: LessonDTO[] = [
     quality: "1080p",
     output_dir: null,
     has_files: false,
+    deleting: false,
     video_path: null,
     bytes: null,
     error: null,
@@ -62,6 +64,7 @@ const lessons: LessonDTO[] = [
     quality: "1080p",
     output_dir: "/media/drumeo/300",
     has_files: true,
+    deleting: false,
     video_path: null,
     bytes: null,
     error: null,
@@ -107,6 +110,7 @@ const skippedLesson: LessonDTO = {
   quality: "1080p",
   output_dir: null,
   has_files: false,
+  deleting: false,
   video_path: null,
   bytes: null,
   error: null,
@@ -261,6 +265,7 @@ const tombstoned = (l: LessonDTO): LessonDTO => ({
   video_path: null,
   bytes: null,
   has_files: false,
+  deleting: false,
 })
 
 function renderLessons() {
@@ -621,6 +626,7 @@ describe("Delete is offered exactly when the server says the lesson has files, w
     error,
     output_dir: null,
     has_files: true,
+    deleting: false,
   })
   const noFiles = (status: LessonDTO["status"]): LessonDTO => ({
     ...lessons[1],
@@ -629,6 +635,7 @@ describe("Delete is offered exactly when the server says the lesson has files, w
     status,
     output_dir: "/media/drumeo/700",
     has_files: false,
+    deleting: false,
   })
 
   it.each([
@@ -716,4 +723,169 @@ it("skips with the typed reason, closes, returns focus and then announces it", a
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
   expect(body).toEqual({ reason: "not for me" })
   await waitFor(() => expect(trigger).toHaveFocus())
+})
+
+it("Enter in the skip reason skips, and the reason's label dims with its field while the skip runs", async () => {
+  let body: { reason?: string } | null = null
+  let answer: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[1]])),
+    http.post(`${ORIGIN}/api/lessons/:id/skip`, async ({ request }) => {
+      body = (await request.json()) as { reason?: string }
+      await new Promise<void>((resolve) => (answer = resolve))
+      return HttpResponse.json({ ...lessons[1], status: "skipped" })
+    }),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
+  expect(dialog).toHaveAccessibleDescription(
+    "Syncs leave a skipped lesson alone. Un-skip it later and the next sync downloads it.",
+  )
+  const reason = within(dialog).getByLabelText("Reason (optional)")
+  await user.type(reason, "too hard{Enter}")
+
+  await waitFor(() => expect(body).toEqual({ reason: "too hard" }))
+  expect(confirmButton(dialog, /skipping/i)).toHaveFocus()
+  expect(reason).toBeDisabled()
+  // The Label's group-data-[disabled=true] style dims it with the field.
+  expect(reason.closest(".group")).toHaveAttribute("data-disabled", "true")
+  answer()
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+})
+
+// --- A delete that already happened elsewhere ---------------------------------
+
+it("a 404 on delete (removed elsewhere first) closes the dialog as done, with no retry offered", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.delete(`${ORIGIN}/api/lessons/:id`, () =>
+      HttpResponse.json({ error: "lesson not found" }, { status: 404 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const { trigger, dialog } = await openRowAction(user, "Single Stroke Roll", /^delete$/i)
+  await user.click(confirmButton(dialog))
+  await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+  expect(await screen.findByText("Already removed")).toBeInTheDocument()
+  expect(screen.getByText("Single Stroke Roll", { selector: "[data-description]" })).toBeInTheDocument()
+  expect(screen.queryByText("lesson not found")).not.toBeInTheDocument()
+  await waitFor(() => expect(trigger).toHaveFocus())
+})
+
+// --- Row actions never show "HTTP 502" ------------------------------------------
+
+it("a row action that fails without a server message toasts the outcome and our own sentence, never 'HTTP 502'", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([lessons[1]])),
+    http.post(`${ORIGIN}/api/lessons/200/download`, () => new HttpResponse(null, { status: 502 })),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  await user.click(await screen.findByRole("button", { name: "Actions for Double Stroke Roll" }))
+  await user.click(await screen.findByRole("menuitem", { name: /download/i }))
+
+  expect(await screen.findByText("Couldn't queue “Double Stroke Roll”")).toBeInTheDocument()
+  expect(
+    screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again.", {
+      selector: "[data-description]",
+    }),
+  ).toBeInTheDocument()
+  expect(screen.queryByText(/HTTP 502/)).not.toBeInTheDocument()
+})
+
+it("a list that fails without a server message says so in a sentence, never 'HTTP 502'", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => new HttpResponse(null, { status: 502 })))
+  renderLessons()
+  expect(
+    await screen.findByText(
+      "Couldn't load the lessons. Check that DrumDrop is running, then retry.",
+    ),
+  ).toBeInTheDocument()
+  expect(screen.queryByText(/HTTP 502/)).not.toBeInTheDocument()
+})
+
+// --- What a row says -------------------------------------------------------------
+
+it("a skipped or failed lesson shows its reason, muted, under its title; other statuses do not", async () => {
+  const skippedWithReason: LessonDTO = { ...skippedLesson, error: "not for me" }
+  const failed: LessonDTO = {
+    ...lessons[1],
+    railcontent_id: 800,
+    title: "Linear Fills",
+    status: "failed",
+    error: "yt-dlp exited 1",
+  }
+  const downloadedWithError: LessonDTO = { ...lessons[0], error: "a stale error" }
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () =>
+      HttpResponse.json([skippedWithReason, failed, downloadedWithError]),
+    ),
+  )
+  renderLessons()
+
+  const reason = await screen.findByText("not for me")
+  expect(reason).toHaveClass("text-muted-foreground")
+  expect(reason.closest("td")).toHaveTextContent(/^Flam Tap/)
+  expect(screen.getByText("yt-dlp exited 1").closest("td")).toHaveTextContent(/^Linear Fills/)
+  expect(screen.queryByText("a stale error")).not.toBeInTheDocument()
+})
+
+it("while a lesson is being deleted, its row says so and offers neither Delete nor Download", async () => {
+  const beingDeleted: LessonDTO = { ...lessons[0], deleting: true } // downloaded, has files
+  const failedBeingDeleted: LessonDTO = {
+    ...lessons[1],
+    railcontent_id: 900,
+    title: "Swiss Army Triplet",
+    status: "failed",
+    has_files: true,
+    deleting: true,
+  }
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([beingDeleted, failedBeingDeleted])),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  const table = await screen.findByRole("table")
+  expect(await within(table).findAllByText("deleting…")).toHaveLength(2)
+
+  for (const title of ["Single Stroke Roll", "Swiss Army Triplet"]) {
+    await user.click(screen.getByRole("button", { name: `Actions for ${title}` }))
+    await screen.findByRole("menuitem", { name: /copy path/i })
+    expect(screen.queryByRole("menuitem", { name: /^delete$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: /download/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole("menuitem", { name: /skip/i })).not.toBeInTheDocument()
+    await user.keyboard("{Escape}")
+  }
+})
+
+it("filtered by a follow, the badge and the card name the follow, not its id", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows/3/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.get(`${ORIGIN}/api/follows`, () =>
+      HttpResponse.json([
+        {
+          id: 3,
+          kind: "node",
+          railcontent_id: 12345,
+          slug: null,
+          title: "Stick Control",
+          brand: "drumeo",
+          quality: "1080p",
+          added_at: "2026-05-01T00:00:00Z",
+          last_synced_at: null,
+        },
+      ]),
+    ),
+  )
+  renderWithProviders(<Lessons />, { route: "/lessons?follow=3" })
+
+  expect(await screen.findByText("Filtered by “Stick Control”")).toBeInTheDocument()
+  expect(screen.getByText("Lessons of “Stick Control”")).toBeInTheDocument()
+  expect(screen.queryByText(/#3/)).not.toBeInTheDocument()
 })

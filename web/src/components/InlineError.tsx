@@ -7,17 +7,28 @@ import { cn } from "@/lib/utils"
 // The role="alert" region is ALWAYS rendered and only its content changes: a
 // live region inserted together with its text is missed by some screen
 // readers. The message is keyed by the failure's sequence number, so a repeat
-// of the same text is a fresh node and is announced again. While empty the
-// region collapses into the dialog's gap-4 (empty:-mt-4), so it costs no
-// space. Point the confirm button's aria-describedby at `id` while `error` is
-// set.
+// of the same text is a fresh node and is announced again. Point the confirm
+// button's aria-describedby at `id` while `error` is set and no retry runs.
+//
+// Empty, it costs no space: empty:-mt-4 cancels the gap-4 before it. That only
+// works in a FLEX column; a grid row cannot shrink below zero, so the dialog
+// content around it must be `flex flex-col` (ConfirmDialog, AddFollowDialog
+// and EditFollowDialog pass that). Never display:none it: the region would
+// stop announcing.
+//
+// The icon is inline with the text, so it stays beside the first word however
+// the message wraps or is aligned (centred below `sm`, like the dialog
+// header). `stale` mutes a message while a retry is running: it describes the
+// last attempt, not the one in progress.
 export function InlineError({
   id,
   error,
+  stale = false,
   className,
 }: {
   id: string
   error: ShownError | null
+  stale?: boolean
   className?: string
 }) {
   return (
@@ -25,11 +36,15 @@ export function InlineError({
       {error && (
         <p
           key={error.seq}
-          className="flex items-start justify-center gap-2 text-center text-sm text-pretty text-destructive sm:justify-start sm:text-left"
+          data-stale={stale || undefined}
+          className={cn(
+            "text-center text-sm text-pretty text-destructive transition-colors sm:text-left",
+            stale && "text-muted-foreground",
+          )}
         >
           {/* The toaster's error icon, so an error is not told by colour alone. */}
-          <OctagonXIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-          <span>{error.message}</span>
+          <OctagonXIcon aria-hidden="true" className="mr-1.5 inline-block size-4 align-[-3px]" />
+          {error.message}
         </p>
       )}
     </div>

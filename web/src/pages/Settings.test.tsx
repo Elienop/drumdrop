@@ -39,7 +39,7 @@ it("shows the Disconnected pill, then flips to Connected after a successful logi
   expect((await screen.findAllByText(/^connected$/i)).length).toBeGreaterThan(0)
 })
 
-it("surfaces a 'login failed' toast when connect returns 401", async () => {
+it("a 401 on connect shows a toast naming the outcome, with the server's reason", async () => {
   server.use(
     http.get(`${ORIGIN}/api/session`, () => HttpResponse.json({ connected: false })),
     http.post(`${ORIGIN}/api/session`, () =>
@@ -62,7 +62,8 @@ it("surfaces a 'login failed' toast when connect returns 401", async () => {
   await user.type(screen.getByLabelText(/password/i), "wrong")
   await user.click(screen.getByRole("button", { name: /connect/i }))
 
-  expect(await screen.findByText(/login failed/i)).toBeInTheDocument()
+  expect(await screen.findByText("Couldn't connect to Musora")).toBeInTheDocument()
+  expect(screen.getByText("bad credentials", { selector: "[data-description]" })).toBeInTheDocument()
 })
 
 it("renders the version string from the health endpoint", async () => {

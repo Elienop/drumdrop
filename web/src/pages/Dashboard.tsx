@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Play, Search, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
+import { errorMessage } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { formatRelativeTime } from "@/lib/format"
@@ -64,7 +65,7 @@ export function Dashboard() {
     },
     onError: (err) => {
       if (is503(err)) toast.error("No daemon attached")
-      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
+      else toast.error("Couldn't start a sync", { description: errorMessage(err) })
     },
   })
 
@@ -76,7 +77,7 @@ export function Dashboard() {
     },
     onError: (err) => {
       if (is503(err)) toast.error("No planner attached")
-      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
+      else toast.error("Couldn't run the dry run", { description: errorMessage(err) })
     },
   })
 
@@ -116,7 +117,7 @@ export function Dashboard() {
                 loading={summary.isPending}
                 error={summary.error}
                 onRetry={() => summary.refetch()}
-                fallbackMessage="Failed to load summary"
+                fallbackMessage="Couldn't load the summary. Check that DrumDrop is running, then retry."
               />
             </CardContent>
           </Card>
@@ -168,7 +169,7 @@ export function Dashboard() {
                 loading={jobs.isPending}
                 error={jobs.error}
                 onRetry={() => jobs.refetch()}
-                fallbackMessage="Failed to load jobs"
+                fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then retry."
               />
             ) : jobs.data.length > 0 ? (
               <Table>

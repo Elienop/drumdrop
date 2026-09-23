@@ -10,8 +10,10 @@ import {
 } from "@/components/ui/alert-dialog"
 import { InlineError } from "@/components/InlineError"
 import { PendingButton } from "@/components/PendingButton"
+import { StackedLabel } from "@/components/StackedLabel"
 import { useDialogRequest } from "@/lib/dialog-request"
 import type { FocusTarget } from "@/lib/focus"
+import { useHeldWhileClosed, useOpenedNow } from "@/lib/use-held"
 import { cn } from "@/lib/utils"
 
 // RELEASE_AFTER_MS bounds how long a request may lock the dialog. A delete is
@@ -23,7 +25,11 @@ import { cn } from "@/lib/utils"
 // answer, when it lands, arrives as a toast.
 export const RELEASE_AFTER_MS = 10_000
 
-export interface ConfirmDialogProps {
+// VIEWPORT_MARGIN_PX keeps a dialog pinned by its bottom edge this far from the
+// top of the viewport: past it the dialog scrolls instead of growing.
+const VIEWPORT_MARGIN_PX = 16
+
+export interface ConfirmDialogProps<T> {
   open: boolean
   onOpenChange: (open: boolean) => void
   title: React.ReactNode
@@ -36,17 +42,19 @@ export interface ConfirmDialogProps {
   // (its ApiHttpError message is shown verbatim). Include any refresh the
   // views need in the promise, on both outcomes: the dialog stays pending
   // until it settles, so the answer and the refreshed lists land together.
-  onConfirm: () => Promise<unknown>
+  onConfirm: () => Promise<T>
   // announce reports a success (a toast); it runs after the dialog closed.
-  announce: () => void
-  // subject names the item, for a result that lands after the dialog closed.
-  subject?: string
+  announce: (result: T) => void
+  // failureTitle names the item and the outcome, for a failure that lands
+  // after the dialog was closed ("Couldn't delete “Six”").
+  failureTitle: string
   // returnFocus lists where focus goes on close, most specific first.
   returnFocus: () => FocusTarget[]
   // Extra controls between the description and the error (e.g. a checkbox).
-  // They are rendered with the pending state so they can disable themselves;
-  // their state lives with the caller and survives a failed attempt.
-  children?: (state: { pending: boolean }) => React.ReactNode
+  // They are rendered with the pending state so they can disable themselves,
+  // and get `confirm` so a form in them can submit on Enter; their state
+  // lives with the caller and survives a failed attempt.
+  children?: (state: { pending: boolean; confirm: () => void }) => React.ReactNode
   releaseAfterMs?: number
 }
 
@@ -57,7 +65,7 @@ export interface ConfirmDialogProps {
 //   cannot leave focus on a control about to be disabled). Cancel and Escape
 //   are locked until the answer lands or RELEASE_AFTER_MS passes; the slot's
 //   controls stay disabled for the whole request (changing them then would
-//   not change what was sent).
+//   not change what was sent). A failure from the last attempt stays, muted.
 // - Failure: the dialog stays open with the server's message and the confirm
 //   button retries. The dismiss button then reads "Close": by then the server
 //   may already have acted, and "Cancel" would suggest an undo.
@@ -65,7 +73,11 @@ export interface ConfirmDialogProps {
 // - Stable footer: on confirm the dialog is re-anchored by its bottom edge at
 //   the position it already has, so a message appearing, changing or growing
 //   pushes the header up instead of moving the buttons under the pointer.
-export function ConfirmDialog({
+//   Labels are stacked (StackedLabel), so no button changes width either.
+// - Short screens: the dialog never runs past the viewport; it scrolls.
+// - Closing: the dialog fades out showing exactly what it last showed (title,
+//   labels, message, position); everything resets when it next opens.
+export function ConfirmDialog<T>({
   open,
   onOpenChange,
   title,
@@ -75,17 +87,29 @@ export function ConfirmDialog({
   confirmVariant = "destructive",
   onConfirm,
   announce,
-  subject,
+  failureTitle,
   returnFocus,
   children,
   releaseAfterMs = RELEASE_AFTER_MS,
-}: ConfirmDialogProps) {
+}: ConfirmDialogProps<T>) {
   const { pending, error, run, onCloseAutoFocus } = useDialogRequest({ open, returnFocus })
   const [released, setReleased] = React.useState(false)
   const [anchorBottom, setAnchorBottom] = React.useState<number | null>(null)
   const contentRef = React.useRef<HTMLDivElement>(null)
   const confirmRef = React.useRef<HTMLButtonElement>(null)
+  const isOpen = React.useRef(open)
   const errorId = React.useId()
+
+  React.useLayoutEffect(() => {
+    isOpen.current = open
+  })
+
+  // A dialog opens centred and unlocked (reset on open, so a closing dialog
+  // fades out where it is).
+  if (useOpenedNow(open)) {
+    setAnchorBottom(null)
+    setReleased(false)
+  }
 
   const locked = pending && !released
 
@@ -99,11 +123,6 @@ export function ConfirmDialog({
     return () => window.clearTimeout(timer)
   }, [pending, releaseAfterMs])
 
-  // A closed dialog opens centred again.
-  React.useEffect(() => {
-    if (!open) setAnchorBottom(null)
-  }, [open])
-
   // A resize makes the frozen position stale: centre again.
   const anchored = anchorBottom !== null
   React.useEffect(() => {
@@ -114,6 +133,9 @@ export function ConfirmDialog({
   }, [anchored])
 
   const confirm = () => {
+    // Read through a ref: a slot's form may hold a confirm from an earlier
+    // render, and a press during the close animation must send nothing.
+    if (!isOpen.current) return
     confirmRef.current?.focus()
     const content = contentRef.current
     if (content && anchorBottom === null) {
@@ -122,9 +144,20 @@ export function ConfirmDialog({
     void run(onConfirm, {
       done: () => onOpenChange(false),
       announce,
-      subject,
+      failure: failureTitle,
     })
   }
+
+  // What the dialog shows is held from its last open render while it closes:
+  // the page clears the item it was opened for as soon as it closes.
+  const shown = useHeldWhileClosed(open, {
+    title,
+    description,
+    confirmLabel,
+    pendingLabel,
+    confirmVariant,
+    slot: children?.({ pending, confirm }),
+  })
 
   return (
     <AlertDialog
@@ -138,17 +171,31 @@ export function ConfirmDialog({
         ref={contentRef}
         onCloseAutoFocus={onCloseAutoFocus}
         data-anchored={anchored ? "bottom" : undefined}
-        className={cn(anchored && "top-auto translate-y-0")}
-        style={anchored ? { bottom: anchorBottom } : undefined}
+        // flex, not the primitive's grid: an empty message region's
+        // negative margin can cancel a flex gap, never a grid row's.
+        className={cn(
+          "flex max-h-[calc(100dvh-2rem)] flex-col overflow-y-auto",
+          anchored && "top-auto translate-y-0",
+        )}
+        style={
+          anchored
+            ? {
+                bottom: anchorBottom,
+                maxHeight: window.innerHeight - anchorBottom - VIEWPORT_MARGIN_PX,
+              }
+            : undefined
+        }
       >
-        <AlertDialogHeader>
-          <AlertDialogTitle className="text-pretty wrap-break-word">{title}</AlertDialogTitle>
-          <AlertDialogDescription className="text-pretty">{description}</AlertDialogDescription>
+        <AlertDialogHeader className="gap-2">
+          <AlertDialogTitle className="leading-snug text-pretty wrap-break-word">
+            {shown.title}
+          </AlertDialogTitle>
+          <AlertDialogDescription className="text-pretty">{shown.description}</AlertDialogDescription>
         </AlertDialogHeader>
 
-        {children?.({ pending })}
+        {shown.slot}
 
-        <InlineError id={errorId} error={error} />
+        <InlineError id={errorId} error={error} stale={pending} />
         <p role="status" className="text-center text-sm text-pretty text-muted-foreground empty:-mt-4 sm:text-left">
           {pending && released
             ? "This is taking longer than usual. You can close this dialog; the result will appear as a notification."
@@ -157,17 +204,21 @@ export function ConfirmDialog({
 
         <AlertDialogFooter>
           <AlertDialogCancel disabled={locked}>
-            {error !== null || released ? "Close" : "Cancel"}
+            <StackedLabel
+              labels={{ cancel: "Cancel", close: "Close" }}
+              active={error !== null || released ? "close" : "cancel"}
+            />
           </AlertDialogCancel>
           <PendingButton
             ref={confirmRef}
-            variant={confirmVariant}
+            variant={shown.confirmVariant}
             pending={pending}
-            pendingLabel={pendingLabel}
-            aria-describedby={error !== null ? errorId : undefined}
+            pendingLabel={shown.pendingLabel}
+            // Not while a retry runs: the message is about the last attempt.
+            aria-describedby={error !== null && !pending ? errorId : undefined}
             onClick={confirm}
           >
-            {confirmLabel}
+            {shown.confirmLabel}
           </PendingButton>
         </AlertDialogFooter>
       </AlertDialogContent>

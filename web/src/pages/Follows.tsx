@@ -1,12 +1,13 @@
 import * as React from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
+import { deleteOutcome, type DeleteOutcome } from "@/lib/errors"
 import type { FollowDTO } from "@/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -67,9 +68,10 @@ export function Follows() {
   // the follow. A 500 or 409 keeps the follow, but by then the jobs are gone
   // and some lessons may already be tombstoned. So the refresh runs on FAILURE
   // too (finally): follows, summary, jobs, and the raw ["lessons"] prefix for
-  // every keyed Lessons view. The dialog stays pending until they land.
-  const unfollow = (id: number, files: boolean) =>
-    api.unfollow(id, { deleteFiles: files }).finally(() =>
+  // every keyed Lessons view. The dialog stays pending until they land. A 404
+  // means it was removed elsewhere first: done, not a failure (deleteOutcome).
+  const unfollow = (id: number, files: boolean): Promise<DeleteOutcome> =>
+    deleteOutcome(api.unfollow(id, { deleteFiles: files })).finally(() =>
       Promise.all([
         qc.invalidateQueries({ queryKey: qk.follows }),
         qc.invalidateQueries({ queryKey: qk.summary }),
@@ -92,10 +94,12 @@ export function Follows() {
       <div className="flex items-center justify-between gap-4">
         {/* tabIndex -1: the last place focus can return to when a dialog
             closes and neither its row nor a neighbour is left. */}
+        {/* -mx-1.5 px-1.5: the ring gets room around the letters without
+            moving the heading. */}
         <h1
           ref={headingRef}
           tabIndex={-1}
-          className="rounded-md text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
         >
           Follows
         </h1>
@@ -116,7 +120,7 @@ export function Follows() {
               loading={follows.isPending}
               error={follows.error}
               onRetry={() => follows.refetch()}
-              fallbackMessage="Failed to load follows"
+              fallbackMessage="Couldn't load the follows. Check that DrumDrop is running, then retry."
             />
           ) : follows.data.length > 0 ? (
             <Table>
@@ -132,12 +136,24 @@ export function Follows() {
               </TableHeader>
               <TableBody>
                 {follows.data.map((f) => (
+                  // The title is the link to the follow's lessons (keyboard and
+                  // screen readers); a click anywhere else on the row does the
+                  // same for a pointer.
                   <TableRow
                     key={f.id}
                     className="cursor-pointer"
                     onClick={() => navigate(`/lessons?follow=${f.id}`)}
                   >
-                    <TableCell className="font-medium">{f.title}</TableCell>
+                    <TableCell className="font-medium">
+                      <Link
+                        to={`/lessons?follow=${f.id}`}
+                        // The row's own click would navigate a second time.
+                        onClick={(e) => e.stopPropagation()}
+                        className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                      >
+                        {f.title}
+                      </Link>
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="capitalize">
                         {f.kind}
@@ -207,13 +223,20 @@ export function Follows() {
         }}
         title={removing ? `Remove “${removing.follow.title}”?` : "Remove follow?"}
         description="Removing it stops its queued and running downloads, stops tracking it, and clears its lesson history. Downloaded files stay where they are unless you also delete them."
-        confirmLabel="Remove"
+        // The button says what it will do, files included.
+        confirmLabel={deleteFiles ? "Remove and delete files" : "Remove"}
         pendingLabel="Removing…"
         onConfirm={() =>
-          removing ? unfollow(removing.follow.id, deleteFiles) : Promise.resolve()
+          removing
+            ? unfollow(removing.follow.id, deleteFiles)
+            : Promise.reject(new Error("the dialog has no follow"))
         }
-        announce={() => toast.success("Follow removed", { description: removing?.follow.title })}
-        subject={removing?.follow.title}
+        announce={(outcome) => {
+          const description = removing?.follow.title
+          if (outcome === "already-gone") toast.message("Already removed", { description })
+          else toast.success("Follow removed", { description })
+        }}
+        failureTitle={`Couldn't remove “${removing?.follow.title ?? "the follow"}”`}
         returnFocus={rowReturn(removing, removeSelector)}
       >
         {({ pending }) => (

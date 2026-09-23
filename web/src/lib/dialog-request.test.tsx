@@ -13,8 +13,8 @@ it("a second run of the same open dialog while the first is in flight sends noth
   let first: Promise<void> = Promise.resolve()
   let second: Promise<void> = Promise.resolve()
   act(() => {
-    first = result.current.run(request, { done })
-    second = result.current.run(request, { done })
+    first = result.current.run(request, { done, failure: "Couldn't do it" })
+    second = result.current.run(request, { done, failure: "Couldn't do it" })
   })
   expect(request).toHaveBeenCalledTimes(1)
 
@@ -23,4 +23,19 @@ it("a second run of the same open dialog while the first is in flight sends noth
     await Promise.all([first, second])
   })
   expect(done).toHaveBeenCalledTimes(1)
+})
+
+it("a closed dialog sends nothing, even through a handler captured while it was open", async () => {
+  const { result, rerender } = renderHook(
+    ({ open }) => useDialogRequest({ open, returnFocus: () => [] }),
+    { initialProps: { open: true } },
+  )
+  const captured = result.current.run // e.g. a held slot's form submit
+  rerender({ open: false })
+  const request = vi.fn(() => Promise.resolve())
+  await act(async () => {
+    await captured(request, { done: vi.fn(), failure: "Couldn't do it" })
+  })
+  expect(request).not.toHaveBeenCalled()
+  expect(result.current.pending).toBe(false)
 })

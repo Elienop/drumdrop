@@ -59,16 +59,21 @@ export function newTestQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
 
+// `route` is the router's starting location (e.g. "/lessons?follow=1").
 export function renderWithProviders(
   ui: ReactElement,
-  { client }: { client?: QueryClient } = {},
+  { client, route = "/" }: { client?: QueryClient; route?: string } = {},
 ) {
   const qc = client ?? newTestQueryClient()
   const result = render(
     createElement(
       QueryClientProvider,
       { client: qc },
-      createElement(SSEProvider, null, createElement(MemoryRouter, null, ui)),
+      createElement(
+        SSEProvider,
+        null,
+        createElement(MemoryRouter, { initialEntries: [route] }, ui),
+      ),
     ),
   )
   return { ...result, qc }

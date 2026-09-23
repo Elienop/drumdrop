@@ -28,7 +28,13 @@ export interface LessonDTO {
   // on (its downloads folder or library entries are on record), whatever its
   // status. The server owns that predicate; output_dir alone does not say it.
   has_files: boolean
+  // deleting is true while a delete of this lesson is in progress (always
+  // present). The row then shows that and offers no action that would race
+  // the delete.
+  deleting: boolean
   bytes: number | null
+  // error is the failure of a failed lesson, or the reason given for a skipped
+  // one ("deleted" for a lesson whose files were deleted).
   error: string | null
   follow_id: number | null
   first_seen_at: string | null

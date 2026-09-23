@@ -54,6 +54,26 @@ it("marks an error body from the server, and one without it, so the UI can fall 
   await expect(api.sync(false)).rejects.toMatchObject({ status: 500, fromServer: false })
 })
 
+it("a body that is not JSON (a proxy's HTML page) is an ApiHttpError without a server message, never a SyntaxError", async () => {
+  const html = () =>
+    new Response("<html><body>502 Bad Gateway</body></html>", {
+      status: 502,
+      headers: { "Content-Type": "text/html" },
+    })
+  fetchMock.mockResolvedValueOnce(html())
+  await expect(api.cancelJob(1)).rejects.toMatchObject({
+    name: "ApiHttpError",
+    status: 502,
+    fromServer: false,
+  })
+  // requestWithStatus reads its body the same way.
+  fetchMock.mockResolvedValueOnce(html())
+  await expect(api.sync(false)).rejects.toMatchObject({ name: "ApiHttpError", fromServer: false })
+  // Even on a 2xx: a success we cannot read is not a success.
+  fetchMock.mockResolvedValueOnce(new Response("<html></html>", { status: 200 }))
+  await expect(api.summary()).rejects.toMatchObject({ name: "ApiHttpError", fromServer: false })
+})
+
 it("clears the token on 401", async () => {
   setToken("bad")
   fetchMock.mockResolvedValue(jsonResponse({ error: "unauthorized" }, 401))

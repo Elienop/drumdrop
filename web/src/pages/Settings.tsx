@@ -1,7 +1,8 @@
 import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
+import { api } from "@/lib/api"
+import { errorMessage } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { clearToken, getToken, setToken } from "@/lib/auth"
 import { Button } from "@/components/ui/button"
@@ -44,10 +45,9 @@ function MusoraCard() {
       qc.invalidateQueries({ queryKey: qk.session })
     },
     onError: (err) => {
-      // 401 → bad Musora credentials; 400 → malformed. Both surface a generic
-      // "login failed"; ApiHttpError carries a clean server message we append.
-      const detail = err instanceof ApiHttpError && err.message ? `: ${err.message}` : ""
-      toast.error(`login failed${detail}`)
+      // 401 → bad Musora credentials; 400 → malformed. The server's message
+      // says which; without one (a proxy page) our own sentence does.
+      toast.error("Couldn't connect to Musora", { description: errorMessage(err) })
     },
   })
 
@@ -67,9 +67,7 @@ function MusoraCard() {
             <span className="text-sm text-muted-foreground">Loading…</span>
           ) : session.isError ? (
             <span className="text-sm text-destructive">
-              {session.error instanceof ApiHttpError
-                ? session.error.message
-                : "Failed to load"}
+              {errorMessage(session.error, "Couldn't load the connection status.")}
             </span>
           ) : (
             <ConnectionPill connected={connected} />
@@ -187,9 +185,7 @@ function AboutCard() {
         {health.isError ? (
           <div className="flex items-center justify-between gap-4">
             <span className="text-sm text-destructive">
-              {health.error instanceof ApiHttpError
-                ? health.error.message
-                : "Failed to load"}
+              {errorMessage(health.error, "Couldn't reach the server to read its version.")}
             </span>
             <Button variant="outline" size="sm" onClick={() => health.refetch()}>
               Retry
