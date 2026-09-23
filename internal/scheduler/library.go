@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -30,6 +31,15 @@ var rename = os.Rename
 // (instant and atomic on the same filesystem); on a cross-filesystem rename
 // error it falls back to copying the tree then removing the source. The
 // downloads folder is gone after a successful move.
+//
+// Whatever fails, one complete copy of the lesson is left in one place, and
+// newDir says where to record it:
+//   - newDir == "": the lesson is whole in lessonDir. A copy that failed
+//     part-way is removed from the library first.
+//   - newDir != "": the library holds the whole lesson. An error alongside it
+//     means lessonDir could not be fully removed; the message names the leftover.
+//
+// A library leftover that cannot be removed is named in the error too.
 //
 // It rejects a lessonDir that is not under downloadsDir (rel ".", "..", an
 // absolute Rel result) before any write, so a stray path can never land outside
@@ -73,13 +83,13 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string) (newDir string, e
 		return dstDir, nil
 	} else if cerr := copyTree(lessonDir, dstDir); cerr != nil {
 		// Cross-filesystem (or otherwise unrenamable): copy the tree, then drop the
-		// source. A copy failure leaves the source in place (download still there).
-		return "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
+		// source. The copy only read the source, so the whole lesson is still in
+		// downloads; take the partial copy back out of the library.
+		err := fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
+		return "", errors.Join(err, discardPartialCopy(dstDir))
 	}
-	if rerr := os.RemoveAll(lessonDir); rerr != nil {
-		// The library copy is complete; failing to drop the scratch source is a
-		// warn-worthy leftover, not a lost file.
-		return dstDir, fmt.Errorf("remove source after copy %q: %w", lessonDir, rerr)
+	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
+		return dstDir, downloadsLeftoverErr(lessonDir, rmerr)
 	}
 	return dstDir, nil
 }
@@ -233,8 +243,9 @@ func isLessonVideoName(name, base string) bool {
 // the scratch dir.
 //
 // Move semantics mirror moveToLibrary: try the rename seam first, fall back to a
-// copy (copyFile for files, copyTree for directories) + remove-source on ANY
-// rename error (cross-filesystem). Unlike moveToLibrary it composes the
+// copy (copyFile for files, copyTree for directories) on ANY rename error
+// (cross-filesystem), and remove the scratch folder once every entry is in
+// place. Unlike moveToLibrary it composes the
 // destination from show/season directly rather than from a downloads-relative
 // path, but it still guards the scratch lessonDir: a "." / ".." / ".."-prefixed /
 // absolute Base would be a malformed scratch path, so it refuses before any
@@ -245,6 +256,17 @@ func isLessonVideoName(name, base string) bool {
 // (writing nothing) if a name would not be recognised by PlexEpisodeMatcher for
 // the video it is about to record. So a delete, which uses that matcher, always
 // finds everything a move placed.
+//
+// Whatever fails, one complete copy of the lesson is left in one place, and
+// seasonDir says where to record it, as for moveToLibrary:
+//   - seasonDir == "": the lesson is whole in lessonDir. Entries already placed
+//     are undone: a renamed one is renamed back, a copied one removed.
+//   - seasonDir != "": every entry is in the season folder. An error alongside
+//     it means lessonDir could not be fully removed; the message names it.
+//
+// The episode's entries from a previous download are cleared first (as
+// moveToLibrary clears its destination folder), so a re-download replaces them
+// and an undone move leaves nothing of the episode in the library.
 func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, lessonDir string) (seasonDir, videoPath string, err error) {
 	scratchBase := filepath.Base(lessonDir)
 	// A malformed scratch base (root, escape, absolute) would make the per-file
@@ -255,43 +277,123 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title, le
 
 	episodeBase := plexEpisodeBase(show, title, season, episode)
 	seasonDir = filepath.Join(libraryDir, musora.Sanitize(show), plexSeasonName(season))
-	steps, videoPath, err := planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase)
+	plan, err := planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase)
 	if err != nil {
 		return "", "", err
 	}
 	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create season dir %q: %w", seasonDir, err)
 	}
+	if err := clearPlexEpisode(seasonDir, plan.belongs); err != nil {
+		return "", "", err
+	}
 
-	for _, st := range steps {
-		if rerr := rename(st.src, st.dst); rerr != nil {
-			// Cross-filesystem (or otherwise unrenamable): copy then drop the
-			// source. A copy failure leaves the source in place.
-			if st.dir {
-				if cerr := copyTree(st.src, st.dst); cerr != nil {
-					return "", "", fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
-				}
-				if rmerr := os.RemoveAll(st.src); rmerr != nil {
-					return "", "", fmt.Errorf("remove source after copy %q: %w", st.src, rmerr)
-				}
-				continue
-			}
-			if cerr := copyFile(st.src, st.dst, st.mode); cerr != nil {
-				return "", "", fmt.Errorf("copy %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
-			}
-			if rmerr := os.Remove(st.src); rmerr != nil {
-				return "", "", fmt.Errorf("remove source after copy %q: %w", st.src, rmerr)
-			}
+	placed := make([]placedStep, 0, len(plan.steps))
+	for _, st := range plan.steps {
+		renamed, err := placePlexStep(st)
+		if err != nil {
+			return "", "", errors.Join(err, undoPlexSteps(placed))
+		}
+		placed = append(placed, placedStep{plexMoveStep: st, renamed: renamed})
+	}
+
+	// Every entry is in the library. Drop the scratch folder: it still holds the
+	// sources of copied entries, plus any non-regular file the plan left out.
+	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
+		return seasonDir, plan.videoPath, downloadsLeftoverErr(lessonDir, rmerr)
+	}
+	return seasonDir, plan.videoPath, nil
+}
+
+// placedStep is a plexMoveStep already in the season folder; renamed says how
+// it got there, which decides how to undo it.
+type placedStep struct {
+	plexMoveStep
+	renamed bool
+}
+
+// placePlexStep puts one entry at its destination: by rename, or (on any rename
+// error) by copy, leaving the source for the final scratch-folder removal. A
+// copy that fails part-way is removed again.
+func placePlexStep(st plexMoveStep) (renamed bool, err error) {
+	rerr := rename(st.src, st.dst)
+	if rerr == nil {
+		return true, nil
+	}
+	var cerr error
+	if st.dir {
+		cerr = copyTree(st.src, st.dst)
+	} else {
+		cerr = copyFile(st.src, st.dst, st.mode)
+	}
+	if cerr != nil {
+		err := fmt.Errorf("copy %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
+		return false, errors.Join(err, discardPartialCopy(st.dst))
+	}
+	return false, nil
+}
+
+// undoPlexSteps takes placed entries back out of the season folder, newest
+// first: a renamed entry is renamed back into the scratch folder (it has no
+// other copy), a copied one is removed (its source never left). Every entry that
+// cannot be undone is reported by path.
+func undoPlexSteps(placed []placedStep) error {
+	var errs []error
+	for i := len(placed) - 1; i >= 0; i-- {
+		st := placed[i]
+		if !st.renamed {
+			errs = append(errs, discardPartialCopy(st.dst))
+			continue
+		}
+		if err := rename(st.dst, st.src); err != nil {
+			errs = append(errs, fmt.Errorf("could not return %q to downloads; its only copy is left in the library at %q: %w", st.src, st.dst, err))
 		}
 	}
+	return errors.Join(errs...)
+}
 
-	// Remove the now-emptied scratch lesson dir (best-effort: a leftover scratch
-	// dir is a warn-worthy stray, not a lost file). Any nested non-regular content
-	// we skipped above stays in the source, so RemoveAll cleans the whole leaf.
-	if rmerr := os.RemoveAll(lessonDir); rmerr != nil {
-		return seasonDir, videoPath, fmt.Errorf("remove emptied scratch dir %q: %w", lessonDir, rmerr)
+// clearPlexEpisode removes the season folder's entries that belongs recognises:
+// the episode's files from a previous download.
+func clearPlexEpisode(seasonDir string, belongs func(name string, isDir bool) bool) error {
+	entries, err := os.ReadDir(seasonDir)
+	if err != nil {
+		return fmt.Errorf("read season dir %q: %w", seasonDir, err)
 	}
-	return seasonDir, videoPath, nil
+	var errs []error
+	for _, e := range entries {
+		if !belongs(e.Name(), e.IsDir()) {
+			continue
+		}
+		p := filepath.Join(seasonDir, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			errs = append(errs, fmt.Errorf("previous download could not be removed from the library, left at %q: %w", p, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// discardPartialCopy removes a copy the move made but will not record, so the
+// library never holds a copy drumdrop does not track. nil if it is gone.
+func discardPartialCopy(path string) error {
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("partial copy could not be removed from the library, left at %q: %w", path, err)
+	}
+	return nil
+}
+
+// downloadsLeftoverErr reports a scratch folder that could not be fully removed
+// after its lesson was copied whole into the library.
+func downloadsLeftoverErr(lessonDir string, err error) error {
+	return fmt.Errorf("the library copy is complete, but the downloads copy could not be fully removed, leftover at %q: %w", lessonDir, err)
+}
+
+// plexMovePlan is what planPlexTVMove works out before the plex-tv move writes
+// anything: each entry's destination, the video to record, and the predicate a
+// delete will use to find the episode's entries.
+type plexMovePlan struct {
+	steps     []plexMoveStep
+	videoPath string
+	belongs   func(name string, isDir bool) bool
 }
 
 // plexMoveStep is one entry of a scratch lesson folder and where the plex-tv
@@ -317,11 +419,15 @@ type plexMoveStep struct {
 // what keeps the move and the delete in step: rename a sidecar here, or add a
 // folder whose name has a space, and the move refuses instead of leaving files
 // a delete can never reach.
-func planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase string) (steps []plexMoveStep, videoPath string, err error) {
+func planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase string) (plexMovePlan, error) {
 	entries, err := os.ReadDir(lessonDir)
 	if err != nil {
-		return nil, "", fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+		return plexMovePlan{}, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
 	}
+	var (
+		steps     []plexMoveStep
+		videoPath string
+	)
 	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
 	// across filesystems and across a song's multiple version files.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
@@ -334,7 +440,7 @@ func planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase string) (step
 		} else {
 			info, ierr := e.Info()
 			if ierr != nil {
-				return nil, "", fmt.Errorf("stat scratch file %q: %w", name, ierr)
+				return plexMovePlan{}, fmt.Errorf("stat scratch file %q: %w", name, ierr)
 			}
 			if !info.Mode().IsRegular() {
 				continue // skip symlinks/devices: drumdrop only produces regular files
@@ -356,16 +462,16 @@ func planPlexTVMove(lessonDir, scratchBase, seasonDir, episodeBase string) (step
 	if videoPath != "" {
 		m, ok := PlexEpisodeMatcher(videoPath)
 		if !ok {
-			return nil, "", fmt.Errorf("refusing to move: a delete would not recognise the episode video %q", videoPath)
+			return plexMovePlan{}, fmt.Errorf("refusing to move: a delete would not recognise the episode video %q", videoPath)
 		}
 		belongs = m
 	}
 	for _, st := range steps {
 		if !belongs(filepath.Base(st.dst), st.dir) {
-			return nil, "", fmt.Errorf("refusing to move: a delete would not recognise %q as part of episode %q", filepath.Base(st.dst), episodeBase)
+			return plexMovePlan{}, fmt.Errorf("refusing to move: a delete would not recognise %q as part of episode %q", filepath.Base(st.dst), episodeBase)
 		}
 	}
-	return steps, videoPath, nil
+	return plexMovePlan{steps: steps, videoPath: videoPath, belongs: belongs}, nil
 }
 
 // copyTree recursively copies the file tree at src into dst, recreating

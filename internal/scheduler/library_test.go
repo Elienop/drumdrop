@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/musora"
@@ -540,6 +542,305 @@ func TestIsPlexSeasonDir(t *testing.T) {
 	for dir, want := range cases {
 		if got := IsPlexSeasonDir(dir); got != want {
 			t.Errorf("IsPlexSeasonDir(%q) = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+// forceCopyFallback makes every rename fail, as across two filesystems, so the
+// move takes its copy path.
+func forceCopyFallback(t *testing.T) {
+	t.Helper()
+	orig := rename
+	rename = func(oldpath, newpath string) error { return errInjectedRename }
+	t.Cleanup(func() { rename = orig })
+}
+
+// skipWithoutPermissionChecks skips the test up front where the OS does not
+// enforce file permissions (root, Windows). Tests that break a download inside
+// the worker call it first, so the skip in makeUnreadable/makeUndeletable never
+// has to fire from inside a run.
+func skipWithoutPermissionChecks(t *testing.T) {
+	t.Helper()
+	probe := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probe, nil, 0o644); err != nil {
+		t.Fatalf("create %s: %v", probe, err)
+	}
+	makeUnreadable(t, probe)
+}
+
+// makeUnreadable removes every permission from the file at path, skipping the
+// test where the OS does not enforce that (root, Windows) so it cannot pass
+// without exercising the failure.
+func makeUnreadable(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("file permissions are not enforced on Windows")
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	if f, err := os.Open(path); err == nil {
+		_ = f.Close()
+		t.Skip("running with permission checks bypassed (root?): an unreadable file is readable")
+	}
+}
+
+// makeUndeletable makes the folder at dir read-only, so nothing in it can be
+// removed, skipping the test where the OS does not enforce that.
+func makeUndeletable(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("folder permissions are not enforced on Windows")
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	probe := filepath.Join(dir, ".probe")
+	if err := os.WriteFile(probe, nil, 0o644); err == nil {
+		_ = os.Remove(probe)
+		t.Skip("running with permission checks bypassed (root?): a read-only folder is writable")
+	}
+}
+
+// readDirNames lists dir's entry names, or nil if it does not exist.
+func readDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestMoveToLibraryCopyFailsPartWayLeavesNoPartialCopy covers D52's first case:
+// in the default layout the copy fails part-way (the last file, in walk order,
+// cannot be read). The move reports no library folder, the partial copy is gone
+// from the library, and the whole lesson is still in downloads.
+func TestMoveToLibraryCopyFailsPartWayLeavesNoPartialCopy(t *testing.T) {
+	downloadsDir, lessonDir := seedLesson(t)
+	libraryDir := filepath.Join(filepath.Dir(downloadsDir), "lib")
+	forceCopyFallback(t)
+	makeUnreadable(t, filepath.Join(lessonDir, "01 - L.nfo"))
+
+	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	if err == nil {
+		t.Fatal("moveToLibrary = nil error, want the copy failure")
+	}
+	if newDir != "" {
+		t.Errorf("newDir = %q, want \"\" (the lesson must be recorded in downloads)", newDir)
+	}
+	dstDir := filepath.Join(libraryDir, "Inst", "Course", "01 - L")
+	if names := readDirNames(t, dstDir); names != nil {
+		t.Errorf("library still holds a partial copy %v at %s, want it removed", names, dstDir)
+	}
+	for _, name := range lessonFiles {
+		if _, err := os.Stat(filepath.Join(lessonDir, name)); err != nil {
+			t.Errorf("downloads lost %s after a failed copy: %v", name, err)
+		}
+	}
+}
+
+// TestMoveToLibrarySourceNotRemovableKeepsLibraryCopy covers D52's third case in
+// the default layout: the copy is complete but the downloads folder cannot be
+// removed. The move returns the library folder (so it is recorded), with an
+// error that names the downloads leftover.
+func TestMoveToLibrarySourceNotRemovableKeepsLibraryCopy(t *testing.T) {
+	downloadsDir, lessonDir := seedLesson(t)
+	libraryDir := filepath.Join(filepath.Dir(downloadsDir), "lib")
+	forceCopyFallback(t)
+	makeUndeletable(t, lessonDir)
+
+	newDir, err := moveToLibrary(downloadsDir, libraryDir, lessonDir)
+	wantDir := filepath.Join(libraryDir, "Inst", "Course", "01 - L")
+	if newDir != wantDir {
+		t.Errorf("newDir = %q, want the complete library copy %q", newDir, wantDir)
+	}
+	if err == nil || !strings.Contains(err.Error(), lessonDir) {
+		t.Errorf("err = %v, want an error naming the downloads leftover %q", err, lessonDir)
+	}
+	for _, name := range lessonFiles {
+		if _, err := os.Stat(filepath.Join(wantDir, name)); err != nil {
+			t.Errorf("library copy is missing %s: %v", name, err)
+		}
+	}
+}
+
+// seedSongScratch writes a song's scratch folder (two versions, nfo, poster,
+// resources/) under tmp/dl and returns it with the episode base the move gives
+// it as episode 5 of "Songs", and the season folder.
+func seedSongScratch(t *testing.T, tmp string) (lessonDir, episodeBase, seasonDir string) {
+	t.Helper()
+	scratchBase := "05 - Even Flow"
+	lessonDir = filepath.Join(tmp, "dl", "Songs", scratchBase)
+	if err := os.MkdirAll(filepath.Join(lessonDir, "resources"), 0o755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	for _, name := range []string{
+		scratchBase + " [Drumless].mp4", scratchBase + " [Original].mp4",
+		scratchBase + "-poster.jpg", scratchBase + ".nfo", filepath.Join("resources", "song.pdf"),
+	} {
+		if err := os.WriteFile(filepath.Join(lessonDir, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return lessonDir, "Songs - s01e05 - Even Flow", filepath.Join(tmp, "lib", "Songs", "Season 01")
+}
+
+// songScratchEntries is what seedSongScratch puts in the scratch folder.
+var songScratchEntries = []string{
+	"05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4",
+	"05 - Even Flow-poster.jpg", "05 - Even Flow.nfo", "resources",
+}
+
+// assertScratchWhole checks the scratch folder still holds every entry of the
+// song, and assertNoEpisodeIn that the season folder holds none of it (only the
+// names in keep).
+func assertScratchWhole(t *testing.T, lessonDir string) {
+	t.Helper()
+	for _, name := range songScratchEntries {
+		if _, err := os.Stat(filepath.Join(lessonDir, name)); err != nil {
+			t.Errorf("scratch lost %s after an undone move: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(lessonDir, "resources", "song.pdf")); err != nil {
+		t.Errorf("scratch lost resources/song.pdf: %v", err)
+	}
+}
+
+func assertNoEpisodeIn(t *testing.T, seasonDir string, keep ...string) {
+	t.Helper()
+	got := readDirNames(t, seasonDir)
+	if len(got) != len(keep) {
+		t.Errorf("season folder holds %v, want only %v (no partial episode)", got, keep)
+		return
+	}
+	for i := range keep {
+		if got[i] != keep[i] {
+			t.Errorf("season folder holds %v, want only %v (no partial episode)", got, keep)
+			return
+		}
+	}
+}
+
+// TestMoveToLibraryPlexTVCopyFailsPartWayUndoesTheMove covers D52's second case:
+// the plex-tv move copies file by file, and the fourth entry cannot be read.
+// The three already copied are taken back out of the season folder, a sibling
+// episode is untouched, nothing is returned to record in the library, and the
+// whole song is still in scratch.
+func TestMoveToLibraryPlexTVCopyFailsPartWayUndoesTheMove(t *testing.T) {
+	tmp := t.TempDir()
+	lessonDir, _, seasonDir := seedSongScratch(t, tmp)
+	sibling := "Songs - s01e06 - Six.mp4"
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+		t.Fatalf("mkdir season: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seasonDir, sibling), []byte("six"), 0o644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+	forceCopyFallback(t)
+	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow.nfo"))
+
+	gotSeason, videoPath, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	if err == nil {
+		t.Fatal("moveToLibraryPlexTV = nil error, want the copy failure")
+	}
+	if gotSeason != "" || videoPath != "" {
+		t.Errorf("returned (%q, %q), want empty (record the lesson in scratch)", gotSeason, videoPath)
+	}
+	assertNoEpisodeIn(t, seasonDir, sibling)
+	assertScratchWhole(t, lessonDir)
+}
+
+// TestMoveToLibraryPlexTVUndoRenamesBack covers the same case when some entries
+// were renamed rather than copied (their scratch source is gone): the [Drumless]
+// version renames, the [Original] cannot be renamed or read. Undoing the move
+// must rename [Drumless] back, so scratch is whole again.
+func TestMoveToLibraryPlexTVUndoRenamesBack(t *testing.T) {
+	tmp := t.TempDir()
+	lessonDir, _, seasonDir := seedSongScratch(t, tmp)
+	orig := rename
+	rename = func(oldpath, newpath string) error {
+		if strings.Contains(oldpath, "[Original]") {
+			return errInjectedRename
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	t.Cleanup(func() { rename = orig })
+	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4"))
+
+	gotSeason, _, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	if err == nil || gotSeason != "" {
+		t.Fatalf("moveToLibraryPlexTV = (%q, %v), want (\"\", the copy failure)", gotSeason, err)
+	}
+	assertNoEpisodeIn(t, seasonDir)
+	assertScratchWhole(t, lessonDir)
+}
+
+// TestMoveToLibraryPlexTVSourceNotRemovableKeepsLibraryCopy covers D52's third
+// case in plex-tv: every entry is copied, but the scratch folder cannot be fully
+// removed (its resources/ is read-only). The move returns the season folder and
+// the video (so they are recorded), every entry is in the library, and the
+// error names the downloads leftover.
+func TestMoveToLibraryPlexTVSourceNotRemovableKeepsLibraryCopy(t *testing.T) {
+	tmp := t.TempDir()
+	lessonDir, episodeBase, seasonDir := seedSongScratch(t, tmp)
+	forceCopyFallback(t)
+	makeUndeletable(t, filepath.Join(lessonDir, "resources"))
+
+	gotSeason, videoPath, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir)
+	if gotSeason != seasonDir {
+		t.Errorf("seasonDir = %q, want %q (the complete library copy)", gotSeason, seasonDir)
+	}
+	if want := filepath.Join(seasonDir, episodeBase+" [Drumless].mp4"); videoPath != want {
+		t.Errorf("videoPath = %q, want %q", videoPath, want)
+	}
+	if err == nil || !strings.Contains(err.Error(), lessonDir) {
+		t.Errorf("err = %v, want an error naming the downloads leftover %q", err, lessonDir)
+	}
+	for _, name := range []string{" [Drumless].mp4", " [Original].mp4", "-poster.jpg", ".nfo", " resources/song.pdf"} {
+		if _, err := os.Stat(filepath.Join(seasonDir, episodeBase+name)); err != nil {
+			t.Errorf("library copy is missing %s: %v", episodeBase+name, err)
+		}
+	}
+}
+
+// TestMoveToLibraryPlexTVReplacesAPreviousDownload proves a re-download replaces
+// the episode's entries from the previous one instead of merging with them: a
+// stale version file and a stale resource are gone, and a sibling stays.
+func TestMoveToLibraryPlexTVReplacesAPreviousDownload(t *testing.T) {
+	tmp := t.TempDir()
+	lessonDir, episodeBase, seasonDir := seedSongScratch(t, tmp)
+	if err := os.MkdirAll(filepath.Join(seasonDir, episodeBase+" resources"), 0o755); err != nil {
+		t.Fatalf("mkdir stale: %v", err)
+	}
+	stale := []string{episodeBase + " [Live].mp4", filepath.Join(episodeBase+" resources", "old.pdf")}
+	sibling := "Songs - s01e50 - Fifty.mp4"
+	for _, name := range append([]string{sibling}, stale...) {
+		if err := os.WriteFile(filepath.Join(seasonDir, name), []byte("old"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if _, _, err := moveToLibraryPlexTV(filepath.Join(tmp, "lib"), "Songs", 1, 5, "Even Flow", lessonDir); err != nil {
+		t.Fatalf("moveToLibraryPlexTV: %v", err)
+	}
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(seasonDir, name)); !os.IsNotExist(err) {
+			t.Errorf("stale %q from the previous download survived (stat err = %v), want replaced", name, err)
+		}
+	}
+	for _, name := range []string{sibling, episodeBase + " resources/song.pdf", episodeBase + " [Original].mp4"} {
+		if _, err := os.Stat(filepath.Join(seasonDir, name)); err != nil {
+			t.Errorf("%q missing after the re-download: %v", name, err)
 		}
 	}
 }

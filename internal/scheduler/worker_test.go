@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -233,6 +234,11 @@ type fakeDownloader struct {
 	// assert the worker stats it and records a real video_path + bytes.
 	writeMP4 []byte
 
+	// afterWrite, when set, runs on the lesson folder once writeMP4's files are
+	// written, so a test can shape the finished download (an unreadable file, a
+	// read-only folder) before the worker moves it.
+	afterWrite func(dir string)
+
 	// onProgress, when non-empty, is replayed through the opts' OnProgress
 	// callback (if the worker set one) before the download resolves, simulating
 	// yt-dlp's per-render progress lines.
@@ -284,10 +290,14 @@ func (d *fakeDownloader) Download(_ context.Context, l *musora.Lesson, o musora.
 			if err := os.MkdirAll(filepath.Join(dir, "resources"), 0o755); err != nil {
 				return err
 			}
-			return os.WriteFile(filepath.Join(dir, "resources", "song.pdf"), []byte("pdf-bytes"), 0o644)
-		}
-		if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "resources", "song.pdf"), []byte("pdf-bytes"), 0o644); err != nil {
+				return err
+			}
+		} else if err := os.WriteFile(filepath.Join(dir, base+".mp4"), d.writeMP4, 0o644); err != nil {
 			return err
+		}
+		if d.afterWrite != nil {
+			d.afterWrite(dir)
 		}
 	}
 	return nil
@@ -1764,5 +1774,146 @@ func TestPlexShow(t *testing.T) {
 				t.Errorf("plexShow = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// songJobWorker sets up a worker for one song (lesson 100, "Even Flow", episode
+// 5 of the node follow) downloading into tmp/dl with a library at tmp/lib in the
+// given layout, and returns it with its store, the downloader and a log buffer.
+func songJobWorker(t *testing.T, layout string) (*Worker, *fakeWorkerStore, *fakeDownloader, *bytes.Buffer, string) {
+	t.Helper()
+	job := queuedJob(1, nodeFollow().ID, 100)
+	store := newFakeWorkerStore(job)
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 5, Valid: true}}
+	song := &musora.Lesson{ID: 100, Title: "Even Flow", Soundslice: []musora.SoundsliceRef{{Slug: "169230"}}}
+	dl := newFakeDownloader()
+	dl.writeMP4 = []byte("fake mp4 bytes")
+
+	tmp := t.TempDir()
+	w := newTestWorker(store, fakeResolver{lessons: map[int]*musora.Lesson{100: song}}, dl, func(time.Duration) {})
+	w.Cfg.DownloadsDir = filepath.Join(tmp, "dl")
+	w.Cfg.LibraryDir = filepath.Join(tmp, "lib")
+	w.Cfg.Layout = layout
+	var logBuf bytes.Buffer
+	w.Log = &logBuf
+	return w, store, dl, &logBuf, tmp
+}
+
+// runSongJob runs the worker once and checks the job still succeeded (the move
+// is non-fatal) and recorded exactly one download, which it returns.
+func runSongJob(t *testing.T, w *Worker, store *fakeWorkerStore) markDownloadedCall {
+	t.Helper()
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if got := store.jobs[1].Status; got != database.JobDone {
+		t.Fatalf("job status = %q, want done (a move failure must not fail the job)", got)
+	}
+	if len(store.markDownloaded) != 1 {
+		t.Fatalf("markDownloaded calls = %d, want 1", len(store.markDownloaded))
+	}
+	return store.markDownloaded[0]
+}
+
+// assertRecordedWhole checks the recorded folder holds both versions and the
+// resources PDF under the given names, and that the recorded video exists.
+func assertRecordedWhole(t *testing.T, rec markDownloadedCall, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(rec.outputDir, name)); err != nil {
+			t.Errorf("recorded folder %s is missing %s: %v", rec.outputDir, name, err)
+		}
+	}
+	if _, err := os.Stat(rec.videoPath); err != nil {
+		t.Errorf("recorded video %q does not exist: %v", rec.videoPath, err)
+	}
+}
+
+// TestWorkerDefaultMoveCopyFailsRecordsDownloads covers D52's first case at the
+// worker: the default-layout copy fails part-way. The lesson is recorded in
+// downloads, where it is whole, and the library holds no copy of it.
+func TestWorkerDefaultMoveCopyFailsRecordsDownloads(t *testing.T) {
+	skipWithoutPermissionChecks(t)
+	w, store, dl, _, tmp := songJobWorker(t, "")
+	forceCopyFallback(t)
+	dl.afterWrite = func(dir string) { makeUnreadable(t, filepath.Join(dir, "05 - Even Flow [Original].mp4")) }
+
+	rec := runSongJob(t, w, store)
+	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
+	if rec.outputDir != srcDir {
+		t.Errorf("outputDir = %q, want the downloads folder %q", rec.outputDir, srcDir)
+	}
+	assertRecordedWhole(t, rec, "05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4", "resources/song.pdf")
+	if names := readDirNames(t, filepath.Join(tmp, "lib", "Beginner Course")); len(names) != 0 {
+		t.Errorf("library holds %v, want no copy of a lesson recorded in downloads", names)
+	}
+}
+
+// TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary covers D52's third case
+// at the worker (default layout): the copy is complete but downloads cannot be
+// cleared. The worker records the library folder (it used to drop it on any
+// error), and the log names the downloads leftover.
+func TestWorkerDefaultMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
+	skipWithoutPermissionChecks(t)
+	w, store, dl, logBuf, tmp := songJobWorker(t, "")
+	forceCopyFallback(t)
+	dl.afterWrite = func(dir string) { makeUndeletable(t, filepath.Join(dir, "resources")) }
+
+	rec := runSongJob(t, w, store)
+	libDir := filepath.Join(tmp, "lib", "Beginner Course", "05 - Even Flow")
+	if rec.outputDir != libDir {
+		t.Errorf("outputDir = %q, want the complete library copy %q", rec.outputDir, libDir)
+	}
+	assertRecordedWhole(t, rec, "05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4", "resources/song.pdf")
+	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
+	if !strings.Contains(logBuf.String(), srcDir) {
+		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
+	}
+}
+
+// TestWorkerPlexTvMoveCopyFailsRecordsScratch covers D52's second case at the
+// worker: the plex-tv copy fails part-way. The move is undone, the lesson is
+// recorded in scratch WITH its video (it used to lose it), and the season folder
+// holds nothing of the episode.
+func TestWorkerPlexTvMoveCopyFailsRecordsScratch(t *testing.T) {
+	skipWithoutPermissionChecks(t)
+	w, store, dl, _, tmp := songJobWorker(t, LayoutPlexTV)
+	forceCopyFallback(t)
+	dl.afterWrite = func(dir string) { makeUnreadable(t, filepath.Join(dir, "05 - Even Flow [Original].mp4")) }
+
+	rec := runSongJob(t, w, store)
+	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
+	if rec.outputDir != srcDir {
+		t.Errorf("outputDir = %q, want the scratch folder %q", rec.outputDir, srcDir)
+	}
+	if want := filepath.Join(srcDir, "05 - Even Flow [Drumless].mp4"); rec.videoPath != want {
+		t.Errorf("videoPath = %q, want %q", rec.videoPath, want)
+	}
+	assertRecordedWhole(t, rec, "05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4", "resources/song.pdf")
+	if names := readDirNames(t, filepath.Join(tmp, "lib", "Beginner Course", "Season 01")); len(names) != 0 {
+		t.Errorf("season folder holds %v, want nothing of an undone move", names)
+	}
+}
+
+// TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary covers D52's third case
+// in plex-tv at the worker: every entry is in the season folder, which is what
+// gets recorded, and the log names the downloads leftover.
+func TestWorkerPlexTvMoveSourceNotRemovableRecordsLibrary(t *testing.T) {
+	skipWithoutPermissionChecks(t)
+	w, store, dl, logBuf, tmp := songJobWorker(t, LayoutPlexTV)
+	forceCopyFallback(t)
+	dl.afterWrite = func(dir string) { makeUndeletable(t, filepath.Join(dir, "resources")) }
+
+	rec := runSongJob(t, w, store)
+	seasonDir := filepath.Join(tmp, "lib", "Beginner Course", "Season 01")
+	if rec.outputDir != seasonDir {
+		t.Errorf("outputDir = %q, want the season folder %q", rec.outputDir, seasonDir)
+	}
+	base := "Beginner Course - s01e05 - Even Flow"
+	assertRecordedWhole(t, rec, base+" [Drumless].mp4", base+" [Original].mp4", base+" resources/song.pdf")
+	srcDir := filepath.Join(tmp, "dl", "Beginner Course", "05 - Even Flow")
+	if !strings.Contains(logBuf.String(), srcDir) {
+		t.Errorf("log %q does not name the downloads leftover %q", logBuf.String(), srcDir)
 	}
 }

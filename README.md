@@ -227,7 +227,10 @@ services:
 Point Plex at `/mnt/pool/media/library`. Two **separate** binds (e.g. `./downloads:/downloads`
 and `./library:/library`) cross filesystems inside the container, so the move falls back
 to a copy-then-delete (correct, just not instant). A move failure is non-fatal: the
-download still succeeds and the file stays in the downloads dir.
+download still succeeds, and the lesson is recorded wherever its one complete copy is. A
+copy that fails part-way is taken back out of the library, so the lesson stays whole in the
+downloads dir; if the copy finished but the downloads copy can't be removed, the library
+copy is kept and recorded. Anything drumdrop could not clean up is logged with its path.
 
 #### Plex TV layout
 
@@ -252,8 +255,9 @@ Each course becomes one *show*, each lesson an *episode*:
 - **Deleting** a lesson removes every file and folder of that episode (both versions of a
   song included) and nothing of any other episode; the season folder stays.
 - It shapes **only** the library move: downloads still happen in the usual scratch layout,
-  and a move failure is non-fatal (the file stays in downloads). With no `DRUMDROP_LIBRARY_DIR`
-  the setting does nothing.
+  and a move failure is non-fatal, as above (a half-done move is undone, so the lesson stays
+  whole in downloads). A re-download replaces the episode's previous files. With no
+  `DRUMDROP_LIBRARY_DIR` the setting does nothing.
 - The `.nfo` written here is a Kodi/Plex **`<episodedetails>`** doc (not the default
   `<movie>`): it carries the episode `<title>`, `<showtitle>`, `<season>`/`<episode>`,
   `<aired>` (publish date), the instructor `<actor>`, and the lesson plot/runtime. Writing

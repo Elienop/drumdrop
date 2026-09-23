@@ -31,49 +31,9 @@ D52 into *Next up*._
 
 ## Next up
 
-*Order:* D52 leads because it leaves the owner's files wrong on disk (D51, its partner, has
-shipped on this branch). This order is the 2026-09-23 onboarding session's proposal, not an
-owner ruling; the owner may reorder.
-
-- **D52 · A library move that fails part-way leaves an untracked copy.**
-  - *What:* this only happens on the copy fallback. That fallback runs when downloads and
-    library are on different filesystems as drumdrop sees them, so the move has to copy and
-    then delete instead of renaming. Nothing on that path is undone when a step fails:
-    - *Copy fails part-way, default layout* (`moveToLibrary`; a full disk, a permission
-      error): a partial lesson folder stays in the library. The whole lesson also stays in
-      downloads and is recorded there, so nothing tracks the partial copy until a
-      re-download replaces it.
-    - *Copy fails part-way, plex-tv* (`moveToLibraryPlexTV`, which moves one file at a
-      time): the files already moved stay in the season folder and the rest stay in
-      scratch, so the lesson is split in two. The worker records the scratch folder, which
-      may no longer hold the video, so the lesson is recorded with no video path, and a
-      later delete does nothing.
-    - *Copy done, source not removed* (a file in downloads that drumdrop can't delete):
-      `moveToLibrary` returns the library folder *and* an error, and the worker keeps the
-      new folder only when there is no error, so it records the downloads folder. A
-      complete copy sits in the library that nothing tracks: Plex shows it, and deleting
-      the lesson never reaches it. plex-tv has the same gap per file: that file ends up in
-      both places, the move stops there and returns no paths, and the lesson is split as
-      above.
-  - *Why:* Plex can show a half-copied lesson, or a complete one drumdrop doesn't track, and
-    the leftovers take space that a delete doesn't reclaim. The worker's comment "a non-empty
-    seasonDir means every file was placed" is true; the case nothing handles is the empty one.
-  - *What the fix must guarantee:* after a failed move, every file of the lesson sits in one
-    place, and that place is the one drumdrop records. A fix that only rolls back a
-    half-finished copy leaves the *copy done* case broken.
-  - *Until then:* the single-parent bind mount (README, *Plex library*) keeps the move a plain
-    rename, which never takes the copy path.
-  - *Evidence:* the `copyTree` and `copyFile` fallbacks in `internal/scheduler/library.go`
-    return on error without removing what they already wrote ·
-    `grep -n 'remove source after copy' internal/scheduler/library.go` (the errors returned
-    after a complete copy) · `grep -n 'moveToLibrary(' internal/scheduler/worker.go` (the
-    default-layout call, which drops the returned folder on any error) ·
-    `grep -n 'seasonDir != ""\|if !recorded' internal/scheduler/worker.go` (what the worker
-    records after a move)
-  - *Detail:* vault note drumdrop-plex-library (*Known gaps* 2). Reproduced on 2026-09-23 with
-    the functions copied into a scratch program, the rename forced to fail and one file made
-    unreadable; the *copy done* case the same way, with a downloads folder whose files can't
-    be deleted. No package test covers either.
+*Order:* D51 and D52, which led because they left the owner's files wrong on disk, have
+shipped on this branch; the entries below keep their order. This order is the 2026-09-23
+onboarding session's proposal, not an owner ruling; the owner may reorder.
 
 - **D1 · Build with a patched Go toolchain.**
   - *What:* `go.mod` pins `go 1.26.3`, and CI and the release binaries build on exactly that
@@ -621,6 +581,28 @@ and D53's fix for the tokenless loopback mode (options A, B or C).
 
 ## Recently shipped
 
+- **D52 · A library move that failed part-way left an untracked copy.** This branch
+  (`fix-library-delete-and-move`), PR number to follow.
+  - *Was:* on the copy fallback (two filesystems) nothing was undone when a step failed. A
+    default-layout copy that failed part-way left a partial folder in the library; a plex-tv
+    one left the lesson split between the season folder and scratch, recorded with no video.
+    When the copy finished but downloads couldn't be cleared, the worker dropped the library
+    folder the move returned and recorded downloads, so Plex showed an untracked copy.
+  - *Now:* whatever fails, one complete copy is left and that is what gets recorded. A copy
+    that fails part-way is taken back out of the library (plex-tv renames already-moved
+    entries back into scratch), and the lesson is recorded whole in downloads. A finished
+    copy whose downloads folder can't be removed is recorded in the library, in both
+    layouts. Anything that can't be cleaned up is logged with its path (`⚠ move to
+    library`). A plex-tv re-download clears the episode's previous entries first, like the
+    default layout clears its folder. The move stays non-fatal; library == downloads is
+    still a no-op.
+  - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|ReplacesAPrevious'
+    ./internal/scheduler/` (the permission-based ones skip as root).
+  - *Left open:* if the OS refuses both the move and its undo (a renamed entry can't be
+    renamed back), the lesson stays split and the log names every path. While a
+    cross-filesystem copy is running, Plex can see the half-copied files (it happened before
+    too); copying to a hidden staging name first would close that, but whether Plex skips
+    hidden folders is unverified.
 - **D51 · A plex-tv delete left most of a song, and every lesson's folders, behind.** This
   branch (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* the delete matched the recorded video's name minus `.mp4` followed by `.` or `-`.

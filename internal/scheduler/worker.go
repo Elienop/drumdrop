@@ -419,10 +419,11 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		if derr == nil {
 			// Move the finished lesson into the library (single location) when
 			// configured, BEFORE producedVideo/MarkDownloaded so they record the
-			// LIBRARY path. Non-fatal in either layout: a move failure logs a warning
-			// and keeps dir as the scratch downloads path (the file is still there,
-			// the download succeeded); the move must never turn a successful download
-			// into a failure.
+			// LIBRARY path. Non-fatal in either layout: a move error is logged (it
+			// names any leftover it could not remove) and the lesson is recorded
+			// where the move says its one complete copy is: the library folder it
+			// returned, or else the scratch downloads path. The move must never turn
+			// a successful download into a failure.
 			videoPath, bytes := "", int64(0)
 			recorded := false
 			if w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "" {
@@ -438,11 +439,12 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 				}
 				// A non-empty seasonDir means every file was placed in the library; the
-				// only error that can accompany it is the best-effort scratch-dir
-				// cleanup (logged above), which leaves the files correctly in place. Record
-				// the library paths in that case so we never fall back to producedVideo's
-				// now-emptied scratch dir. A true move failure returns an empty seasonDir,
-				// keeping the scratch dir and the producedVideo fallback below.
+				// only error that can accompany it is a scratch folder that could not be
+				// fully removed (logged above), which leaves the files correctly in place.
+				// Record the library paths in that case so we never fall back to
+				// producedVideo's emptied scratch dir. A failed move returns an empty
+				// seasonDir after undoing what it placed, so the lesson is whole in the
+				// scratch dir and the producedVideo fallback below records it there.
 				if seasonDir != "" {
 					dir = seasonDir
 					videoPath = vp
@@ -466,10 +468,14 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			} else if w.Cfg.LibraryDir != "" {
 				// Default layout: move the whole "NN - title" leaf into the library at
 				// the same path relative to DownloadsDir. The rename preserves the leaf,
-				// so producedVideo still finds <base>.mp4 at the new dir.
-				if newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir); err != nil {
+				// so producedVideo still finds <base>.mp4 at the new dir. A non-empty
+				// newDir holds the whole lesson even when an error came with it (the
+				// downloads copy could not be fully removed), so record it either way.
+				newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir)
+				if err != nil {
 					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
-				} else {
+				}
+				if newDir != "" {
 					dir = newDir
 				}
 			}
