@@ -306,8 +306,9 @@ func cmdSync(argv []string) error {
 	}
 	planner, worker, _ := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
-	// yt-dlp runs in its own process group, so without this an interrupt would
-	// end drumdrop and leave yt-dlp writing on.
+	// yt-dlp runs in its own process group, so a Ctrl-C at the terminal never
+	// reaches it: without this, drumdrop would die and leave it running on its
+	// own, writing into the job's private folder.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return runSync(ctx, planner, worker, *dryRun, *limit, os.Stdout)
