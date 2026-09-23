@@ -91,8 +91,8 @@ func parseLessonRefs(raw []byte) ([]LessonRef, error) {
 	return out, nil
 }
 
-// InstructorLessons returns the downloadable lessons that reference the instructor
-// identified by slug, scoped to brand. slug must match ^[a-z0-9-]+$ and brand must
+// InstructorLessons returns the downloadable lessons of brand that reference
+// any of the instructor documents filed under slug. slug must match ^[a-z0-9-]+$ and brand must
 // be in the allowlist; both are validated before substitution to keep the GROQ
 // well-formed (defense-in-depth against query injection).
 func InstructorLessons(slug, brand, permIDs string) ([]LessonRef, error) {
@@ -107,28 +107,64 @@ func InstructorLessons(slug, brand, permIDs string) ([]LessonRef, error) {
 	return parseLessonRefs(raw)
 }
 
-// ResolveInstructorID verifies the instructor exists and returns its Sanity _id
-// and display name. ok is false (with nil error) when no instructor matches the
-// slug. Used by `follow @slug` to populate the follow title. slug is validated
-// the same way as InstructorLessons.
-func ResolveInstructorID(slug string) (id, name string, ok bool, err error) {
+// ResolveInstructorID verifies the instructor exists and returns the Sanity _id
+// and display name of their document for brand. ok is false (with nil error)
+// when no instructor matches the slug. A follow of @slug stores the name as
+// its title. slug and brand are validated as InstructorLessons does.
+//
+// Musora keeps one instructor document per brand under one slug (jared-falk
+// has a drumeo and a singeo one), and an unordered query answers them in _id
+// order, so the first isn't necessarily brand's. When the slug has no
+// document for brand, the first one's name is used: every slug Musora shares
+// across documents names one person, and brand's lessons may still reference
+// them (instructor_lessons.groq takes every _id for the slug).
+func ResolveInstructorID(slug, brand string) (id, name string, ok bool, err error) {
 	if err = validateSlug(slug); err != nil {
 		return "", "", false, err
 	}
-	q := "*[_type=='instructor' && slug.current=='" + slug + "']{ '_id': _id, name }"
+	if err = ValidateBrand(brand); err != nil {
+		return "", "", false, err
+	}
+	q := "*[_type=='instructor' && slug.current=='" + slug + "']{ '_id': _id, name, brand }"
 	raw, err := Query(q, "")
 	if err != nil {
 		return "", "", false, err
 	}
-	var rows []struct {
-		ID   string `json:"_id"`
-		Name string `json:"name"`
-	}
+	var rows []instructorDoc
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		return "", "", false, err
 	}
-	if len(rows) == 0 || rows[0].ID == "" {
+	doc, ok := pickInstructorDoc(rows, brand)
+	if !ok {
 		return "", "", false, nil
 	}
-	return rows[0].ID, rows[0].Name, true, nil
+	return doc.ID, doc.Name, true, nil
+}
+
+// instructorDoc is a row of ResolveInstructorID's query.
+type instructorDoc struct {
+	ID    string `json:"_id"`
+	Name  string `json:"name"`
+	Brand string `json:"brand"`
+}
+
+// pickInstructorDoc returns the first document for brand, else the first
+// one; ok is false when no row has an _id.
+func pickInstructorDoc(rows []instructorDoc, brand string) (instructorDoc, bool) {
+	first := -1
+	for i, r := range rows {
+		if r.ID == "" {
+			continue
+		}
+		if r.Brand == brand {
+			return r, true
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	if first < 0 {
+		return instructorDoc{}, false
+	}
+	return rows[first], true
 }

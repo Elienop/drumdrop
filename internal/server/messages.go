@@ -127,12 +127,13 @@ const (
 
 // Follow add and preview (POST /api/follows, GET /api/preview).
 const (
+	msgCoachLinkAsNode    = "That's a coach page, not a lesson or course, so it can't be followed as a node. Choose Instructor, paste the link there, then Preview again."
 	msgNoContentID        = "No content id was found in “URL or id”: it needs the number of a lesson or course. Enter the id, or a link that contains it, then Preview again."
 	msgPreviewNothing     = "Enter a URL or id, or an instructor's name, slug or link, then Preview again."
 	msgBadKind            = "Choose Node or Instructor, then try again."
 	msgSlugRequired       = "Enter the instructor's name, slug or link, then Preview again."
 	msgBadSlug            = "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a link to their coach page. Then Preview again."
-	msgBadBrand           = "That brand can't be looked up: enter drumeo, pianote, guitareo, singeo or playbass, or leave Brand empty for drumeo. Then Preview again."
+	msgBadBrand           = "That brand can't be looked up: enter drumeo, pianote, guitareo, singeo or playbass. Or leave Brand empty for a pasted coach link's brand, or drumeo without one. Then Preview again."
 	msgBrandMismatch      = "That coach page is for another brand than the one in Brand. Leave Brand empty to use the link's, or change it to match, then Preview again."
 	msgNoInstructor       = "Musora has no instructor by that name, slug or link. Check its spelling, then Preview again."
 	msgPreviewUnreachable = "Nothing could be looked up: Musora couldn't be reached, or its answer couldn't be read. Wait a moment, then Preview again."

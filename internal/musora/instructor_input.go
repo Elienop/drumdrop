@@ -135,6 +135,25 @@ func slugFromCoachLink(s string) (slug, brand string, err error) {
 	return parts[3], parts[1], nil
 }
 
+// IsCoachLink reports whether s looks like a link to a coach page: a path
+// segment "coaches" right after one of Musora's brands, in any case, with or
+// without a scheme and host; the query and fragment are ignored. A node
+// follow asks it so a coach page's number is never taken for a content id
+// (engine.ExtractID takes a link's last number). It's looser than
+// NormalizeInstructor on purpose, because it only ever refuses.
+func IsCoachLink(s string) bool {
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.Split(strings.ToLower(s), "/")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] == coachesSegment && allowedBrands[parts[i-1]] {
+			return true
+		}
+	}
+	return false
+}
+
 func isDigits(s string) bool {
 	if s == "" {
 		return false

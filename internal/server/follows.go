@@ -141,11 +141,16 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 }
 
 // createNodeFollow handles a node follow: parse the id from id|url, resolve a
-// best-effort title, then AddNodeFollow.
+// best-effort title, then AddNodeFollow. A coach-page link is refused: its
+// number is the instructor's, not a lesson's or course's.
 func (s *Server) createNodeFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, brand, quality string) {
 	target := req.ID
 	if target == "" {
 		target = req.URL
+	}
+	if musora.IsCoachLink(target) {
+		writeErr(w, http.StatusBadRequest, msgCoachLinkAsNode)
+		return
 	}
 	id := engine.ExtractID(target)
 	if id == 0 {
@@ -182,7 +187,7 @@ func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, 
 		writeLookupErr(w, "add follow", err, msgAddUnreachable)
 		return
 	}
-	id, name, ok, err := musora.ResolveInstructorID(slug)
+	id, name, ok, err := musora.ResolveInstructorID(slug, brand)
 	if err != nil {
 		writeLookupErr(w, "add follow: look up instructor", err, msgAddUnreachable)
 		return

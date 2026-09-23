@@ -15,14 +15,16 @@ import (
 // id a node follow would expand from and is omitted entirely for an instructor
 // follow (which has no single root); title is a human label; lesson_count is how
 // many downloadable lessons the follow would track; slug is the instructor slug
-// an add would store (musora.NormalizeInstructor of what was typed), omitted
-// for a node.
+// an add would store (musora.NormalizeInstructor of what was typed), and brand
+// the brand it would follow them in (a pasted link's and the Brand field's,
+// reconciled), both omitted for a node.
 type previewResponse struct {
 	RootID      *int   `json:"root_id,omitempty"`
 	Title       string `json:"title"`
 	LessonCount int    `json:"lesson_count"`
 	Kind        string `json:"kind"`
 	Slug        string `json:"slug,omitempty"`
+	Brand       string `json:"brand,omitempty"`
 }
 
 // sessionResponse is the GET /api/session shape: whether the saved cookie is
@@ -40,9 +42,10 @@ type loginRequest struct {
 // handlePreview serves GET /api/preview: a read-only dry resolve of what a
 // follow would track, so the UI can show a count/title before the user commits.
 // ?id=N(&whole=bool) previews a node follow (root id, lesson count, title);
-// ?slug= previews an instructor follow (display name, lesson count and the
-// normalised slug) from a name, slug or coach-page link. A missing or
-// unparseable id, or neither param, is a 400; instructor input that can't be
+// ?slug= previews an instructor follow (display name, lesson count, the
+// normalised slug and the brand) from a name, slug or coach-page link. A
+// missing or unparseable id, a coach-page link given as the id, or neither
+// param, is a 400; instructor input that can't be
 // normalised, a brand Musora doesn't have, a link whose brand differs from
 // ?brand, and an unknown instructor, are 400s too. Resolution
 // failures against Musora surface as 502 (detail logged). No answer echoes the
@@ -56,6 +59,10 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// Parse with engine.ExtractID (accepts a numeric id OR a Drumeo URL) so
 		// preview takes the same input as create (POST /api/follows, which also
 		// uses ExtractID) — a URL must not 400 on preview when it works on add.
+		if musora.IsCoachLink(q.Get("id")) {
+			writeErr(w, http.StatusBadRequest, msgCoachLinkAsNode)
+			return
+		}
 		id := engine.ExtractID(q.Get("id"))
 		if id == 0 {
 			writeErr(w, http.StatusBadRequest, msgNoContentID)
@@ -94,8 +101,9 @@ func (s *Server) previewNode(w http.ResponseWriter, id int, whole bool) {
 }
 
 // previewInstructor normalises what was typed for the instructor exactly as an
-// add does (musora.NormalizeInstructor), then resolves their display name and
-// counts the lessons that reference them in the settled brand. Input or a
+// add does (musora.NormalizeInstructor), then resolves their display name in
+// the settled brand and counts that brand's lessons that reference them, and
+// answers that brand. Input or a
 // brand that can't be used, and an unknown instructor, are 400s; Musora not
 // answering is a 502.
 func (s *Server) previewInstructor(w http.ResponseWriter, input, brand string) {
@@ -104,7 +112,7 @@ func (s *Server) previewInstructor(w http.ResponseWriter, input, brand string) {
 		writeLookupErr(w, "preview instructor", err, msgPreviewUnreachable)
 		return
 	}
-	_, name, ok, err := musora.ResolveInstructorID(slug)
+	_, name, ok, err := musora.ResolveInstructorID(slug, brand)
 	if err != nil {
 		writeLookupErr(w, "preview instructor", err, msgPreviewUnreachable)
 		return
@@ -123,6 +131,7 @@ func (s *Server) previewInstructor(w http.ResponseWriter, input, brand string) {
 		LessonCount: len(lessons),
 		Kind:        "instructor",
 		Slug:        slug,
+		Brand:       brand,
 	})
 }
 

@@ -17,6 +17,9 @@ import (
 	"github.com/elienop/drumdrop/internal/scheduler"
 )
 
+// errCoachLinkAsNode is what followNode answers for a coach-page link.
+var errCoachLinkAsNode = errors.New("follow: that's a coach page, not a lesson or course; follow the instructor with `drumdrop follow @<link>` or --instructor <link>")
+
 // followArgs holds the parsed positionals and flag values for the follow
 // command. Extracted so cmdFollow and its tests drive the same parser.
 type followArgs struct {
@@ -92,10 +95,19 @@ func cmdFollow(argv []string) error {
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is
-// acceptable) and records a node follow. An empty brand is the default.
+// acceptable) and records a node follow. An empty brand is the default; one
+// Musora doesn't have is refused before Musora is asked, as the web's add
+// does, since every lesson of the follow is stored with it. A coach-page link
+// is refused too: its number is the instructor's, not a lesson's or course's.
 func followNode(ctx context.Context, store *database.Store, target, brand, quality string) error {
 	if brand == "" {
 		brand = musora.DefaultBrand
+	}
+	if err := musora.ValidateBrand(brand); err != nil {
+		return fmt.Errorf("follow: --brand must be drumeo, pianote, guitareo, singeo or playbass: %w", err)
+	}
+	if musora.IsCoachLink(target) {
+		return errCoachLinkAsNode
 	}
 	id := engine.ExtractID(target)
 	if id == 0 {
@@ -136,7 +148,7 @@ func followInstructor(ctx context.Context, store *database.Store, input, brand, 
 	if err != nil {
 		return fmt.Errorf("follow: %w", err)
 	}
-	id, name, ok, err := musora.ResolveInstructorID(slug)
+	id, name, ok, err := musora.ResolveInstructorID(slug, brand)
 	if err != nil {
 		return err
 	}
