@@ -270,6 +270,7 @@ func TestCleanupPartialsRemovesOnlyPartials(t *testing.T) {
 		"Fill.for.fun.mp4",
 		"06 - Six.mp4.part",
 		"06 - Six.temp.mp4",
+		"06 - Six.nfo" + musora.TempSuffix,
 	}
 	seedSeason(t, dir, append(append([]string{}, partials...), kept...)...)
 	cleanupPartials(dir)
