@@ -19,13 +19,15 @@ const LayoutPlexTV = "plex-tv"
 // moveToLibrary moves lessonDir into libraryDir at lessonDir's path relative to
 // downloadsDir, returning the new (library) dir. It tries a rename first
 // (instant and atomic on the same filesystem); on a cross-filesystem rename
-// error it falls back to copying the tree then removing the source. The
-// downloads folder is gone after a successful move.
+// error, and only then, it falls back to copying the tree then removing the
+// source. Any other rename error is a refusal (an entry that appeared at the
+// destination after the checks is kept, never copied over). The downloads
+// folder is gone after a successful move.
 //
 // Whatever fails, one complete copy of the lesson is left in one place, and
 // newDir says where to record it:
 //   - newDir == "": the lesson is whole in lessonDir. A copy that failed
-//     part-way is removed from the library first.
+//     part-way is removed from the library first (only what it created).
 //   - newDir != "": the library holds the whole lesson. An error alongside it
 //     means lessonDir could not be fully removed, or is a note (a leftover it
 //     replaced); the message says which.
@@ -102,14 +104,21 @@ func moveToLibrary(downloadsDir, libraryDir, lessonDir string, claims *library.C
 		}
 	}
 
-	if rerr := renameAt(scratch.parent, scratch.base, parent, leaf); rerr == nil {
+	rerr := renameAt(scratch.parent, scratch.base, parent, leaf)
+	if rerr == nil {
 		return dstDir, note
-	} else if cerr := copyTreeInto(parent, leaf, scratch.parent, scratch.base); cerr != nil {
-		// Cross-filesystem (or otherwise unrenamable): copy the tree, then drop the
-		// source. The copy only read the source, so the whole lesson is still in
-		// downloads; take the partial copy back out of the library.
-		err := fmt.Errorf("copy tree %q -> %q (rename failed: %v): %w", lessonDir, dstDir, rerr, cerr)
-		return "", errors.Join(err, discardPartialCopy(parent, leaf), note)
+	}
+	if !crossDevice(rerr) {
+		// A refusal: above all, an entry that appeared at the destination after
+		// the checks. Nothing moved, and nothing there is touched or copied over.
+		return "", errors.Join(fmt.Errorf("refusing to move: %w; the lesson stays whole in downloads", rerr), note)
+	}
+	if cerr := copyTreeInto(parent, leaf, scratch.parent, scratch.base); cerr != nil {
+		// Across filesystems: copy the tree, then drop the source. The copy only
+		// read the source, so the whole lesson is still in downloads, and it took
+		// back out of the library whatever it had created.
+		err := fmt.Errorf("copy tree %q -> %q (across filesystems): %w", lessonDir, dstDir, cerr)
+		return "", errors.Join(err, note)
 	}
 	if err := syncIn(parent, "."); err != nil {
 		err = fmt.Errorf("flush library folder %q after the copy: %w", filepath.Dir(dstDir), err)

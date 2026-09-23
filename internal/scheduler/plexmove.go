@@ -21,6 +21,10 @@ import (
 // writes to accept (ext4, btrfs, ZFS, APFS and NTFS all stop at 255).
 const maxNameBytes = 255
 
+// episodeTempSuffix names the file writeScratchNFO writes before it takes the
+// nfo's place.
+const episodeTempSuffix = ".drumdrop-episode"
+
 // syncFile flushes an open file or folder to disk. A package variable so a test
 // can prove a copy is flushed before its source is removed.
 var syncFile = (*os.File).Sync
@@ -301,13 +305,17 @@ func (s *scratchDir) remove() error {
 // anything else) is a note, not a failure. It never writes through what is at
 // name: it writes a new file beside it (O_EXCL) and renames that over name, in
 // the folder it holds open, so a symlink swapped in at name after the check is
-// replaced, not followed.
+// replaced, not followed. A file left at the temporary name by a run that died
+// is removed first, as musora's writeInRoot does.
 func writeScratchNFO(dir *os.Root, name string, content []byte) error {
 	info, err := dir.Lstat(name)
 	if err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("the download wrote no %q, so no episode nfo was written", name)
 	}
-	tmp := name + ".drumdrop-episode"
+	tmp := name + episodeTempSuffix
+	if err := dir.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("write the episode nfo: a leftover is in the way: %w", err)
+	}
 	f, err := dir.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return fmt.Errorf("write the episode nfo: %w", err)
@@ -366,15 +374,20 @@ type placedStep struct {
 }
 
 // placePlexStep puts one entry at its destination in the season folder: by a
-// rename from the scratch folder (renameAt, on the two open folders), or (on
-// any rename error: another filesystem, an entry already there) by a copy made
-// inside season, leaving the source for the final scratch-folder removal. A
-// copy that fails part-way, a file or a folder, is removed again.
+// rename from the scratch folder (renameAt, on the two open folders), or, when
+// the two are on different filesystems (and only then), by a copy made inside
+// season, leaving the source for the final scratch-folder removal. Any other
+// rename error is a refusal: an entry that appeared at the destination after
+// the checks is kept, never copied over. A copy that fails part-way takes back
+// out what it created, and nothing else.
 func placePlexStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err error) {
 	name := filepath.Base(st.dst)
 	rerr := renameAt(scratch, st.name, season, name)
 	if rerr == nil {
 		return true, nil
+	}
+	if !crossDevice(rerr) {
+		return false, fmt.Errorf("refusing to place %q: %w", st.dst, rerr)
 	}
 	var cerr error
 	if st.dir {
@@ -383,8 +396,7 @@ func placePlexStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err
 		cerr = copyFileInto(season, name, scratch, st.name, st.mode)
 	}
 	if cerr != nil {
-		err := fmt.Errorf("copy %q -> %q (rename failed: %v): %w", st.src, st.dst, rerr, cerr)
-		return false, errors.Join(err, discardPartialCopy(season, name))
+		return false, fmt.Errorf("copy %q -> %q (across filesystems): %w", st.src, st.dst, cerr)
 	}
 	return false, nil
 }
@@ -556,8 +568,10 @@ func fitEpisodeBase(show, title string, season, episode, longestSuffix int) (str
 // created afresh inside dir (no following a symlink planted at a name): an
 // existing name fails the copy. srcName itself must be a real folder: a
 // symlink to one would otherwise be walked as a single non-regular entry,
-// copying nothing.
-func copyTreeInto(dir *os.Root, name string, src *os.Root, srcName string) error {
+// copying nothing. A copy that fails removes the folder name again only if it
+// created it: one already there (the copy's first Mkdir refused it) is left
+// exactly as it is.
+func copyTreeInto(dir *os.Root, name string, src *os.Root, srcName string) (err error) {
 	info, err := src.Lstat(srcName)
 	if err != nil {
 		return err
@@ -566,6 +580,11 @@ func copyTreeInto(dir *os.Root, name string, src *os.Root, srcName string) error
 		return fmt.Errorf("refusing to copy %q: not a real folder (mode %s)", filepath.Join(src.Name(), srcName), info.Mode().Type())
 	}
 	var dirs []string
+	defer func() {
+		if err != nil && len(dirs) > 0 {
+			err = errors.Join(err, discardPartialCopy(dir, name))
+		}
+	}()
 	err = fs.WalkDir(src.FS(), srcName, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -576,8 +595,11 @@ func copyTreeInto(dir *os.Root, name string, src *os.Root, srcName string) error
 		}
 		target := filepath.Join(name, rel)
 		if d.IsDir() {
-			dirs = append(dirs, target)
-			return dir.Mkdir(target, 0o755)
+			if err := dir.Mkdir(target, 0o755); err != nil {
+				return err
+			}
+			dirs = append(dirs, target) // created by this copy
+			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil // skip symlinks/devices: drumdrop only produces regular files

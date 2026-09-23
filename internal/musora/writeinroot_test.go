@@ -54,7 +54,7 @@ func TestWriteInRootNeverWritesThroughASymlink(t *testing.T) {
 			t.Errorf("%s was written through a symlink: %q", p, b)
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(downloads, "05 - Five", "in.nfo"+tmpSuffix)); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(downloads, "05 - Five", "in.nfo"+TempSuffix)); !os.IsNotExist(err) {
 		t.Errorf("the temporary file is left behind: %v", err)
 	}
 }

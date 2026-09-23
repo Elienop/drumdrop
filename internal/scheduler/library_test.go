@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,9 +12,10 @@ import (
 	"github.com/elienop/drumdrop/internal/musora"
 )
 
-// errInjectedRename is the canned failure the cross-fs fallback test forces from
-// the injected rename seam, so moveToLibrary falls through to the copy-tree path.
-var errInjectedRename = errors.New("injected rename failure")
+// errInjectedRename is the canned failure the cross-fs fallback tests force
+// from the injected rename seam: the platform's "different filesystems"
+// answer, as a real rename wraps it, so the moves fall through to their copy.
+var errInjectedRename error = &os.LinkError{Op: "rename", Old: "src", New: "dst", Err: errCrossDevice}
 
 // seedLesson writes the four typical sidecar+video files of a finished lesson
 // into <dl>/Inst/Course/01 - L and returns the lesson dir plus the downloads

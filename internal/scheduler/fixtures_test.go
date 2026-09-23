@@ -115,6 +115,17 @@ func assertExist(t *testing.T, want bool, ps ...string) {
 	}
 }
 
+// assertContent fails unless every name in dir still holds its own name as
+// its content (seedSeason's files).
+func assertContent(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if got, err := os.ReadFile(filepath.Join(dir, n)); err != nil || string(got) != n {
+			t.Errorf("%s = %q, %v; want the file kept as it was", filepath.Join(dir, n), got, err)
+		}
+	}
+}
+
 // fiveLookAlikes are four lessons that share episode 5 of one show, each title
 // the first plus a tag or a suffix: the collision the name matcher could not
 // tell apart.

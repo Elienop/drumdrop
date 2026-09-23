@@ -151,8 +151,10 @@ func fetchToFile(url string, root *os.Root, dest string) error {
 	return writeInRoot(root, dest, resp.Body)
 }
 
-// tmpSuffix names the file writeInRoot writes before it takes its place.
-const tmpSuffix = ".drumdrop-part"
+// TempSuffix names the file writeInRoot writes before it takes its place. The
+// worker's partial-file cleanup matches it, so one a crash left behind is
+// never moved into the library.
+const TempSuffix = ".drumdrop-part"
 
 // writeInRoot writes r to name, a path inside the open folder root, creating
 // its folders. Everything goes through root (os.Root), so nothing is written
@@ -165,7 +167,7 @@ func writeInRoot(root *os.Root, name string, r io.Reader) error {
 	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return err
 	}
-	tmp := name + tmpSuffix
+	tmp := name + TempSuffix
 	if err := root.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err // a leftover of a crash, or something in the way
 	}

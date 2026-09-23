@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -85,9 +86,8 @@ func TestMovesStayInTheLibraryUnderARace(t *testing.T) {
 }
 
 // TestRenameNeverReplacesAnEntry (security L1) proves the rename refuses an
-// entry already at its destination rather than replacing it: an entry that
-// appears there after the move's checks is kept, and the move falls back to
-// its copy, which refuses it too (O_EXCL).
+// entry already at its destination rather than replacing it (the whole move
+// then refuses too, see TestMovesKeepAnEntryPlantedAtTheDestination).
 func TestRenameNeverReplacesAnEntry(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("the rename is by path on " + runtime.GOOS)
@@ -116,6 +116,73 @@ func TestRenameNeverReplacesAnEntry(t *testing.T) {
 		t.Error("renameIn took a name that is not a single part")
 	}
 	assertExist(t, true, filepath.Join(tmp, "x.mp4"))
+}
+
+// plantBeforeFirstRename puts a folder holding "racer.txt" at the destination
+// of the move's first rename, right before it (as another writer with access
+// to the library could, after the move's checks), then answers as the rename
+// would, or with a cross-filesystem error when viaCopy is set, so the move takes
+// its copy path. It returns where the entry was planted.
+func plantBeforeFirstRename(t *testing.T, viaCopy bool) *string {
+	t.Helper()
+	orig := renameAt
+	planted := new(string)
+	renameAt = func(from *os.Root, src string, to *os.Root, dst string) error {
+		if *planted == "" {
+			*planted = filepath.Join(to.Name(), dst)
+			seedSeason(t, *planted, "racer.txt")
+		}
+		if viaCopy {
+			return errInjectedRename
+		}
+		return orig(from, src, to, dst)
+	}
+	t.Cleanup(func() { renameAt = orig })
+	return planted
+}
+
+// TestMovesKeepAnEntryPlantedAtTheDestination (code #2, security LOW-2)
+// proves a whole move, in both layouts, never removes or writes into an entry
+// that appeared at its destination after its checks: the no-replace rename
+// refuses it, and so does the copy across filesystems, whose cleanup removes
+// only what the copy created. The move reports failure, and the lesson stays
+// whole in downloads.
+func TestMovesKeepAnEntryPlantedAtTheDestination(t *testing.T) {
+	for _, viaCopy := range []bool{false, true} {
+		if !viaCopy && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+			continue // the rename replaces by path there (renameat_other.go)
+		}
+		for _, layout := range []string{"", LayoutPlexTV} {
+			t.Run(fmt.Sprintf("copy=%v/layout=%s", viaCopy, layout), func(t *testing.T) {
+				tmp := t.TempDir()
+				dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+				scratch := filepath.Join(dl, "Course", "05 - Five")
+				seedSeason(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+				planted := plantBeforeFirstRename(t, viaCopy)
+				var moved string
+				var err error
+				if layout == LayoutPlexTV {
+					var res plexMoveResult
+					res, err = testMovePlexTV(t, lib, "Show", 1, 5, "Five", scratch,
+						plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, downloads: dl})
+					moved = res.seasonDir
+				} else {
+					moved, err = testMoveToLibrary(t, dl, lib, scratch)
+				}
+				if *planted == "" {
+					t.Fatal("the move never renamed")
+				}
+				if err == nil || moved != "" {
+					t.Errorf("move = %q, %v; want a refusal with the lesson left in downloads", moved, err)
+				}
+				assertContent(t, *planted, "racer.txt")
+				if got := readDirNames(t, *planted); len(got) != 1 {
+					t.Errorf("the planted entry holds %v, want only racer.txt", got)
+				}
+				assertContent(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+			})
+		}
+	}
 }
 
 // TestCopyNeverWritesThroughAPlantedSymlink (security L4, M07) proves the
@@ -180,4 +247,24 @@ func TestEpisodeNFONeverReplacesAPlantedSymlink(t *testing.T) {
 	if err == nil || res.seasonDir == "" {
 		t.Errorf("move = %+v, %v; want the video placed with a note about the nfo", res, err)
 	}
+}
+
+// TestEpisodeNFOSurvivesALeftoverTemporaryFile (security Info 3) proves a
+// temporary episode nfo left by a run that died does not stop the next write:
+// it is removed first, and the episode nfo takes the nfo's place.
+func TestEpisodeNFOSurvivesALeftoverTemporaryFile(t *testing.T) {
+	scratch := filepath.Join(t.TempDir(), "05 - Five")
+	seedSeason(t, scratch, "05 - Five.nfo", "05 - Five.nfo"+episodeTempSuffix)
+	dir, err := os.OpenRoot(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if err := writeScratchNFO(dir, "05 - Five.nfo", []byte("<episodedetails/>")); err != nil {
+		t.Fatalf("writeScratchNFO: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(scratch, "05 - Five.nfo")); string(got) != "<episodedetails/>" {
+		t.Errorf("nfo = %q, want the episode nfo", got)
+	}
+	assertExist(t, false, filepath.Join(scratch, "05 - Five.nfo"+episodeTempSuffix))
 }
