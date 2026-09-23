@@ -478,6 +478,47 @@ func TestWorkerShutdownIsRequeuedNotSkipped(t *testing.T) {
 	}
 }
 
+// shutdownOnConfirm is a real store whose ConfirmDownload is followed by a
+// shutdown: the download is complete and confirmed, and drumdrop starts
+// stopping before it is placed.
+type shutdownOnConfirm struct {
+	*database.Store
+	shutdown func()
+}
+
+func (s shutdownOnConfirm) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
+	err := s.Store.ConfirmDownload(ctx, jobID, id)
+	s.shutdown()
+	return err
+}
+
+// TestWorkerShutdownAfterTheDownloadFinishedStillRecordsIt (D66) runs a
+// shutdown landing once the download finished and was confirmed, on a real
+// store: the files are complete, so they are placed and recorded anyway (the
+// other lessons' files are read, and the record written, past the dead
+// context), never left for a second download after the restart.
+func TestWorkerShutdownAfterTheDownloadFinishedStillRecordsIt(t *testing.T) {
+	ctx := context.Background()
+	w, s, _, f, _ := realWorker(t, "")
+	if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, shutdown := context.WithCancel(ctx)
+	defer shutdown()
+	w.Store = shutdownOnConfirm{Store: s, shutdown: shutdown}
+	if _, err := w.RunOnce(runCtx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	l, err := s.GetLesson(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(w.Cfg.LibraryDir, "Beginner Course", "05 - Lesson A")
+	if l.Status != database.StatusDownloaded || l.OutputDir.String != want {
+		t.Errorf("lesson = %+v, want it downloaded into %q", l, want)
+	}
+}
+
 // TestWorkerShutdownAfterResolveIsNotAFailure (D66) proves a shutdown landing
 // after the lesson was resolved, while its row or the other lessons' files are
 // read (the read fails with the dead context), records no failure: the job
