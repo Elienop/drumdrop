@@ -10,8 +10,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        // LOCAL EDIT (owner's ruling 2026-09-23): upstream's red focus ring
+        // (focus-visible:ring-destructive/20, dark:…/40) is removed, so a
+        // destructive button keeps the base amber ring-ring/50 like every
+        // other control: 3.0:1 against the dark background, where red/40 was
+        // under 2:1. Re-apply this when updating the component from upstream.
         destructive:
-          "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40",
+          "bg-destructive text-white hover:bg-destructive/90 dark:bg-destructive/60",
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:
