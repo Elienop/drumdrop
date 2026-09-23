@@ -120,7 +120,9 @@ downloads them **one at a time** with **automatic retry** (3 attempts, backoff
 5s → 30s → 2m). `sync` is the one-shot equivalent of a single daemon cycle. On
 startup the daemon reclaims any job left `running` by a previous crash, then runs
 a cycle immediately and again every `--interval`. `Ctrl-C` (SIGINT) or SIGTERM
-shuts it down cleanly after the in-flight download finishes.
+shuts it down cleanly after the in-flight download finishes. Run **one** `daemon` or
+`serve` per database: that startup step takes every `running` job for a crashed one,
+so a second process started beside a live one would queue its download again.
 
 ```bash
 drumdrop daemon                         # auto-sync every 12h until stopped
@@ -241,20 +243,42 @@ folders inside that one dir.
 
 Deleting a lesson (or a follow with its files) only ever removes files inside the downloads
 and library dirs. A path that reaches outside them through a symlinked folder is refused,
-and so is the root of either dir. The trade-off: a symlink you placed inside the library on
+and so is the root of either dir. A path outside both dirs is refused too, even when
+nothing is there any more: in the default layout a lesson records its folder by its full
+path, so after the library is mounted at a new path its files are elsewhere, and drumdrop
+will not call them deleted. The trade-off: a symlink you placed inside the library on
 purpose, pointing at another disk, is refused too, so lessons behind it can't be deleted
 from drumdrop. If a file can't be removed, the lesson is kept (it reads downloaded, and
-records only the files still there), the delete answers with an error, and the detail goes
-to the server log. Deleting a follow with its files keeps the follow and all its lessons in
-that case, so no file is left that drumdrop no longer tracks.
+records the files still there, or, for a folder outside both dirs, the path it had), the
+delete answers with an error, and the detail goes to the server log. Deleting a follow with
+its files keeps the follow and all its lessons in that case, so no file is left that
+drumdrop no longer tracks.
 
-A delete stops the lesson's downloads first. While it runs, the lesson can't be downloaded
-again (a download or retry is refused until it finishes), so a delete never removes files
-a newer download just wrote. A download it stops leaves nothing behind that no lesson
-records: what it had written is removed, except anything a lesson still records. Removing
-a follow *without* its files removes no file at all: its downloads stop, and what they had
-written stays. It never stops another follow's download, even one it queued. Canceling a
-re-download leaves a lesson that still has its earlier files as downloaded.
+A delete stops the lesson's downloads first. While it runs, the lesson can't be downloaded,
+retried, skipped or deleted again (each is refused until it finishes), so a delete never
+removes files a newer download just wrote; the API's lesson says so (`deleting`). A delete
+holds the lesson for two minutes at a time and renews that while it runs, so if drumdrop
+stops in the middle of one, the lesson is released by itself two minutes later. A download
+a delete stops leaves nothing behind that no lesson records: what it had written is
+removed, except anything another lesson records. Removing a follow *without* its files
+removes nothing the downloads finished: they stop, what they had written stays, and only
+yt-dlp's partial files go. It never stops another follow's download, even one it queued.
+Canceling a re-download leaves a lesson that still has its earlier files as downloaded.
+
+Skipping a lesson stops its queued or running download for good: that download records
+nothing, and what it had written is removed (the lesson's earlier, recorded files stay).
+Syncs then leave the lesson alone until it is un-skipped. A download that fails every
+attempt removes its lesson folder from the downloads dir, unless a lesson records something
+in it; then, or if the records can't be read, only yt-dlp's partial files go. A download
+whose result could not be recorded (the lesson's own record, or with a library the other
+lessons' records, can't be read) is not started at all: the lesson is marked failed and
+tried again next cycle. Whenever the records can't be read, a stopped or failed download
+removes nothing but, at most, yt-dlp's partial files.
+
+drumdrop writes the files it fetches itself (the poster, resources, play-along audio,
+sheet music and the `.nfo`) through the downloads dir it holds open, never through a
+symlink out of it. yt-dlp, a separate program, writes the video by path, so the downloads
+dir must not be writable by anyone you don't trust.
 
 #### Plex TV layout
 
@@ -283,7 +307,8 @@ Each course becomes one *show*, each lesson an *episode*:
   it stays true if the library is mounted at another path or the setting is spelled another
   way. Whether a file is claimed is decided by the file itself, not its spelling: the same
   file reached under another name (a hard link, or another letter case on a
-  case-insensitive disk) counts as claimed too.
+  case-insensitive disk, in the file's name or in any of its folders') counts as claimed
+  too.
 - If a lesson's record is ever **damaged** (not a list of `<Show>/Season NN/<entry>` paths,
   say after editing the database by hand), drumdrop can't tell what that lesson owns, so it
   refuses every delete and every plex-tv move until the record is fixed, rather than guess;
@@ -301,8 +326,13 @@ Each course becomes one *show*, each lesson an *episode*:
   overwrites or removes another lesson's file: if one of its names is taken by another
   lesson, the move is refused and the lesson stays whole in downloads (logged). Every write
   and removal in the library goes through the library folder itself, so a symlink planted
-  in it can't send one outside: the season folder must resolve inside the library, and each
-  copied file is created afresh rather than written through whatever is at its name. A file at one
+  in it can't send one outside: the season folder must resolve inside the library, each
+  copied file is created afresh rather than written through whatever is at its name, and
+  on Linux and macOS each rename acts on the folders drumdrop holds open and never
+  replaces an entry, so a folder swapped for a symlink after the checks can't redirect it
+  either. On Windows the rename goes by path, so that last guarantee does not hold there.
+  The default layout's move works the same way, and never replaces a library folder
+  another lesson records (the lesson stays in downloads, logged). A file at one
   of its names that no lesson claims (say, one kept when a follow was deleted without its
   files) is replaced, and that is logged. A name too long for the filesystem (255 bytes)
   has its title shortened; if even that can't fit, the move is refused.
