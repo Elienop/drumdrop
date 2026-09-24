@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
 import { toast } from "sonner"
 import { newTestQueryClient, ORIGIN, renderWithProviders, sendEvent, server } from "@/test/msw"
+import { finishClosing, holdClosingOverlays } from "@/test/closing"
 import { clearToken, setToken } from "@/lib/auth"
 import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
@@ -1647,6 +1648,55 @@ describe("when a download starts", () => {
     await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("failed"))
     expect(screen.queryByRole("menu")).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
+  })
+
+  // A closing Radix menu stays mounted for its exit fade, and in Chromium it
+  // then showed the new items and still took a click: one at Download's old
+  // spot canceled the download it had just started (round 5h). So the close
+  // a start or an end makes has no fade: the class below sets `animation:
+  // none !important` on the closed menu, and Presence then removes it before
+  // a paint. jsdom has no stylesheet, so holdClosingOverlays stands in for
+  // the fade and this checks which close gets the class; the browser run
+  // checked what the class does.
+  it("a menu closed by a start leaves with no exit fade; one the user closes keeps its fade", async () => {
+    const NO_FADE = "data-[state=closed]:animate-none!"
+    holdClosingOverlays()
+    try {
+      const pending: LessonDTO = { ...lessons[1], railcontent_id: 290, title: "Swiss Army Triplet" }
+      let now: LessonDTO = pending
+      server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([now])))
+      setToken("test-token")
+      const user = userEvent.setup()
+      renderLessons()
+      const closing = () => document.querySelector('[role="menu"][data-state="closed"]')
+
+      await openAt(user, "Swiss Army Triplet", "Download")
+      now = { ...pending, status: "downloading" }
+      act(() =>
+        sendEvent({
+          kind: "download_started",
+          job_id: 92,
+          railcontent_id: 290,
+          title: "Swiss Army Triplet",
+          attempt: 1,
+          max_attempts: 3,
+        }),
+      )
+      await waitFor(() => expect(closing()).not.toBeNull())
+      expect(closing()!.className.split(/\s+/)).toContain(NO_FADE)
+      act(() => finishClosing())
+      expect(closing()).toBeNull()
+
+      // The user's own close after that keeps the fade.
+      await openAt(user, "Swiss Army Triplet", "Copy path")
+      expect(screen.getByRole("menu").className.split(/\s+/)).not.toContain(NO_FADE)
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(closing()).not.toBeNull())
+      expect(closing()!.className.split(/\s+/)).not.toContain(NO_FADE)
+      act(() => finishClosing())
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it("an open menu stays open, its highlight where it was, when a refetch changes nothing about its lesson", async () => {

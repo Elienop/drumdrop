@@ -102,21 +102,42 @@ function rowNote(lesson: LessonDTO): string | null {
 // hands focus back to the ⋯ trigger, as Escape does, and opening it again
 // shows the current items. Anything else about the row (a refetch, another
 // lesson's event, Cancel learning its job) leaves the menu open.
-function RowMenu({ downloading, children }: { downloading: boolean; children: React.ReactNode }) {
+//
+// `children` gets the class for the menu's content: it cuts the close short.
+function RowMenu({
+  downloading,
+  children,
+}: {
+  downloading: boolean
+  children: (contentClassName: string | undefined) => React.ReactNode
+}) {
   // What `downloading` was when the menu opened; null while it is closed.
   const [openedAs, setOpenedAs] = React.useState<boolean | null>(null)
-  // Reset during render, not in an effect: the render that brings the
-  // changed items then commits with the menu closed, so no frame of them
-  // is ever on screen to take a click or an Enter. Clearing it (rather than
-  // only deriving `open`) keeps the menu from reopening by itself if the
-  // lesson flips back.
-  if (openedAs !== null && openedAs !== downloading) setOpenedAs(null)
+  // Whether the last close was this one, not the user's.
+  const [cut, setCut] = React.useState(false)
+  // Reset during render, not in an effect, so the render that brings the
+  // changed items commits with the menu already closed. Clearing it (rather
+  // than only deriving `open`) keeps the menu from reopening by itself if
+  // the lesson flips back.
+  if (openedAs !== null && openedAs !== downloading) {
+    setOpenedAs(null)
+    setCut(true)
+  }
   return (
     <DropdownMenu
       open={openedAs === downloading}
-      onOpenChange={(open) => setOpenedAs(open ? downloading : null)}
+      onOpenChange={(open) => {
+        setOpenedAs(open ? downloading : null)
+        if (open) setCut(false)
+      }}
     >
-      {children}
+      {/* Without its exit animation, Radix's Presence removes the menu in
+          the same commit, before a paint. With it, the closing menu stays
+          on screen for the fade, showing the new items, and still takes a
+          click: measured in Chromium, a click in that frame canceled the
+          download it had just started. A close the user makes keeps the
+          fade. */}
+      {children(cut ? "data-[state=closed]:animate-none!" : undefined)}
     </DropdownMenu>
   )
 }
@@ -496,88 +517,92 @@ export function Lessons() {
                       </TableCell>
                       <TableCell className="text-right">
                         <RowMenu downloading={lesson.status === "downloading"}>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Actions for ${lesson.title}`}
-                              data-row-actions={lesson.railcontent_id}
-                            >
-                              <MoreHorizontal />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuGroup>
-                              {busy ? (
-                                copyItem
-                              ) : lesson.status === "downloading" ? (
-                                // Copy path first, Cancel download after
-                                // (owner's ruling 2026-09-24, (q)). An open menu
-                                // no longer changes into this one: RowMenu
-                                // closes it when the download starts (ruling
-                                // (v)). The order stays, so the first item,
-                                // where a reopened menu's highlight lands, is
-                                // still the harmless one.
-                                <>
-                                  {copyItem}
-                                  <DropdownMenuItem
-                                    key="cancel"
-                                    disabled={jobId === undefined}
-                                    onSelect={() => {
-                                      if (jobId !== undefined) cancel.mutate({ jobId, lesson })
-                                    }}
-                                  >
-                                    Cancel download
-                                  </DropdownMenuItem>
-                                </>
-                              ) : (
-                                <>
-                                  {lesson.status === "skipped" && (
-                                    <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
-                                      Un-skip
-                                    </DropdownMenuItem>
-                                  )}
-                                  {/* A downloaded lesson WITH a note is a failed
-                                      re-download that kept the earlier files:
-                                      syncs leave it alone, so Download is how
-                                      to try again (owner's ruling 2026-09-24,
-                                      (h)). */}
-                                  {(lesson.status !== "downloaded" || note) && (
-                                    <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
-                                      Download
-                                    </DropdownMenuItem>
-                                  )}
-                                  {(lesson.status === "pending" ||
-                                    lesson.status === "failed") && (
-                                    <DropdownMenuItem
-                                      key="skip"
-                                      onSelect={() => openRowDialog(setSkipping, lesson)}
-                                    >
-                                      Skip
-                                    </DropdownMenuItem>
-                                  )}
-                                  {copyItem}
-                                </>
-                              )}
-                            </DropdownMenuGroup>
-                            {/* Whatever the status: a canceled or failed
-                                re-download, or a delete that stopped the job
-                                but kept files, leaves a lesson that still owns
-                                files (BACKLOG D63). */}
-                            {lesson.has_files && !busy && (
-                              <>
-                                <DropdownMenuSeparator />
+                          {(contentClassName) => (
+                            <>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Actions for ${lesson.title}`}
+                                  data-row-actions={lesson.railcontent_id}
+                                >
+                                  <MoreHorizontal />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className={contentClassName}>
                                 <DropdownMenuGroup>
-                                  <DropdownMenuItem
-                                    variant="destructive"
-                                    onSelect={() => openRowDialog(setDeleting, lesson)}
-                                  >
-                                    Delete
-                                  </DropdownMenuItem>
+                                  {busy ? (
+                                    copyItem
+                                  ) : lesson.status === "downloading" ? (
+                                    // Copy path first, Cancel download after
+                                    // (owner's ruling 2026-09-24, (q)). An open menu
+                                    // no longer changes into this one: RowMenu
+                                    // closes it when the download starts (ruling
+                                    // (v)). The order stays, so the first item,
+                                    // where a reopened menu's highlight lands, is
+                                    // still the harmless one.
+                                    <>
+                                      {copyItem}
+                                      <DropdownMenuItem
+                                        key="cancel"
+                                        disabled={jobId === undefined}
+                                        onSelect={() => {
+                                          if (jobId !== undefined) cancel.mutate({ jobId, lesson })
+                                        }}
+                                      >
+                                        Cancel download
+                                      </DropdownMenuItem>
+                                    </>
+                                  ) : (
+                                    <>
+                                      {lesson.status === "skipped" && (
+                                        <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
+                                          Un-skip
+                                        </DropdownMenuItem>
+                                      )}
+                                      {/* A downloaded lesson WITH a note is a failed
+                                          re-download that kept the earlier files:
+                                          syncs leave it alone, so Download is how
+                                          to try again (owner's ruling 2026-09-24,
+                                          (h)). */}
+                                      {(lesson.status !== "downloaded" || note) && (
+                                        <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
+                                          Download
+                                        </DropdownMenuItem>
+                                      )}
+                                      {(lesson.status === "pending" ||
+                                        lesson.status === "failed") && (
+                                        <DropdownMenuItem
+                                          key="skip"
+                                          onSelect={() => openRowDialog(setSkipping, lesson)}
+                                        >
+                                          Skip
+                                        </DropdownMenuItem>
+                                      )}
+                                      {copyItem}
+                                    </>
+                                  )}
                                 </DropdownMenuGroup>
-                              </>
-                            )}
-                          </DropdownMenuContent>
+                                {/* Whatever the status: a canceled or failed
+                                    re-download, or a delete that stopped the job
+                                    but kept files, leaves a lesson that still owns
+                                    files (BACKLOG D63). */}
+                                {lesson.has_files && !busy && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuGroup>
+                                      <DropdownMenuItem
+                                        variant="destructive"
+                                        onSelect={() => openRowDialog(setDeleting, lesson)}
+                                      >
+                                        Delete
+                                      </DropdownMenuItem>
+                                    </DropdownMenuGroup>
+                                  </>
+                                )}
+                              </DropdownMenuContent>
+                            </>
+                          )}
                         </RowMenu>
                       </TableCell>
                     </TableRow>
