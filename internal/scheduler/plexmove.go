@@ -206,7 +206,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	if err != nil {
 		return fail(err, nil)
 	}
-	listing, err := listFolder(seasonRoot)
+	listing, err := listSeason(seasonRoot)
 	if err != nil {
 		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
 	}
@@ -287,6 +287,12 @@ func atEpisodeBase(p, seasonDir, base string, listing map[string]bool) bool {
 	isDir, ok := listing[filepath.Base(p)]
 	return ok && library.EpisodeEntry(base, filepath.Base(p), isDir, listing)
 }
+
+// listSeason lists the season folder the plex-tv move holds open. A package
+// variable so a test can make the listing fail: a folder that opens but can
+// not be listed can't be made without root (opening a folder and listing it
+// need the same permission).
+var listSeason = listFolder
 
 // listFolder lists the folder dir holds open (name -> isDir; a symlink is not
 // a folder).

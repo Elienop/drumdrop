@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/library"
@@ -124,9 +125,14 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			return nil, err
 		}
 		rec.OutputDir = pl.dir
-		rec.VideoPath, rec.Bytes = "", 0
 		if video != "" {
 			rec.VideoPath, rec.Bytes = filepath.Join(pl.dir, filepath.Base(video)), bytes
+		} else {
+			// No video came with this download (resources only, say): a video
+			// the lesson's folder keeps from its earlier download (a placement
+			// replaces only what the download brings back) is still the one
+			// the lesson records.
+			rec.VideoPath, rec.Bytes = lessonVideo(pl.dir)
 		}
 		return pl, nil
 	}
@@ -155,9 +161,16 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		}
 		rec.LibraryEntries = entries
 		if res.pending != nil {
-			rec.OutputDir, rec.VideoPath = res.seasonDir, res.videoPath
-			if !w.Cfg.ResourcesOnly && res.videoPath != "" {
-				if info, serr := os.Stat(res.videoPath); serr == nil {
+			// The video is the one placed, or else one of the episode's
+			// recorded entries it keeps (owner ruling 2026-09-24 (j)): a
+			// resources-only re-download keeps the earlier video, recorded.
+			video := res.videoPath
+			if video == "" {
+				video = keptVideo(res.kept, res.episodeBase)
+			}
+			rec.OutputDir, rec.VideoPath = res.seasonDir, video
+			if video != "" {
+				if info, serr := os.Stat(video); serr == nil {
 					rec.Bytes = info.Size()
 				}
 			}
@@ -229,6 +242,17 @@ func keptInLibrary(prev database.Lesson, lib string, entries []string) bool {
 // library lib.
 func inLibrary(prev database.Lesson, lib string) bool {
 	return prev.OutputDir.Valid && prev.OutputDir.String != "" && library.Inside(lib, prev.OutputDir.String)
+}
+
+// keptVideo is the first, in name order, of the entries a plex-tv placement
+// keeps that is a video of the episode base (isLessonVideoName), or "".
+func keptVideo(kept []string, base string) string {
+	for _, p := range slices.Sorted(slices.Values(kept)) {
+		if isLessonVideoName(filepath.Base(p), base) {
+			return p
+		}
+	}
+	return ""
 }
 
 // checkBeforeDownload is what a download needs before it starts, so a

@@ -833,12 +833,20 @@ func isPartialName(name, base string) bool {
 // On ResourcesOnly (no video is produced) or when no matching mp4 exists (a
 // video-less song, or a different container extension) it returns "" and 0 so
 // FinishDownload records no video metadata rather than a path that does not
-// exist. ReadDir + string prefix/suffix matching is used (not filepath.Glob) so
-// glob metacharacters surviving Sanitize in the base can never break the match.
+// exist.
 func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64) {
 	if w.Cfg.ResourcesOnly {
 		return "", 0
 	}
+	return lessonVideo(lessonDir)
+}
+
+// lessonVideo is producedVideo for any lesson folder: the first, in name
+// order, of its videos named after the folder (isLessonVideoName), and the
+// sum of their sizes; "" and 0 when it holds none. ReadDir + string
+// prefix/suffix matching is used (not filepath.Glob) so glob metacharacters
+// surviving Sanitize in the base can never break the match.
+func lessonVideo(lessonDir string) (videoPath string, bytes int64) {
 	base := filepath.Base(lessonDir)
 	entries, err := os.ReadDir(lessonDir)
 	if err != nil {
