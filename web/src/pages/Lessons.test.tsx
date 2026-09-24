@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it, vi } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
 import { toast } from "sonner"
-import { newTestQueryClient, ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { newTestQueryClient, ORIGIN, renderWithProviders, sendEvent, server } from "@/test/msw"
+import { clearToken, setToken } from "@/lib/auth"
 import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import type { JobDTO, LessonDTO } from "@/types"
@@ -1281,4 +1282,89 @@ it("a long follow name truncates inside the filter badge, with the full name in 
   expect(badge).toHaveClass("min-w-0", "shrink")
   expect(badge).not.toHaveClass("shrink-0")
   expect(badge).toHaveAttribute("title", `Filtered by “${title}”`)
+})
+
+// The row moves to "downloading" as soon as the server has saved it so, not
+// when the download ends (UI review round 5d, Medium 1). The worker emits
+// download_started right after StartDownload saves the lesson as
+// 'downloading' with its job running (internal/scheduler/worker.go), and the
+// page refreshes on it.
+describe("when a download starts", () => {
+  // This hook runs before RTL unmounts the page, so the stream's teardown on
+  // the token change is a React update: wrap it.
+  afterEach(() => act(() => clearToken({ silent: true })))
+
+  const FAILED_NOTE = "This download attempt failed. Check the server log, then Download again."
+
+  it("the row reads downloading, drops its old note and offers Cancel, with no flicker and no lost progress", async () => {
+    const failed: LessonDTO = {
+      ...lessons[1],
+      railcontent_id: 101,
+      title: "Flam Accent",
+      status: "failed",
+      error: FAILED_NOTE,
+    }
+    // What the server stores once StartDownload has run: the lesson is
+    // 'downloading' and keeps its old error (only a success clears it), and
+    // its job is running.
+    const downloading: LessonDTO = { ...failed, status: "downloading" }
+    const running: JobDTO = { ...job, id: 77, railcontent_id: 101, status: "running", attempts: 1 }
+    let started = false
+    // Holds the refresh the event triggers, so the test can look at the page
+    // while it is in flight.
+    let release: () => void = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, async () => {
+        if (!started) return HttpResponse.json([failed])
+        await held
+        return HttpResponse.json([downloading])
+      }),
+      http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json(started ? [running] : [])),
+    )
+    setToken("test-token") // the event stream opens only with a stored token
+    const user = userEvent.setup()
+    renderLessons()
+
+    const row = (await screen.findByText(FAILED_NOTE)).closest("tr")!
+    expect(within(row).getByText("failed")).toBeInTheDocument()
+
+    started = true
+    act(() =>
+      sendEvent({
+        kind: "download_started",
+        job_id: 77,
+        railcontent_id: 101,
+        title: "Flam Accent",
+        attempt: 1,
+        max_attempts: 3,
+      }),
+    )
+    act(() => sendEvent({ kind: "download_progress", job_id: 77, pct: 42 }))
+
+    // While the refresh is in flight the row stays on screen with its live
+    // progress: no "Loading…" swap.
+    const bar = await within(row).findByRole("progressbar")
+    expect(bar).toHaveAttribute("aria-valuenow", "42")
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument()
+    expect(row).toBeInTheDocument()
+
+    release()
+    const current = () =>
+      screen.getByRole("button", { name: "Actions for Flam Accent" }).closest("tr")!
+    await waitFor(() => expect(within(current()).getByText("downloading")).toBeInTheDocument())
+    expect(within(current()).queryByText("failed")).not.toBeInTheDocument()
+    expect(screen.queryByText(FAILED_NOTE)).not.toBeInTheDocument()
+    // The progress the page had is still there after the refresh.
+    expect(within(current()).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "42")
+
+    // The running jobs were refreshed too, so Cancel knows its job.
+    await user.click(screen.getByRole("button", { name: "Actions for Flam Accent" }))
+    const cancel = await screen.findByRole("menuitem", { name: "Cancel download" })
+    expect(cancel).not.toHaveAttribute("aria-disabled")
+    expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+      "Cancel download",
+      "Copy path",
+    ])
+  })
 })

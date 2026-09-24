@@ -1,8 +1,9 @@
-import { expect, it } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { expect, it, onTestFinished } from "vitest"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
-import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { ORIGIN, renderWithProviders, sendEvent, server } from "@/test/msw"
+import { clearToken, setToken } from "@/lib/auth"
 import { Toaster } from "@/components/ui/sonner"
 import type { JobDTO, LessonDTO } from "@/types"
 import { Queue } from "./Queue"
@@ -323,4 +324,42 @@ it("a cancel answered by a proxy's HTML page toasts a sentence, never a JSON par
     screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again."),
   ).toBeInTheDocument()
   expect(screen.queryByText(/JSON|Unexpected token|HTTP 502/)).not.toBeInTheDocument()
+})
+
+// A job reads running as soon as its download starts, not when it ends (UI
+// review round 5d, Medium 1): the worker emits download_started after it has
+// claimed the job and saved its lesson as 'downloading', and the page
+// refreshes on it.
+it("a queued job reads running once its download starts", async () => {
+  onTestFinished(() => act(() => clearToken({ silent: true })))
+  const queued: JobDTO = { ...runningJob, id: 21, status: "queued", attempts: 0, started_at: null }
+  let started = false
+  server.use(
+    http.get(`${ORIGIN}/api/jobs`, () =>
+      HttpResponse.json([started ? { ...queued, status: "running", attempts: 1 } : queued]),
+    ),
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
+  )
+  setToken("test-token") // the event stream opens only with a stored token
+  renderWithProviders(<Queue />)
+
+  const row = () => screen.getByText("Double Stroke Roll").closest("tr")!
+  await screen.findByText("Double Stroke Roll")
+  expect(within(row()).getByText("queued")).toBeInTheDocument()
+
+  started = true
+  act(() =>
+    sendEvent({
+      kind: "download_started",
+      job_id: 21,
+      railcontent_id: 200,
+      title: "Double Stroke Roll",
+      attempt: 1,
+      max_attempts: 3,
+    }),
+  )
+
+  await waitFor(() => expect(within(row()).getByText("running")).toBeInTheDocument())
+  expect(within(row()).queryByText("queued")).not.toBeInTheDocument()
+  expect(within(row()).getByRole("button", { name: /cancel/i })).toBeEnabled()
 })

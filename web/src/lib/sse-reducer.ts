@@ -106,10 +106,16 @@ export function seedFromSnapshot(state: SSEState, snapshot: ProgressEvent[]): SS
 }
 
 // invalidationKeys returns the TanStack Query keys to invalidate for an event.
-// Terminal/coarse events change persisted state (lessons/jobs/summary); pure
-// progress does not.
+// Events that follow a write to persisted state (lessons/jobs/summary) refresh
+// it; pure progress does not. download_started is emitted right after the
+// worker saves the lesson as 'downloading' (and its job is running), so the
+// row's badge, note and menu, and the Queue's job row, move on at the start of
+// a download, not only when it ends. Refreshing keeps the cached data on
+// screen while it refetches, and live progress lives in this reducer, not in
+// the query cache, so neither flickers.
 export function invalidationKeys(e: ProgressEvent): (readonly string[])[] {
   switch (e.kind) {
+    case "download_started":
     case "download_ok":
     case "attempt_failed":
     case "lesson_skipped":
