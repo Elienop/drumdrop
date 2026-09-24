@@ -47,7 +47,7 @@ const coachesSegment = "coaches"
 // names another it's ErrBrandMismatch. With neither, the brand is
 // DefaultBrand.
 func NormalizeInstructor(input, brand string) (slug, outBrand string, err error) {
-	if brand = lowerASCII(strings.TrimSpace(brand)); brand != "" {
+	if brand = foldBrand(brand); brand != "" {
 		if err := ValidateBrand(brand); err != nil {
 			return "", "", err
 		}
@@ -74,6 +74,27 @@ func NormalizeInstructor(input, brand string) (slug, outBrand string, err error)
 		return "", "", fmt.Errorf("%w: link %q, given %q", ErrBrandMismatch, linkBrand, brand)
 	}
 	return slug, brand, nil
+}
+
+// foldBrand is a brand as the user may write it (" Pianote") in the form
+// Musora files it under: trimmed, its ASCII letters lower-cased (lowerASCII).
+// It checks nothing: the allowlist (ValidateBrand) is the guard.
+func foldBrand(brand string) string {
+	return lowerASCII(strings.TrimSpace(brand))
+}
+
+// NodeBrand settles the brand of a node follow, the web's and the CLI's alike:
+// the one given, folded as NormalizeInstructor folds one (foldBrand), or
+// DefaultBrand when none is. One Musora doesn't have is refused (ErrBadBrand).
+func NodeBrand(brand string) (string, error) {
+	brand = foldBrand(brand)
+	if brand == "" {
+		return DefaultBrand, nil
+	}
+	if err := ValidateBrand(brand); err != nil {
+		return "", err
+	}
+	return brand, nil
 }
 
 // isLink reports whether s is meant as a web link: it starts with an http or

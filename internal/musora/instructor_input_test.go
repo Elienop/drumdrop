@@ -117,3 +117,20 @@ func TestNormalizeInstructorBrand(t *testing.T) {
 		t.Errorf("singeo link, brand drumeo: err = %v, want ErrBrandMismatch", err)
 	}
 }
+
+// TestNodeBrand proves a node follow's brand is folded as an instructor's is
+// (trimmed, ASCII letters lower-cased), defaults when empty, and still has to
+// be one of Musora's: the Kelvin sign (U+212A), which strings.ToLower folds to
+// "k", is never taken for an ASCII letter.
+func TestNodeBrand(t *testing.T) {
+	for given, want := range map[string]string{"Pianote": "pianote", " GUITAREO ": "guitareo", "drumeo": "drumeo", "": DefaultBrand, "  ": DefaultBrand} {
+		if got, err := NodeBrand(given); err != nil || got != want {
+			t.Errorf("NodeBrand(%q) = %q, %v; want %q", given, got, err, want)
+		}
+	}
+	for _, given := range []string{"rockstar", "Pian ote", "pianote\n2", "drumeoK"} {
+		if got, err := NodeBrand(given); !errors.Is(err, ErrBadBrand) {
+			t.Errorf("NodeBrand(%q) = %q, %v; want ErrBadBrand", given, got, err)
+		}
+	}
+}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/musora"
@@ -82,5 +84,31 @@ func TestFollowInstructorStoresTheBrandsName(t *testing.T) {
 				t.Fatalf("follows = %+v, want one titled %q in %s", follows, c.wantName, c.brand)
 			}
 		})
+	}
+}
+
+// TestFollowNodeFoldsItsBrand proves the CLI's node follow takes --brand in
+// any case, as the web's add and the instructor follow do, and stores it as
+// Musora files it.
+func TestFollowNodeFoldsItsBrand(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"result":[{"id":409875,"title":"Course A"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(musora.SetSanityBase(srv.URL))
+	store := newServeTestStore(t)
+	args, err := parseFollowArgs([]string{"409875", "--brand", "Pianote"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := followNode(t.Context(), store, args.positionals[0], args.brand, args.quality); err != nil {
+		t.Fatalf("followNode: %v", err)
+	}
+	follows, err := store.ListFollows(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(follows) != 1 || follows[0].Brand != "pianote" {
+		t.Fatalf("follows = %+v, want one in pianote", follows)
 	}
 }

@@ -99,15 +99,14 @@ func cmdFollow(argv []string) error {
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is
-// acceptable) and records a node follow. An empty brand is the default; one
-// Musora doesn't have is refused before Musora is asked, as the web's add
-// does, since every lesson of the follow is stored with it. A coach-page link
+// acceptable) and records a node follow. The brand is settled as the web's
+// add settles it (musora.NodeBrand): any case, empty for the default, and one
+// Musora doesn't have is refused before Musora is asked, since every lesson of
+// the follow is stored with it. A coach-page link
 // is refused too: its number is the instructor's, not a lesson's or course's.
 func followNode(ctx context.Context, store *database.Store, target, brand, quality string) error {
-	if brand == "" {
-		brand = musora.DefaultBrand
-	}
-	if err := musora.ValidateBrand(brand); err != nil {
+	brand, err := musora.NodeBrand(brand)
+	if err != nil {
 		return fmt.Errorf("follow: --brand must be drumeo, pianote, guitareo, singeo or playbass: %w", err)
 	}
 	if musora.IsCoachLink(target) {

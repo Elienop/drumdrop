@@ -124,11 +124,8 @@ func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 	// with its input (a pasted link names one), so it's checked there.
 	switch req.Kind {
 	case "node":
-		brand := req.Brand
-		if brand == "" {
-			brand = musora.DefaultBrand
-		}
-		if err := musora.ValidateBrand(brand); err != nil {
+		brand, err := musora.NodeBrand(req.Brand)
+		if err != nil {
 			writeLookupErr(w, "add follow", err, msgAddUnreachable)
 			return
 		}
