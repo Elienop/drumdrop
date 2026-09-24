@@ -23,9 +23,10 @@ import (
 // owner's files once the download was recorded). The attempt fails, the
 // library copy stays recorded and untouched, and after its attempts the job
 // fails with failKeptInLibrary. A lesson not in the library yet still falls
-// back to downloads, and so does every plex-tv lesson, whose fallback never
-// touched the library (owner ruling 2026-09-24 (i); see
-// TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord).
+// back to downloads, and so does a plex-tv lesson whose season-folder files
+// stay recorded, since that fallback touches nothing in the library (owner
+// ruling 2026-09-24 (i); see TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord,
+// and worker_keptlib_test.go for rows written under the other layout).
 
 // refuseIntoLessonFolder refuses (a permission error) every rename from
 // outside root into its folder dir, as the code seat's probe did: the

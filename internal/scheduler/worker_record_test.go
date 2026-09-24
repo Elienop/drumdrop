@@ -120,8 +120,9 @@ func TestWorkerPlexTvReDownloadReplacesByRecord(t *testing.T) {
 
 // TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord proves a plex-tv move
 // refused because another lesson owns one of its names, for a lesson already
-// in the library, falls back to downloads (owner ruling 2026-09-24 (i): ruling
-// (f) is for the default layout only): the download is recorded in its
+// in the library with a record of its season-folder entries, falls back to
+// downloads (owner ruling 2026-09-24 (i): that fallback touches nothing in
+// the library, and the entries stay recorded): the download is recorded in its
 // downloads folder, the previous library entries stay recorded as the
 // lesson's and untouched, the other lesson's file too, and the log says where
 // the lesson was kept.
