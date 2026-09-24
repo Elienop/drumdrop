@@ -554,19 +554,23 @@ func TestWorkerShutdownAfterTheDownloadFinishedStillRecordsIt(t *testing.T) {
 }
 
 // TestWorkerShutdownAfterResolveIsNotAFailure (D66) proves a shutdown landing
-// after the lesson was resolved, while its row or the other lessons' files are
-// read (the read fails with the dead context), records no failure: the job
-// is left running for the requeue, and its end is reported as a shutdown.
+// after the lesson was resolved, while its follow, its row or the other
+// lessons' files are read (the read fails with the dead context), records no
+// failure: the job is left running for the requeue, and its end is reported
+// as a shutdown.
 func TestWorkerShutdownAfterResolveIsNotAFailure(t *testing.T) {
-	for _, where := range []string{"row", "claims"} {
+	for _, where := range []string{"follow", "row", "claims"} {
 		t.Run(where, func(t *testing.T) {
 			w, store, dl, _, _ := plexWorker(t)
 			ctx, shutdown := context.WithCancel(context.Background())
 			defer shutdown()
 			w.Resolver = hookResolver{fakeResolver: w.Resolver.(fakeResolver), before: shutdown}
-			if where == "row" {
+			switch where {
+			case "follow":
+				store.getFollowErr = context.Canceled
+			case "row":
 				store.getLessonErr = context.Canceled
-			} else {
+			default:
 				store.withFilesErr = context.Canceled
 			}
 			sink := &recordingSink{}
