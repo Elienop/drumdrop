@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ConnectionPill } from "@/components/StatusBadge"
+import { PendingButton } from "@/components/PendingButton"
 
 // Settings has three cards: the Musora account connection (session pill + a
 // local connect form), the API token (stored in localStorage, shared with the
@@ -106,12 +107,18 @@ function MusoraCard() {
             />
           </div>
           <div>
-            <Button
+            {/* PendingButton, not `disabled` while it runs: a disabled
+                button drops keyboard focus to <body>. Enter in a field
+                meanwhile sends nothing: implicit submission is a click on
+                this button, which PendingButton cancels while pending. */}
+            <PendingButton
               type="submit"
-              disabled={connect.isPending || email.trim() === "" || password === ""}
+              pending={connect.isPending}
+              pendingLabel="Connecting…"
+              disabled={email.trim() === "" || password === ""}
             >
               Connect
-            </Button>
+            </PendingButton>
           </div>
         </form>
       </CardContent>

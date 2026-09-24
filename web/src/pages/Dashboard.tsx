@@ -29,6 +29,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { PendingButton } from "@/components/PendingButton"
 import { ProgressRow } from "@/components/ProgressRow"
 import { StatusBadge } from "@/components/StatusBadge"
 import { QueryStatus } from "@/components/QueryState"
@@ -94,7 +95,7 @@ export function Dashboard() {
               label="Run sync"
               icon={Play}
               onClick={() => run.mutate()}
-              disabled={run.isPending || runBlocked}
+              pending={run.isPending}
               blocked={runBlocked}
               tooltip="no daemon attached"
             />
@@ -103,7 +104,7 @@ export function Dashboard() {
               icon={Search}
               variant="outline"
               onClick={() => dryRun.mutate()}
-              disabled={dryRun.isPending || dryRunBlocked}
+              pending={dryRun.isPending}
               blocked={dryRunBlocked}
               tooltip="no planner attached"
             />
@@ -245,11 +246,16 @@ function StatBreakdown({
   )
 }
 
+// SyncButton runs a sync or a dry run. While its request runs it is a
+// PendingButton, not `disabled`, so keyboard focus stays on it (a disabled
+// button drops it to <body>); the spinner takes its icon's place, as on the
+// TopBar's Pause, so its width does not change. Only a 503 (nothing
+// attached to run it) really disables it.
 function SyncButton({
   label,
   icon: Icon,
   onClick,
-  disabled,
+  pending,
   blocked,
   tooltip,
   variant = "default",
@@ -257,24 +263,29 @@ function SyncButton({
   label: string
   icon: LucideIcon
   onClick: () => void
-  disabled: boolean
+  pending: boolean
   blocked: boolean
   tooltip: string
   variant?: "default" | "outline"
 }) {
-  const button = (
-    <Button size="sm" variant={variant} onClick={onClick} disabled={disabled}>
-      <Icon />
-      {label}
-    </Button>
-  )
-  if (!blocked) return button
+  if (!blocked) {
+    return (
+      <PendingButton size="sm" variant={variant} icon={Icon} pending={pending} onClick={onClick}>
+        {label}
+      </PendingButton>
+    )
+  }
   // A disabled button swallows pointer events, so wrap it in a focusable span
   // that owns the tooltip trigger.
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span tabIndex={0}>{button}</span>
+        <span tabIndex={0}>
+          <Button size="sm" variant={variant} disabled>
+            <Icon data-icon="inline-start" />
+            {label}
+          </Button>
+        </span>
       </TooltipTrigger>
       <TooltipContent>{tooltip}</TooltipContent>
     </Tooltip>

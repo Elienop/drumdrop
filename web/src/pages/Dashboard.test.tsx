@@ -81,3 +81,44 @@ it.each([
   await userEvent.click(await screen.findByRole("button", { name: /dry-run/i }))
   expect(await screen.findByText(sentence)).toBeInTheDocument()
 })
+
+// The press keeps keyboard focus while its request runs: a disabled button
+// would drop it to <body> in a browser. jsdom does NOT drop focus from a
+// button that becomes disabled, so toHaveFocus alone would pass with
+// `disabled`; toBeEnabled is the assertion that catches it.
+it.each([
+  ["Run sync", { triggered: true }, 202],
+  ["Dry-run", { would_enqueue: 2 }, 200],
+])("%s keeps keyboard focus while its request runs, its spinner in its icon's place", async (name, body, status) => {
+  let answer!: () => void
+  server.use(
+    http.post(
+      `${ORIGIN}/api/sync`,
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () => resolve(HttpResponse.json(body, { status }))
+        }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Dashboard />
+      <Toaster />
+    </>,
+  )
+
+  const btn = await screen.findByRole("button", { name })
+  btn.focus()
+  await user.keyboard("{Enter}")
+
+  await waitFor(() => expect(btn).toHaveAttribute("aria-disabled", "true"))
+  expect(btn).toHaveFocus()
+  expect(btn).toBeEnabled()
+  expect(btn).toHaveAccessibleName(name)
+  expect(btn.querySelectorAll(":scope > svg")).toHaveLength(1)
+  expect(btn.querySelector(":scope > svg")).toHaveClass("animate-spin")
+  answer()
+  await waitFor(() => expect(btn).not.toHaveAttribute("aria-disabled"))
+  expect(btn).toHaveFocus()
+})

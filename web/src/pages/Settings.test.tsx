@@ -132,3 +132,50 @@ it("renders the version string from the health endpoint", async () => {
 
   expect(await screen.findByText(/v1\.2\.3/)).toBeInTheDocument()
 })
+
+// Connect keeps keyboard focus while the sign-in runs (a disabled button
+// drops it to <body> in a browser; jsdom does not, so toBeEnabled is the
+// assertion that catches `disabled`), and Enter meanwhile, on the button or
+// in a field, does not start a second sign-in.
+it("Connect keeps keyboard focus while it runs, and Enter meanwhile sends nothing more", async () => {
+  let logins = 0
+  let answer!: () => void
+  server.use(
+    http.get(`${ORIGIN}/api/session`, () => HttpResponse.json({ connected: false })),
+    http.get(`${ORIGIN}/healthz`, () => HttpResponse.json({ status: "ok", version: "v1.2.3" })),
+    http.post(`${ORIGIN}/api/session`, () => {
+      logins++
+      return new Promise<Response>((resolve) => {
+        answer = () => resolve(HttpResponse.json({ connected: true }))
+      })
+    }),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Settings />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText(/disconnected/i)
+  await user.type(screen.getByLabelText(/email/i), "me@example.com")
+  await user.type(screen.getByLabelText(/password/i), "hunter2")
+  const btn = screen.getByRole("button", { name: "Connect" })
+  btn.focus()
+  await user.keyboard("{Enter}")
+
+  await waitFor(() => expect(btn).toHaveAttribute("aria-disabled", "true"))
+  expect(btn).toHaveFocus()
+  expect(btn).toBeEnabled()
+  expect(btn).toHaveAccessibleName("Connecting…")
+
+  await user.keyboard("{Enter}")
+  await user.click(screen.getByLabelText(/password/i))
+  await user.keyboard("{Enter}")
+  expect(logins).toBe(1)
+
+  answer()
+  await waitFor(() => expect(btn).not.toHaveAttribute("aria-disabled"))
+  expect(logins).toBe(1)
+})
