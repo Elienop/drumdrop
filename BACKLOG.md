@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D129 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D132 on 2026-09-24 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -35,7 +35,8 @@ day and branch) added D121–D125 and corrected D52, D58, D107, D113 and D114–
 its own code: D120's unplugged-drive sentence was wrong, and D107 and D114–D118 credited
 the round-5d reviews for round-5c findings. The round-5f pass (same day and branch) added
 D126–D128 and corrected D58, D101, D113, D120, D121 and D125 against its own code, and
-the round-5e security seat's probes._
+the round-5e security seat's probes. The round-5g pass (same day and branch) added
+D129–D131 and extended D101 and D113 against its own code and a Chromium probe._
 
 ## Next up
 
@@ -504,6 +505,36 @@ D53 waits on an owner decision.
     rather than reading it back from the path.
   - *Evidence:* `grep -n 'func inLibrary' -A6 internal/scheduler/worker_record.go` ·
     `go test -count=1 -run 'OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder' ./internal/scheduler/`
+- **D130 · Some writes stamp a lesson's updated_at when nothing about it changed.**
+  - *What:* the All tab lists lessons by updated_at, newest first (`ListLessons`), and
+    ruling (r) stopped only the sync's upsert from stamping a lesson it didn't change.
+    Three other writes still stamp every time:
+    - `StartDownload` sets `downloading` and stamps at the start of every attempt.
+      Nothing changes the lesson between attempts, so on attempts 2 and 3 it is already
+      `downloading` and only the stamp changes.
+    - `SkipLesson` stamps a lesson already skipped with the same reason. Only the API
+      can do that: the UI offers *Skip* on pending and failed lessons only.
+    - `FailDownload` and `NotReturnedDownload` (`keepOrSQL`) stamp a lesson that already
+      has the status and note they write. That happens when the job ends before
+      `StartDownload`, so the lesson was never `downloading`: Musora can't be reached
+      (`failMusora`), DrumDrop's records can't be read (`failNotStarted`), the private
+      folder can't be made (`failNoFolder`), or Musora returns no lesson
+      (`notReturned`). Syncs queue a failed lesson again every cycle
+      (`ShouldSkipEnqueue`), so while Musora is down every failed lesson a follow lists
+      is stamped again each cycle.
+  - *What it does to All:* each stamp moves the lesson back to the top of All (page 1),
+    above lessons that did change since, and the tab refreshes on each attempt's
+    events. After a retry's `StartDownload` the lesson was near the top already, from
+    its first attempt, so it passes only the rows that changed during the backoff.
+    During an outage every failed lesson moves to the top each cycle, the reshuffle
+    ruling (r) removed for the sync's upsert.
+  - *Fix (can wait):* stamp only when the status or the note changes, as `UpsertLesson`
+    does since (r).
+  - *Evidence:* `grep -n 'func (s \*Store) StartDownload' -A5 internal/database/downloads.go`
+    · `grep -n 'func keepOrSQL' -A6 internal/database/downloads.go`
+    · `grep -n 'UPDATE lessons SET status = ?, error = ?, updated_at' internal/database/downloads.go`
+    · `grep -n 'failBeforeDownload(ctx\|w.notReturned(ctx' internal/scheduler/worker.go`
+    · `grep -n 'ORDER BY updated_at DESC' internal/database/lessons.go`
 - **D80 · A Skip that lands between the planner's check and its enqueue is downloaded
   anyway.**
   - *What:* the planner asks `ShouldSkipEnqueue`, then calls `EnqueueJob`, which refuses
@@ -660,8 +691,14 @@ D53 waits on an owner decision.
     leaves a status tab (Failed, Downloaded for a row with a kept note, the Queue's
     Queued tab), or a later page of All, seconds after the press rather than when the
     download ends, and its keyboard focus falls to the body with it (round-5e UI review,
-    Low B: the Failed tab's row was gone at +1.68s).
-  - *Why:* after the press a keyboard user starts again from the top of the page.
+    Low B: the Failed tab's row was gone at +1.68s). The pointer has its own version on
+    the Queue's Queued tab: it lists queued jobs oldest first, and the worker claims the
+    oldest, so when a download starts (`download_started` refreshes the jobs) the top
+    row leaves the list and the rows below move up. A pointer resting on that row's
+    *Cancel* is then over the next job's *Cancel*, and a click meant for the job that
+    just started cancels another one.
+  - *Why:* after the press a keyboard user starts again from the top of the page; a
+    pointer user can cancel a job they didn't mean to.
   - *Fix (new mechanism, can wait):* each needs somewhere to send focus. React Router and
     Radix don't manage focus when a table row changes (could not confirm any library
     facility for it). The app's own `rowFocusTargets` (`web/src/lib/focus.ts:25`)
@@ -670,6 +707,7 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'disabled={!canRetry\|disabled={!canCancel' web/src/pages/Queue.tsx`
     · `grep -n 'setPassword("")\|disabled={email' web/src/pages/Settings.tsx`
     · `grep -n 'case "download_started"' web/src/lib/sse-reducer.ts`
+    · `grep -n 'func (s \*Store) ListJobsByStatus' -A3 internal/database/jobs.go`
 - **D109 · The token prompt's Save button spans the whole dialog.**
   - *What:* the token prompt (`TokenGate`) has no dialog footer: its one Save button sits
     in the form's column and stretches to the dialog's full width, unlike every other
@@ -738,6 +776,26 @@ D53 waits on an owner decision.
     then either no bar before `download_started`, or a refresh on `job_claimed`.
   - *Evidence:* `grep -n 'case "job_claimed"' web/src/lib/sse-reducer.ts` ·
     `grep -n 'Kind:          "job_claimed"' internal/scheduler/worker.go`
+- **D129 · A click on a skipped lesson's *Download* can land on *Cancel download*.**
+  - *What:* a skipped lesson's row menu reads *Un-skip*, *Download*, *Copy path*. The
+    menu is built from the live row, so when the download starts it reads *Copy path*,
+    *Cancel download*, and *Cancel download* is second, where *Download* was. A pointer
+    resting on *Download* (say, the menu reopened to press it again while its job is
+    queued: the lesson reads skipped until the download starts) that clicks without
+    moving just as the download starts presses *Cancel download*. The download stops,
+    and the lesson ends skipped again, with the stopped sentence as its note in place of
+    the skip's reason; a lesson whose recorded files are on disk ends downloaded
+    (`CancelDownload`). No file is lost. Ruling (q) guards the keyboard (Radix
+    highlights the first item, *Copy path*), not the pointer. The same swap puts
+    *Cancel download* under a resting pointer on the second item of other menus: *Skip*
+    on a pending or failed lesson, *Copy path* on a downloaded lesson with a note.
+    Recorded, not fixed, by the owner's ruling (u), 2026-09-24.
+  - *Why:* one click undoes the download the owner asked for.
+  - *Fix (can wait):* put *Cancel download* after a separator, where no item of the
+    menu before the swap sits. Related: D127 (whether a skipped lesson needs both
+    *Un-skip* and *Download*).
+  - *Evidence:* `grep -n 'key="unskip"\|key="download"\|key="skip"\|key="cancel"' web/src/pages/Lessons.tsx`
+    · `grep -n 'const endDownloadSQL' -A5 internal/database/downloads.go`
 - **D72 · On Windows the library move renames by path.**
   - *What:* on Linux and macOS each rename of the move acts on the folders it holds open
     (`renameat2`/`renameatx_np`), so a folder swapped for a symlink between the move's
@@ -1144,6 +1202,25 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `grep -n 'unskip.mutate\|download.mutate' web/src/pages/Lessons.tsx` ·
     `grep -n 'func (s \*Server) handleDownloadLesson\|func (s \*Server) handleUnskipLesson' internal/server/lessons.go`
 
+- **D131 · At 1024px the Lessons table still scrolls sideways.**
+  - *Context:* ruling (t) hides Brand and Quality below 1280px so that at 1024px the
+    table fits, nothing cut and no sideways scroll, with the note's 28rem minimum and
+    Title, Status, Size, Updated and ⋯ shown. Measured in Chromium after the change,
+    with short titles only and the page's 15px scrollbar counted: those five columns
+    need 772px (Title 464, the note's 448 plus padding; Status 105; Size 77; Updated
+    74; ⋯ 52), and a 1024px window leaves the table 687px. It scrolls sideways by 85px:
+    *Updated* is cut and ⋯ is out of view until you scroll (70px over without a
+    scrollbar gutter). The table stops scrolling from a 1109px window; before (t) it
+    needed 1243px. No note is cut at any width measured (1440, 1280, 1279, 1024, 900).
+  - *The question:* what gives way at 1024px. Measured there with short titles: hiding
+    Size as well leaves 8px over, Updated as well 11px over, both fits; a 22rem note
+    clamped to three lines fits, and every note on the page (the longest sentence the
+    server writes among them) fits in three lines; 16px card padding instead of 24px
+    doesn't fit (772px in 703px). A sidebar that collapses would free its 224px (not
+    measured).
+  - *Evidence:* `grep -n 'WIDE_ONLY' web/src/pages/Lessons.tsx` · `grep -n 'min-w-md' web/src/pages/Lessons.tsx`
+    · `grep -n 'w-56' web/src/components/app-shell/Sidebar.tsx`
+
 - **D96 · A lesson Musora returns with no video is recorded downloaded. Is that right?**
   - *Context:* `DownloadLesson` downloads a video only when the lesson has an HLS manifest,
     or a soundslice slug (a song). A lesson with neither gets its resources, poster and
@@ -1483,7 +1560,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `git config --show-origin --get core.hooksPath` (`file:.git/config
     scripts/hooks`) · `printf 'bad subject\n' > /tmp/m && git hook run commit-msg -- /tmp/m`
     (exits 1 with the bypass hint).
-- **D113 · Round 5: what the review seats found, and the owner's rulings (a)–(s).** This
+- **D113 · Round 5: what the review seats found, and the owner's rulings (a)–(u).** This
   branch (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* at `8ee019d` the round-5 seats (code, security, UI), and the seats on each fix
     round after it, found:
@@ -1514,8 +1591,9 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       Run sync, Dry-run and Connect dropped keyboard focus while they ran; a job or lesson
       removed or ended elsewhere read as a failure; a count of one said "1 lessons"; and
       Queue's toasts said "job" where Lessons said "download".
-  - *Now:* the owner's rulings of 2026-09-24 (vault decisions #72, (a)–(p); (q)–(s),
-    given the same day after the round-5e reviews, are not in the vault yet) and the
+  - *Now:* the owner's rulings of 2026-09-24 (vault decisions #72, (a)–(p); (q)–(u),
+    given the same day after the round-5e reviews and the round-5f fix, are not in the
+    vault yet) and the
     seats' corrected lines, each fix round reviewed by the seats again:
     - (a) a re-download merges the lesson's subfolders file by file, at every depth, by
       the top level's rule (#66): a file at a path the download produced is replaced and
@@ -1588,9 +1666,14 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       skipped). (r) A sync stamps a lesson's updated_at only when something about it
       changed (`UpsertLesson` updates only when the title, the parent or a missing
       position changes), so the All tab, ordered by updated_at, no longer reshuffles
-      every lesson a sync lists (round-5e UI review, Low C). (s) The Add follow dialog
+      every lesson a sync lists (round-5e UI review, Low C); D130 records the writes
+      that still stamp without a change. (s) The Add follow dialog
       says that adding starts the lessons downloading right away (round-5d UI review,
-      Info 2).
+      Info 2). (t) Below 1280px the Lessons table hides its Brand and Quality columns,
+      header and cells, and a row note keeps its 28rem, so that at 1024px the table
+      fits with nothing cut and no sideways scroll; it doesn't fit yet (D131). (u) A
+      pointer resting on a skipped lesson's *Download* that clicks just as the download
+      starts presses *Cancel download*: recorded, not fixed (D129).
     - Corrected lines: `daemon --once` stops its download on `Ctrl-C` or SIGTERM (D95
       (d)); a Cancel during a backoff lands at once; a follow that can't be read fails the
       job before downloading (`failNotStarted`); `openRealDir` refuses a folder swapped
@@ -1641,22 +1724,32 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       the README says a lesson kept in the library-equals-downloads folder always falls
       back there, not that it is always placed (code I1). New pins: a symlinked downloads
       root and a deleted recorded folder still fall back (security S4, code L2), a tie
-      counts as the library for a legacy season row. The web half: rulings (q) and (s),
-      and the kept note's width, so a page of short titles no longer cuts it (UI Low D;
-      the web half's report has the detail). UI Low A is settled by (q), and Low C by (r) during planning: a lesson
+      counts as the library for a legacy season row. The web half: UI Low A is fixed by
+      (q)'s reorder together with a key on every menu item (`08df44c`): the reorder alone
+      didn't stop React reusing the highlighted *Download* node as *Cancel download*.
+      UI Low D is fixed by the note's 28rem minimum width, so a page of short titles no
+      longer cuts it (`dbe6ace`), and then by (t): below 1280px the table hides Brand
+      and Quality (header and cells) to make room for that width; at 1024px the table
+      still scrolls sideways (D131). Round-5d Info 2 is fixed by the Add
+      follow line (`2566e5f`), whose wording goes beyond (s) to stay true in every
+      state: "Its lessons start downloading right away, or after the sync that's
+      running.", and while syncing is paused, "Syncing is paused: its lessons start
+      downloading when you Resume." UI Low C is settled by (r) during planning: a lesson
       whose download starts still changes (its status), so it still moves to the top of
       All then; whether the page still jumps at that moment is for the browser pass. D125
       takes the security seat's empty-folder residual; D101 takes UI Low B; D126–D128 are
-      recorded.
+      recorded, and D129–D131 after the web half.
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
     · round 5e: `go test -count=1 -run 'FallsBackIntoTheLessonsOwnFolder|RecordedFilesPresent|RecordsTheKeptVideo|KeepsAFolderTheDefaultLayoutPlaced|UnskipLessonRefusesWhileADeleteHoldsIt|WhileADeleteHoldsTheLesson' ./internal/scheduler/ ./internal/database/ ./internal/server/`
     and `cd web && npx vitest run src/lib/sse-reducer.test.ts src/pages/Queue.test.tsx src/pages/Follows.test.tsx src/pages/Lessons.test.tsx`
     · round 5f: `go test -count=1 -run 'IgnoresASymlinkToTheLibraryFolder|WithoutALibraryLeavesTheFolderASymlinkLedTo|OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder|FallsBackIntoTheLessonsOwnFolder|KeepsALegacyEpisodeItCanNotName|StampsUpdatedAtOnlyOnAChange' ./internal/scheduler/ ./internal/database/`
+    and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'start downloading|starts downloading highlights|keeps its width|hides Brand and Quality'`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
-    the round-5d reviews; D126–D128, from the round-5e reviews;
+    the round-5d reviews; D126–D128, from the round-5e reviews; D129–D131, from the
+    round-5f web half and its rulings;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
