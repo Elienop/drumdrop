@@ -1232,6 +1232,24 @@ it("a row note keeps its width, however short the titles on the page", async () 
 // the classes, by column: a header hidden without its cells (or the reverse)
 // would put every cell after it under the wrong header. The widths were
 // measured in a browser.
+// Owner's ruling 2026-09-24, (w). jsdom has no layout, so this pins only
+// where the opt-out sits: on the page's own root, which holds the list and
+// the paging below it, and so every row the app shell's <main> could anchor
+// to. Its effect was measured in headless Chromium (round 5h): a started
+// download moving the top visible row to the top of All no longer scrolls
+// the view with it.
+it("the Lessons page takes itself out of scroll anchoring, table and paging included", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
+  renderLessons()
+
+  const heading = await screen.findByRole("heading", { level: 1, name: "Lessons" })
+  await screen.findByRole("table")
+  const root = heading.parentElement!.parentElement!
+  expect(root.className.split(/\s+/)).toContain("[overflow-anchor:none]")
+  expect(root).toContainElement(screen.getByRole("table"))
+  expect(root).toContainElement(screen.getByRole("button", { name: /next/i }))
+})
+
 it("below xl the table hides Brand and Quality, header and cells, and nothing else", async () => {
   server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
   renderLessons()

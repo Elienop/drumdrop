@@ -331,8 +331,18 @@ export function Lessons() {
 
   const loadedCount = lessons.data?.length ?? 0
 
+  // No scroll anchoring on this page (owner's ruling 2026-09-24, (w)). The
+  // page scrolls inside the app shell's <main> (App.tsx), not the window
+  // and not the table's overflow-x wrapper, whose height is its content's.
+  // Chrome keeps the top visible row of <main> in place, so when that row's
+  // download starts and it moves to the top of All, the view followed it
+  // there: a jump of the whole page. overflow-anchor:none here takes the
+  // page out of <main>'s anchor choice, and <main> holds nothing else, so
+  // the view stays still and the rows below shift by one. Here rather than
+  // on <main>, so other pages keep anchoring (none of them reorders rows
+  // under the reader).
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 [overflow-anchor:none]">
       <div className="flex flex-wrap items-center justify-between gap-4">
         {/* tabIndex -1: the last place focus can return to when a dialog
             closes and neither its row nor a neighbour is left. */}
