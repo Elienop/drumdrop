@@ -128,16 +128,43 @@ func TestWorkerPlacementWithoutALibraryLeavesTheFolderASymlinkLedTo(t *testing.T
 	}
 }
 
+// TestWorkerRefusedLibraryPlacementKeepsALibraryFolderInsideTheDownloadsFolder
+// proves a library folder the downloads folder's spelling happens to contain
+// still counts as the library's. The downloads folder is lib/downloads, and
+// the follow's course is named "downloads", so the default layout placed the
+// lesson at lib/downloads/05 - Lesson A, inside the downloads folder as
+// written, though not in the course folder a downloads placement uses
+// (lib/downloads/downloads). When that placement fails again the attempt
+// fails, and the library folder stays whole and recorded (ruling (f)),
+// rather than being left behind recorded by no lesson.
+func TestWorkerRefusedLibraryPlacementKeepsALibraryFolderInsideTheDownloadsFolder(t *testing.T) {
+	w, store, _, lib, _ := plexWorker(t)
+	w.Cfg.Layout = ""
+	f := nodeFollow()
+	f.Title = "downloads"
+	store.follows[f.ID] = f
+	placeDownloads(t, w, lib, dlInLibrary)
+	dir := filepath.Join(lib, "downloads", "05 - Lesson A")
+	files := libraryFolderRow(t, store, dir)
+	refuseFromJobInto(t, w, dir)
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertTree(t, dir, files)
+	assertKeptInLibrary(t, w, store)
+}
+
 // TestWorkerRefusedLibraryPlacementOfALessonKeptInDownloads proves "in the
-// library" is decided by the longest root holding the recorded folder, as
-// previousFolder decides it (security round 5e S3). A lesson an earlier
-// refused move kept in the downloads folder, under a title Musora has since
-// changed, falls back to downloads when its library placement is refused
-// again, whether the downloads folder is beside the library or inside it:
-// its old folder is in downloads, not in the library, so ruling (e) decides
-// it (it goes when the download brought back every file in it). When the
-// library is the downloads folder (a tie) the folder counts as the
-// library's, and the attempt fails with that copy kept (ruling (f)).
+// library" is decided by the root that holds the recorded folder (security
+// round 5e S3). A lesson an earlier refused move kept in the downloads
+// folder, under a title Musora has since changed, falls back to downloads
+// when its library placement is refused again, whether the downloads folder
+// is beside the library or inside it: its old folder is in downloads, not in
+// the library, so ruling (e) decides it (it goes when the download brought
+// back every file in it). When the library is the downloads folder (a tie)
+// the folder counts as the library's, and the attempt fails with that copy
+// kept (ruling (f)).
 func TestWorkerRefusedLibraryPlacementOfALessonKeptInDownloads(t *testing.T) {
 	for _, where := range []string{"the downloads folder beside the library", dlInLibrary, dlIsLibrary} {
 		for _, owner := range []bool{false, true} {
