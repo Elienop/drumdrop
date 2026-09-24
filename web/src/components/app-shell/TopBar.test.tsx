@@ -251,7 +251,13 @@ it.each([
     // The flag flips on the server and is re-read while the press still runs.
     paused = !startPaused
     await act(() => qc.refetchQueries({ queryKey: qk.summary }))
-    expect(qc.getQueryData<{ paused: boolean }>(qk.summary)?.paused).toBe(!startPaused)
+    // The cache holding the new flag is not enough: TanStack notifies its
+    // observers on a later tick. The "paused" chip beside the button reads the
+    // same flag, so once it has changed, TopBar has rendered the re-read.
+    const chip = () => screen.queryByText("paused")
+    await waitFor(() =>
+      startPaused ? expect(chip()).not.toBeInTheDocument() : expect(chip()).toBeInTheDocument(),
+    )
     expect(btn).toHaveAttribute("aria-disabled", "true")
     expect(btn).toHaveAccessibleName(verb)
 
