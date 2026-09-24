@@ -33,8 +33,9 @@ export interface LessonDTO {
   // the delete.
   deleting: boolean
   bytes: number | null
-  // error is the failure of a failed lesson, or the reason given for a skipped
-  // one ("deleted" for a lesson whose files were deleted).
+  // error is the failure of a failed lesson, the reason given for a skipped
+  // one ("deleted" for a lesson whose files were deleted), or on a downloaded
+  // one why a re-download failed while the earlier download was kept.
   error: string | null
   follow_id: number | null
   first_seen_at: string | null

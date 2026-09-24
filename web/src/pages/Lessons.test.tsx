@@ -1019,7 +1019,7 @@ it("a list that fails without a server message says so in a sentence, never 'HTT
 
 // --- What a row says -------------------------------------------------------------
 
-it("a skipped or failed lesson shows its reason, muted, under its title; other statuses do not", async () => {
+it("a skipped or failed lesson shows its reason, muted, under its title; pending and downloading ones do not", async () => {
   const skippedWithReason: LessonDTO = { ...skippedLesson, error: "not for me" }
   const failed: LessonDTO = {
     ...lessons[1],
@@ -1028,10 +1028,11 @@ it("a skipped or failed lesson shows its reason, muted, under its title; other s
     status: "failed",
     error: "yt-dlp exited 1",
   }
-  const downloadedWithError: LessonDTO = { ...lessons[0], error: "a stale error" }
+  const pendingWithError: LessonDTO = { ...lessons[1], error: "a pending error" }
+  const downloadingWithError: LessonDTO = { ...lessons[2], error: "a downloading error" }
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () =>
-      HttpResponse.json([skippedWithReason, failed, downloadedWithError]),
+      HttpResponse.json([skippedWithReason, failed, pendingWithError, downloadingWithError]),
     ),
   )
   renderLessons()
@@ -1040,7 +1041,96 @@ it("a skipped or failed lesson shows its reason, muted, under its title; other s
   expect(reason).toHaveClass("text-muted-foreground")
   expect(reason.closest("td")).toHaveTextContent(/^Flam Tap/)
   expect(screen.getByText("yt-dlp exited 1").closest("td")).toHaveTextContent(/^Linear Fills/)
-  expect(screen.queryByText("a stale error")).not.toBeInTheDocument()
+  expect(screen.queryByText("a pending error")).not.toBeInTheDocument()
+  expect(screen.queryByText("a downloading error")).not.toBeInTheDocument()
+})
+
+// --- A re-download that failed and kept the earlier download ---------------------
+//
+// Owner's ruling 2026-09-24, (h): the lesson stays "downloaded" with the
+// server's note, and syncs leave it alone, so the row offers Download to try
+// again. A downloaded lesson without a note keeps its menu.
+
+// The server's note for a plain failure, verbatim (internal/scheduler).
+const KEPT_NOTE =
+  "The re-download failed, so the earlier download was kept. Check the server log, fix the problem, then Download again."
+
+const keptAfterFailure: LessonDTO = {
+  ...lessons[0],
+  railcontent_id: 1000,
+  title: "Moeller Whip",
+  error: KEPT_NOTE,
+}
+
+describe("a downloaded lesson whose re-download failed", () => {
+  it("shows the server's note like any other row note: muted, clamped to two lines, all of it on hover", async () => {
+    server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([keptAfterFailure])))
+    renderLessons()
+
+    const note = await screen.findByText(KEPT_NOTE)
+    expect(note).toHaveClass("text-muted-foreground", "line-clamp-2")
+    expect(note).toHaveAttribute("title", KEPT_NOTE)
+    expect(note.closest("td")).toHaveTextContent(/^Moeller Whip/)
+    const row = note.closest("tr")!
+    expect(within(row).getByText("downloaded")).toBeInTheDocument()
+  })
+
+  it("offers Download beside Copy path and Delete; without a note the menu has no Download", async () => {
+    const plain: LessonDTO = lessons[0] // downloaded, has files, no note
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([keptAfterFailure, plain])),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    const items = async (title: string) => {
+      await user.click(await screen.findByRole("button", { name: `Actions for ${title}` }))
+      await screen.findByRole("menuitem", { name: /copy path/i })
+      const names = screen.getAllByRole("menuitem").map((m) => m.textContent)
+      await user.keyboard("{Escape}")
+      return names
+    }
+    expect(await items(keptAfterFailure.title)).toEqual(["Download", "Copy path", "Delete"])
+    expect(await items(plain.title)).toEqual(["Copy path", "Delete"])
+  })
+
+  // Download there behaves as on every other row.
+  it.each([
+    ["202: queued", 202, { id: 5, status: "queued" }, "Queued", "success"],
+    ["200: already queued", 200, { id: 5, status: "queued" }, "Already queued", "neutral"],
+    ["404: skipped or removed elsewhere", 404, { error: DOWNLOAD_JOB_GONE }, "Won't download: skipped or removed elsewhere", "neutral"],
+    ["500: a real failure", 500, { error: SERVER_ERROR }, "Couldn't queue “Moeller Whip”", "error"],
+  ] as const)("Download answered %s", async (_, status, body, title, type) => {
+    let listFetches = 0
+    let posted: string | null = null
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => {
+        listFetches++
+        return HttpResponse.json([keptAfterFailure])
+      }),
+      http.post(`${ORIGIN}/api/lessons/:id/download`, ({ params }) => {
+        posted = params.id as string
+        return HttpResponse.json(body, { status })
+      }),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    await user.click(await screen.findByRole("button", { name: "Actions for Moeller Whip" }))
+    const fetchesBefore = listFetches
+    await user.click(await screen.findByRole("menuitem", { name: /^download$/i }))
+
+    if (type === "neutral") {
+      await expectNeutralNote(title, "Moeller Whip")
+    } else {
+      const t = (await screen.findByText(title)).closest<HTMLElement>("[data-sonner-toast]")!
+      expect(t).toHaveAttribute("data-type", type)
+      const description = type === "error" ? SERVER_ERROR : "Moeller Whip"
+      expect(within(t).getByText(description, { selector: "[data-description]" })).toBeInTheDocument()
+    }
+    expect(posted).toBe("1000")
+    await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
+  })
 })
 
 it("a clamped row note carries its full text in a title", async () => {

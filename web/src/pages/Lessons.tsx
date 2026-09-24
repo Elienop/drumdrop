@@ -70,13 +70,16 @@ const noItem = (): Promise<never> => Promise.reject(new Error("the dialog has no
 // TOMBSTONE is the reason a delete stores on the lesson it skips.
 const TOMBSTONE = "deleted"
 
-// rowNote is the muted line under a lesson's title: why it was skipped, or
-// why it failed (both stored in `error`). Nothing for any other status. A
-// delete's tombstone reads "Files deleted", the reason under the "skipped"
-// badge, not a bare "deleted" that looks like a code or like the lesson
-// itself was deleted. The stored value stays as it is.
+// rowNote is the muted line under a lesson's title, all stored in `error`:
+// why it was skipped, why it failed, or, on a downloaded lesson, why a
+// re-download failed while its earlier download was kept (owner's ruling
+// 2026-09-24, (h)); a successful download clears it. Nothing for any other
+// status. A delete's tombstone reads "Files deleted", the reason under the
+// "skipped" badge, not a bare "deleted" that looks like a code or like the
+// lesson itself was deleted. The stored value stays as it is.
 function rowNote(lesson: LessonDTO): string | null {
-  if (lesson.status !== "skipped" && lesson.status !== "failed") return null
+  if (lesson.status !== "skipped" && lesson.status !== "failed" && lesson.status !== "downloaded")
+    return null
   const note = lesson.error?.trim()
   if (lesson.status === "skipped" && note === TOMBSTONE) return "Files deleted"
   return note ? note : null
@@ -448,7 +451,11 @@ export function Lessons() {
                                     </DropdownMenuItem>
                                   )
                                 })()
-                              ) : lesson.status === "downloaded" ? null : (
+                              ) : lesson.status === "downloaded" && !note ? null : (
+                                // A downloaded lesson WITH a note is a failed
+                                // re-download that kept the earlier files:
+                                // syncs leave it alone, so Download is how to
+                                // try again (owner's ruling 2026-09-24, (h)).
                                 <>
                                   {lesson.status === "skipped" && (
                                     <DropdownMenuItem onSelect={() => unskip.mutate(lesson)}>
