@@ -15,9 +15,11 @@ import (
 // It IS replaced in three cases: on Windows (the rename goes by path, with
 // MOVEFILE_REPLACE_EXISTING), on a Linux filesystem that does not support
 // RENAME_NOREPLACE (some network filesystems; the retry has no flag), and on
-// a macOS filesystem that does not support RENAME_EXCL (the same retry). A
-// package variable so a test can force the copy fallback or act between the
-// checks and the rename.
+// a macOS filesystem that does not support RENAME_EXCL (the same retry).
+// Every rename a placement makes goes through it: placing an entry, taking
+// one back, and setting a replaced entry aside or putting it back
+// (asideArea). A package variable so a test can force the copy fallback, act
+// between the checks and the rename, or make any of those renames fail.
 var renameAt = renameIn
 
 // crossDevice reports whether a rename failed only because its two folders

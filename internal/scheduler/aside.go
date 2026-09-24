@@ -19,7 +19,7 @@ import (
 // <root>/.drumdrop-in-progress/replaced-<job>/ folder, so setting an entry
 // aside is a rename within one filesystem, never a copy. Entry n goes to
 // <n>/<its name>, so a folder a crash left can still be read by a person. Every
-// rename acts on folders held open (renameIn), and refuses to replace.
+// rename acts on folders held open (renameAt), and refuses to replace.
 //
 // A folder of that name a crash left (the job, requeued, placing again) is
 // never reused: it may hold an earlier download's only copy, and this area is
@@ -124,7 +124,7 @@ func (a *asideArea) setAside(root string, parent *os.Root, name string, own bool
 		slot.Close()
 		return fmt.Errorf("could not set %q aside: %w", path, err)
 	}
-	if err := renameIn(parent, name, slot, name); err != nil {
+	if err := renameAt(parent, name, slot, name); err != nil {
 		slot.Close()
 		held.Close()
 		return fmt.Errorf("could not set %q aside: %w", path, err)
@@ -171,7 +171,7 @@ func (a *asideArea) restore(dropOwn bool) (stuck []string, err error) {
 		if e.own && dropOwn {
 			continue
 		}
-		if rerr := renameIn(e.slot, e.name, e.parent, e.name); rerr != nil {
+		if rerr := renameAt(e.slot, e.name, e.parent, e.name); rerr != nil {
 			stuck = append(stuck, e.path)
 			errs = append(errs, fmt.Errorf("could not put %q back; it is kept at %q: %w", e.path, filepath.Join(e.slot.Name(), e.name), rerr))
 		}
