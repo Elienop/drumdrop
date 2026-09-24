@@ -14,7 +14,7 @@ const (
 	// msgNotReturnedKept is the note a lesson Musora answered with no match
 	// keeps when its earlier download is on disk: it stays 'downloaded' and
 	// only the job fails (owner ruling 2026-09-24 (n)).
-	msgNotReturnedKept = "Musora didn't return this lesson, so the earlier download was kept. It may be locked for your account, or removed."
+	msgNotReturnedKept = "Musora didn't return this lesson, so the earlier download was kept. The lesson may be locked for your account, or removed."
 	// msgStopped is a download a Skip, a delete or a follow removal stopped.
 	msgStopped = "Stopped: the lesson was skipped or deleted, or its follow was removed."
 	// msgRequeued is a download whose job was queued again elsewhere.
