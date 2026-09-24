@@ -551,6 +551,52 @@ it("a follow's title is a link to its lessons, reachable and followed by keyboar
   expect(await screen.findByText("At /lessons?follow=1")).toBeInTheDocument()
 })
 
+// UI review round 5c, Low 1: with 12px between Edit and Remove, a slightly
+// missed press lands on the strip between them, or on the cell's padding.
+// jsdom has no layout, so "clicking the gap" is a click whose target is the
+// element the gap belongs to: the buttons' flex row, and the cell around it.
+// A click on another cell is the control: it does navigate.
+describe("a click in a follow's actions never opens its lessons", () => {
+  function renderRoutes() {
+    server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+    renderWithProviders(
+      <Routes>
+        <Route path="/" element={<Follows />} />
+        <Route path="/lessons" element={<Where />} />
+      </Routes>,
+    )
+  }
+  const edit = () => screen.findByRole("button", { name: "Edit Stick Control" })
+
+  it.each([
+    ["the gap between Edit and Remove", async () => (await edit()).parentElement!],
+    ["the actions cell's padding", async () => (await edit()).closest("td")!],
+  ])("%s", async (_, target) => {
+    renderRoutes()
+    const el = await target()
+    expect(el).toContainElement(screen.getByRole("button", { name: "Remove Stick Control" }))
+    fireEvent.click(el)
+    expect(screen.getByRole("link", { name: "Stick Control" })).toBeInTheDocument()
+    expect(screen.queryByText(/^At \/lessons/)).not.toBeInTheDocument()
+
+    // The control: the same row's Kind cell does navigate.
+    const row = screen.getByRole("link", { name: "Stick Control" }).closest("tr")!
+    fireEvent.click(within(row).getByText("node"))
+    expect(await screen.findByText("At /lessons?follow=1")).toBeInTheDocument()
+  })
+
+  it.each([
+    ["Edit", "Edit Stick Control", "dialog"],
+    ["Remove", "Remove Stick Control", "alertdialog"],
+  ] as const)("%s opens its dialog and stays on Follows", async (_, name, role) => {
+    renderRoutes()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole("button", { name }))
+    expect(await screen.findByRole(role)).toBeInTheDocument()
+    expect(screen.queryByText(/^At \/lessons/)).not.toBeInTheDocument()
+  })
+})
+
 // --- Add follow: the preview belongs to the exact input it was built from ------
 
 function renderAdd() {

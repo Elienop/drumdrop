@@ -166,17 +166,18 @@ export function Follows() {
                     <TableCell className="text-muted-foreground">
                       {formatRelativeTime(f.last_synced_at)}
                     </TableCell>
-                    <TableCell>
+                    {/* The whole actions cell stops the row's click, not only
+                        the buttons: the 12px between Edit and Remove, and the
+                        cell's padding around them, are a slightly missed
+                        press, and must not open the follow's lessons. */}
+                    <TableCell onClick={(e) => e.stopPropagation()}>
                       <div className="flex justify-end gap-3">
                         <Button
                           variant="ghost"
                           size="sm"
                           aria-label={`Edit ${f.title}`}
                           data-follow-edit={f.id}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            openRowDialog(setEditing, f)
-                          }}
+                          onClick={() => openRowDialog(setEditing, f)}
                         >
                           <Pencil />
                           Edit
@@ -186,10 +187,7 @@ export function Follows() {
                           size="sm"
                           aria-label={`Remove ${f.title}`}
                           data-follow-remove={f.id}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            openRowDialog(setRemoving, f)
-                          }}
+                          onClick={() => openRowDialog(setRemoving, f)}
                         >
                           <Trash2 />
                           Remove
