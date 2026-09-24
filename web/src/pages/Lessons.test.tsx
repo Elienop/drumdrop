@@ -1064,12 +1064,12 @@ const keptAfterFailure: LessonDTO = {
 }
 
 describe("a downloaded lesson whose re-download failed", () => {
-  it("shows the server's note like any other row note: muted, clamped to two lines, all of it on hover", async () => {
+  it("shows the server's note like any other row note: muted, clamped, all of it on hover", async () => {
     server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([keptAfterFailure])))
     renderLessons()
 
     const note = await screen.findByText(KEPT_NOTE)
-    expect(note).toHaveClass("text-muted-foreground", "line-clamp-2")
+    expect(note).toHaveClass("text-muted-foreground", "line-clamp-3", "xl:line-clamp-2")
     expect(note).toHaveAttribute("title", KEPT_NOTE)
     expect(note.closest("td")).toHaveTextContent(/^Moeller Whip/)
     const row = note.closest("tr")!
@@ -1155,7 +1155,7 @@ it("a downloaded lesson Musora didn't return shows the not-returned note, and it
   renderLessons()
 
   const note = await screen.findByText(NOT_RETURNED_NOTE)
-  expect(note).toHaveClass("text-muted-foreground", "line-clamp-2")
+  expect(note).toHaveClass("text-muted-foreground", "line-clamp-3", "xl:line-clamp-2")
   expect(note.closest("td")).toHaveTextContent(/^Swiss Army Triplet/)
   expect(within(note.closest("tr")!).getByText("downloaded")).toBeInTheDocument()
 
@@ -1181,17 +1181,20 @@ it("a clamped row note carries its full text in a title", async () => {
   renderLessons()
 
   const note = await screen.findByText(long.trim())
-  expect(note).toHaveClass("line-clamp-2")
+  expect(note).toHaveClass("line-clamp-3", "xl:line-clamp-2")
   expect(note).toHaveAttribute("title", long.trim())
 })
 
-// UI review round 5e, Low D. Titles don't wrap, so the title column is as wide
-// as the longest title on the page: with short titles only it left a note
-// 244px wide at 1024px, and the clamp cut the sentence. The note keeps 28rem
-// whatever the titles are, which fits every sentence the server writes in two
-// lines (the longest, 147 characters, measured at about 27rem in Chromium).
-// jsdom has no layout, so this pins the class; the width was measured in a
-// browser.
+// UI review round 5e, Low D, and the owner's ruling 2026-09-24, (t). Titles
+// don't wrap, so the title column is as wide as the longest title on the page:
+// with short titles only it left a note 244px wide at 1024px, and the clamp cut
+// the sentence. From xl (1280px) the note keeps 28rem and two lines, which fits
+// every sentence the server writes (the longest, 147 characters, measured at
+// about 27rem in Chromium). Below xl it keeps 22rem and three lines, where the
+// same sentence fits, and the table then fits a 1024px window. jsdom has no
+// layout, so this pins the classes, both halves, and that no unprefixed width
+// or clamp class but these is left to compete with them; the widths were
+// measured in a browser.
 it("a row note keeps its width, however short the titles on the page", async () => {
   // failMusora's lesson sentence, the longest (internal/scheduler/messages.go).
   const NOTE =
@@ -1207,12 +1210,25 @@ it("a row note keeps its width, however short the titles on the page", async () 
   renderLessons()
 
   const note = await screen.findByText(NOTE)
-  expect(note).toHaveClass("min-w-md", "max-w-md", "line-clamp-2")
+  // Below xl: 22rem, three lines.
+  expect(note).toHaveClass("min-w-88", "line-clamp-3", "max-w-md")
+  // From xl: 28rem, two lines.
+  expect(note).toHaveClass("xl:min-w-md", "xl:line-clamp-2")
+  const classes = note.className.split(/\s+/)
+  expect(classes.filter((c) => /^(min-w|max-w|line-clamp)-/.test(c)).sort()).toEqual([
+    "line-clamp-3",
+    "max-w-md",
+    "min-w-88",
+  ])
+  expect(classes.filter((c) => /^\w+:(min-w|max-w|line-clamp)-/.test(c)).sort()).toEqual([
+    "xl:line-clamp-2",
+    "xl:min-w-md",
+  ])
 })
 
 // Owner's ruling 2026-09-24, (t). Below xl (1280px) the Brand and Quality
-// columns are hidden, header and cells, to give a note's 28rem room on a
-// narrow window. Every other column stays. jsdom has no layout, so this pins
+// columns are hidden, header and cells, to give a row note room on a narrow
+// window. Every other column stays. jsdom has no layout, so this pins
 // the classes, by column: a header hidden without its cells (or the reverse)
 // would put every cell after it under the wrong header. The widths were
 // measured in a browser.

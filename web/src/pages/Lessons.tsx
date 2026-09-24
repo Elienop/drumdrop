@@ -56,10 +56,9 @@ const PAGE_SIZE = 50
 
 // WIDE_ONLY hides a column below xl (1280px). It is on the Brand and Quality
 // columns, header and cells alike, so the cells stay under their headers
-// (owner's ruling 2026-09-24, (t)). A row note keeps 28rem, so with short
-// titles the table needed 1243px of window before it stopped scrolling
-// sideways; without these two it needs 1109px. At 1024px it still scrolls
-// sideways, by 85px (measured in Chromium; BACKLOG D113).
+// (owner's ruling 2026-09-24, (t)). Below xl a row note also narrows to 22rem
+// (see the note), and together they let the table fit a 1024px window with
+// short titles (measured in Chromium; BACKLOG D131).
 const WIDE_ONLY = "hidden xl:table-cell"
 
 // A dialog opened from a row remembers the row order at that moment, so focus
@@ -408,20 +407,22 @@ export function Lessons() {
                       <TableCell className="font-medium">
                         {lesson.title}
                         {note && (
-                          // Clamped to two lines; the title attribute carries
-                          // all of it (a skip's reason is whatever was typed).
-                          // min-w-md: titles don't wrap, so the column is as
-                          // wide as the longest one on the page, and with
-                          // short titles only it left a note 244px at 1024px,
-                          // cut after a clause. At 28rem every sentence the
-                          // server writes fits in two lines (the longest,
-                          // 147 characters, needs about 27rem). A narrow
-                          // window scrolls the table sideways instead, as a
-                          // long title already makes it do; below xl, Brand
-                          // and Quality give it room first (WIDE_ONLY).
+                          // Clamped; the title attribute carries all of it (a
+                          // skip's reason is whatever was typed). A minimum
+                          // width: titles don't wrap, so the column is as wide
+                          // as the longest one on the page, and with short
+                          // titles only it left a note 244px at 1024px, cut
+                          // after a clause. From xl: 28rem and two lines, where
+                          // every sentence the server writes fits (the
+                          // longest, 147 characters, needs about 27rem). Below
+                          // xl: 22rem (min-w-88) and three lines, so that with
+                          // Brand and Quality hidden (WIDE_ONLY) the table fits
+                          // a 1024px window without scrolling sideways (owner's
+                          // ruling 2026-09-24, (t)). A long title still makes
+                          // it scroll.
                           <p
                             title={note}
-                            className="mt-0.5 line-clamp-2 max-w-md min-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground"
+                            className="mt-0.5 line-clamp-3 max-w-md min-w-88 text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground xl:line-clamp-2 xl:min-w-md"
                           >
                             {note}
                           </p>
