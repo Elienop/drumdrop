@@ -91,8 +91,10 @@ func TestWorkerPlexTvWritesNoEpisodeNFOTheMoveDidNotPlace(t *testing.T) {
 }
 
 // TestWorkerPlexTvReDownloadReplacesByRecord proves a re-download removes the
-// lesson's previously recorded entries (here under an old title) and never
-// another lesson's at the same episode number.
+// lesson's previously recorded files (here under an old title) and never
+// another lesson's at the same episode number. Its recorded folder, whose file
+// the download does not bring back, stays, and is no longer recorded (owner
+// ruling 2026-09-24 (e)).
 func TestWorkerPlexTvReDownloadReplacesByRecord(t *testing.T) {
 	w, store, _, _, season := plexWorker(t)
 	mine := []string{"Beginner Course - s01e05 - Old Name.mp4", "Beginner Course - s01e05 - Old Name resources/"}
@@ -107,7 +109,8 @@ func TestWorkerPlexTvReDownloadReplacesByRecord(t *testing.T) {
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	assertExist(t, false, paths(season, mine...)...)
+	assertExist(t, false, paths(season, mine[0])...)
+	assertSeeded(t, season, mine[1])
 	assertExist(t, true, paths(season, theirs...)...)
 	if rec := onlyRecord(t, store); len(rec.entries) != 2 {
 		t.Errorf("recorded entries %v, want the 2 new ones", rec.entries)
@@ -115,8 +118,10 @@ func TestWorkerPlexTvReDownloadReplacesByRecord(t *testing.T) {
 }
 
 // TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord proves a move refused
-// because another lesson owns one of its names records the lesson in scratch
-// and still records the previous library entries as its own.
+// because another lesson owns one of its names, for a lesson already in the
+// library, is not placed in downloads instead (owner ruling 2026-09-24 (f)):
+// every attempt fails, nothing is recorded, so the previous library entries
+// stay the lesson's, and the job fails with failKeptInLibrary.
 func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	w, store, _, _, season := plexWorker(t)
 	base := "Beginner Course - s01e05 - Lesson A"

@@ -232,7 +232,10 @@ func TestWorkerStoppedReDownloadKeepsTheEarlierDownload(t *testing.T) {
 // lesson's own earlier entries the placement set aside are what it deletes,
 // so they are not put back (the rest still is). A subfolder the placement
 // merged into (the default layout's resources/, where the download's new.pdf
-// replaced nothing) had nothing set aside, so it is as it was.
+// replaced nothing) had nothing set aside, so it is as it was; so is plex-tv's
+// resources folder under the older title, which the placement never set aside
+// because the download does not bring back its f.pdf (owner ruling
+// 2026-09-24 (e)).
 func TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T) {
 	for _, setup := range setups {
 		for _, layout := range []string{"", LayoutPlexTV} {
@@ -275,7 +278,7 @@ func TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T) {
 						}
 						if recorded && stop == "delete" {
 							for _, n := range e.names {
-								if layout == "" && strings.HasSuffix(n, "/") {
+								if strings.HasSuffix(n, "/") {
 									assertSeeded(t, e.dir, n)
 								} else {
 									assertExist(t, false, paths(e.dir, n)...)
@@ -316,7 +319,10 @@ func seedUnrecorded(t *testing.T, w *Worker) earlier {
 // every setup and layout. In the default layout the earlier resources/ folder
 // is at the name the download's own resources/ goes to, so the two are merged
 // (owner ruling 2026-09-24; TestWorkerReDownloadMergesTheSubfolders): the
-// earlier file stays beside the new one, and nothing in it is replaced.
+// earlier file stays beside the new one, and nothing in it is replaced. In
+// plex-tv it is under an older title, and the download does not bring back
+// its f.pdf, so it stays where it is and the log says why (owner ruling
+// 2026-09-24 (e)).
 func TestWorkerReDownloadReplacesOnlyTheLessonsFiles(t *testing.T) {
 	for _, setup := range setups {
 		for _, layout := range []string{"", LayoutPlexTV} {
@@ -355,9 +361,15 @@ func TestWorkerReDownloadReplacesOnlyTheLessonsFiles(t *testing.T) {
 				assertContent(t, e.dir, unrelated...)
 				replaced := paths(e.dir, e.names...)
 				if layout == LayoutPlexTV {
-					// The old title's entries are gone; the nfo no lesson recorded
-					// was replaced by the episode nfo.
+					// The old title's video is gone, its resources folder is kept;
+					// the nfo no lesson recorded was replaced by the episode nfo.
+					replaced = replaced[:1]
 					assertExist(t, false, replaced...)
+					assertSeeded(t, e.dir, e.names[1])
+					want := fmt.Sprintf("⚠ 100 left its previous folder %q where it was, no longer recorded: the new download did not bring back \"f.pdf\"", paths(e.dir, e.names[1])[0])
+					if !strings.Contains(log.String(), want) {
+						t.Errorf("log %q does not say %s", log.String(), want)
+					}
 				} else {
 					replaced = paths(e.dir, "05 - Lesson A.mp4", "05 - Lesson A.nfo")
 					assertSeeded(t, e.dir, "resources/")

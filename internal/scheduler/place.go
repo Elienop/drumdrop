@@ -22,18 +22,19 @@ import (
 type placement struct {
 	// dir is the folder the entries were placed in: the lesson's own folder in
 	// the default layout, the season folder in plex-tv.
-	dir string
-	// placed are the entries placed, as absolute paths.
-	placed []string
-	dest   *os.Root
-	src    *os.Root
-	steps  []placedStep
+	dir   string
+	dest  *os.Root
+	src   *os.Root
+	steps []placedStep
 	// merged are the subfolders placed entry by entry into a folder already
 	// at their name (mergeFolder), in the order they were placed.
 	merged []placedLevel
 	aside  *asideArea
 	// created is the lesson folder the placement made, if it made one.
 	created *createdDir
+	// kept are the lesson's previous folders the placement left where they
+	// were (previousStays), for the log once it is committed.
+	kept []keptFolder
 }
 
 // commit keeps the placement: the entries it replaced are removed. It returns
@@ -256,9 +257,11 @@ func lessonSteps(src *os.Root, dstDir string) ([]plexMoveStep, error) {
 // ruling 2026-09-24; see clearNames). A folder another lesson records
 // anything in refuses the whole placement. The lesson's previous folder, when
 // its row records another one (the title changed, the library was added, or
-// the download was kept in downloads when a move was refused), is replaced
-// whole, unless another lesson records something in it. A replaced entry is
-// only set aside (asideArea) until the placement is committed.
+// the download was kept in downloads when a move was refused), goes only when
+// the download brings back every file in it and no other lesson records
+// anything in it; otherwise it stays where it is, no longer recorded, and the
+// placement's kept says why (previousStays). A replaced entry is only set
+// aside (asideArea) until the placement is committed.
 //
 // Everything goes through folders held open (os.Root) and renameAt, which
 // never replaces; a copy happens only across filesystems (EXDEV). It writes
@@ -305,8 +308,15 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 		}
 		return nil, errors.Join(err, aside.finish(false))
 	}
+	var kept []keptFolder
 	if prev, ok := previousFolder(self, dstDir, claims, roots); ok {
-		if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
+		tree, err := readDownloadTree(src.dir)
+		if err != nil {
+			return fail(err)
+		}
+		if why := tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false); why != "" {
+			kept = append(kept, keptFolder{path: prev.path, why: why})
+		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
 			return fail(fmt.Errorf("refusing to place the lesson: %w", err))
 		}
 	}
@@ -360,11 +370,7 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 			return fail(errors.Join(fmt.Errorf("flush %q after the placement: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
 		}
 	}
-	p := &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, merged: merged, aside: aside, created: created}
-	for _, st := range placed {
-		p.placed = append(p.placed, st.dst)
-	}
-	return p, nil
+	return &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, merged: merged, aside: aside, created: created, kept: kept}, nil
 }
 
 // stuckErr names entries an undo could not take back, or is nil.
@@ -378,8 +384,9 @@ func stuckErr(stuck []string) error {
 // heldPath is a path and the root it is inside.
 type heldPath struct{ root, path string }
 
-// previousFolder is the lesson's previous folder in the default layout, to be
-// replaced by a placement at dstDir: the folder its row records, when that is
+// previousFolder is the lesson's previous folder in the default layout, which
+// a placement at dstDir replaces if the download brings back everything in it
+// (previousStays): the folder its row records, when that is
 // a lesson folder (not a season folder), not dstDir, not holding or held by
 // dstDir, inside one of roots, and holding nothing another lesson records.
 func previousFolder(self database.Lesson, dstDir string, claims *library.Claims, roots []string) (heldPath, bool) {

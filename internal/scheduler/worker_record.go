@@ -85,6 +85,9 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 	if cerr != nil {
 		fmt.Fprintf(w.log(), "  ⚠ %d: what the placement replaced could not all be removed: %v\n", id, cerr)
 	}
+	for _, k := range pl.kept {
+		fmt.Fprintf(w.log(), "  ⚠ %d left its previous folder %q where it was, no longer recorded: %s\n", id, k.path, k.why)
+	}
 	return rec.Bytes, true, nil
 }
 

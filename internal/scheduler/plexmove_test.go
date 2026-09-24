@@ -124,7 +124,10 @@ func TestPlexTVMoveAcceptsAnyName(t *testing.T) {
 // the owner ruled on: four lessons share episode 5, each title the first plus
 // a tag or a suffix. Re-downloading any one of them replaces its own entries
 // and never touches the others', all recorded, or all moved before the record
-// existed (then the mover's own previous entries are found by name).
+// existed (then the mover's own previous entries are found by name). The
+// mover's resources folder stays where it is, no longer owned: the
+// re-download has no resources, so it brings back none of its files (owner
+// ruling 2026-09-24 (e)).
 func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for i, mover := range fiveTitles {
@@ -167,7 +170,11 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 						}
 						continue
 					}
-					assertExist(t, false, p) // the previous download's other entries are gone
+					if strings.HasSuffix(p, " resources") {
+						assertExist(t, true, p) // nothing of it was brought back
+						continue
+					}
+					assertExist(t, false, p) // the previous download's other files are gone
 				}
 				if want := paths(season, base+".mp4", base+".nfo"); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
 					t.Errorf("owned %v, want %v", owned(res), want)
@@ -179,7 +186,8 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 
 // TestPlexTVMoveReplacesThePreviousDownloadByRecord proves a re-download
 // removes exactly the lesson's previously recorded entries, even under a title
-// Musora has changed since, and nothing it did not record (a same-episode
+// Musora has changed since (a folder there because the download brings back
+// every file in it), and nothing it did not record (a same-episode
 // look-alike, another lesson's entry).
 func TestPlexTVMoveReplacesThePreviousDownloadByRecord(t *testing.T) {
 	tmp := t.TempDir()
@@ -190,7 +198,8 @@ func TestPlexTVMoveReplacesThePreviousDownloadByRecord(t *testing.T) {
 		"Songs - s01e05 - Old Title resources/", "Songs - s01e05 - Even Flow [Original].mp4",
 	}
 	untouched := []string{"Songs - s01e05 - Even Flow Live.mp4", "Songs - s01e50 - Fifty.mp4", "Songs - s01e05 - Old Title-Part 2.mp4"}
-	seedSeason(t, season, previous...)
+	seedSeason(t, season, previous[0], previous[1], previous[3])
+	writeTree(t, filepath.Join(season, "Songs - s01e05 - Old Title resources"), map[string]string{"song.pdf": "old song"})
 	seedSeason(t, season, untouched...)
 	other := recordedRow(2, season, "Songs - s01e05 - Old Title-Part 2.mp4")
 	lessonDir, episodeBase, _ := seedSongScratch(t, tmp)
@@ -346,9 +355,11 @@ func TestPlexTVMoveStopsWhenThePreviousDownloadCannotBeCleared(t *testing.T) {
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, _, season := seedSongScratch(t, tmp)
 	// Under an older title: at one of this episode's names, a folder of the
-	// lesson's own would be merged, not set aside.
+	// lesson's own would be merged, not set aside. Its one file is brought
+	// back by the download, so it is to be set aside (owner ruling (e)).
 	stale := "Songs - s01e05 - Old Title resources"
-	seedSeason(t, season, stale+"/", "Songs - s01e06 - Six.mp4")
+	writeTree(t, filepath.Join(season, stale), map[string]string{"song.pdf": "old song"})
+	seedSeason(t, season, "Songs - s01e06 - Six.mp4")
 	makeUndeletable(t, filepath.Join(season, stale))
 
 	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,

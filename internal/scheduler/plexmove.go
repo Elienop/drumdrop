@@ -106,7 +106,10 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 //     case-insensitive filesystem).
 //  2. It sets the lesson's previous download aside (its recorded entries, or
 //     a legacy row's name-matched ones that no other lesson claims), even
-//     under an old title, so a re-download replaces instead of merging.
+//     under an old title: a file, and a folder whose every file the download
+//     brings back. Any other folder of it stays where it is, no longer
+//     recorded, and the placement's kept says why (owner ruling 2026-09-24
+//     (e)). An entry at one of this episode's names is left to step 3.
 //  3. It sets aside an existing entry at one of its names, the lesson's own
 //     or one no lesson claims (a leftover drumdrop no longer tracks) (owner
 //     ruling #66), except a real folder at the name of a folder it places:
@@ -184,17 +187,28 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	}
 
 	// 2. The previous download is set aside first, so an undone move puts it
-	// back as it was. An entry of it at one of this episode's names is left to
-	// step 3, which merges a real folder there with the folder placed at its
-	// name, so what it holds that the download does not replace stays.
-	placing := make(map[string]bool, len(plan.steps))
-	for _, st := range plan.steps {
-		placing[st.dst] = true
+	// back as it was. An entry of it at one of this episode's names (by
+	// identity, so a title that changed only in case on a case-insensitive
+	// disk counts) is left to step 3, which merges a real folder there with
+	// the folder placed at its name, so what it holds that the download does
+	// not replace stays. One at an old name goes if it is a file (the record
+	// proves it the lesson's, owner ruling #66), and a folder goes only if the
+	// download brings back every file in it; otherwise it stays, no longer
+	// recorded (previousStays).
+	tree, err := readDownloadTree(src.dir)
+	if err != nil {
+		return fail(err, nil)
 	}
+	var kept []keptFolder
 	ours := make(map[string]bool, len(previous.Remove))
 	for _, p := range previous.Remove {
 		ours[p] = true
-		if placing[p] {
+		if dst := placedAt(p, plan.steps); dst != "" {
+			ours[dst] = true
+			continue
+		}
+		if why := tree.previousStays(heldPath{root: libraryDir, path: p}, plexFolderInto(plan.steps), "", "", true); why != "" {
+			kept = append(kept, keptFolder{path: p, why: why})
 			continue
 		}
 		if err := aside.setAsidePath(libraryDir, p, true); err != nil {
@@ -202,10 +216,12 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		}
 	}
 	// A previous download in the default layout (a lesson folder its row
-	// records, such as one kept in downloads when a move was refused) is
-	// replaced too.
+	// records, such as one kept in downloads when a move was refused) goes by
+	// the same rule: only if the download brings back every file in it.
 	if prev, ok := previousFolder(lib.self, seasonDir, c, lib.roots); ok {
-		if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
+		if why := tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false); why != "" {
+			kept = append(kept, keptFolder{path: prev.path, why: why})
+		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
 			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
 		}
 	}
@@ -234,7 +250,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	for _, st := range plan.steps {
 		res.placed = append(res.placed, st.dst)
 	}
-	res.pending = &placement{dir: seasonDir, placed: res.placed, dest: seasonRoot, src: src.dir, steps: placed, merged: merged, aside: aside}
+	res.pending = &placement{dir: seasonDir, dest: seasonRoot, src: src.dir, steps: placed, merged: merged, aside: aside, kept: kept}
 	return res, errors.Join(notes...)
 }
 
