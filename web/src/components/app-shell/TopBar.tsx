@@ -6,6 +6,7 @@ import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { PendingButton } from "@/components/PendingButton"
 import { statusTone } from "@/components/StatusBadge"
 import { GlobalProgress } from "./GlobalProgress"
 
@@ -36,15 +37,20 @@ export function TopBar() {
   return (
     <header className="flex h-14 items-center gap-4 border-b px-6">
       <GlobalProgress paused={paused} />
-      <Button
+      {/* PendingButton, not `disabled`: a disabled button drops keyboard
+          focus to <body> while the request runs. The pending label is the
+          press's while it runs, and the one a press would show while idle,
+          so the hidden label sizing the button does not change on a press. */}
+      <PendingButton
         size="sm"
         variant="secondary"
+        pending={toggle.isPending}
+        pendingLabel={(toggle.isPending ? toggle.variables : paused) ? "Resuming…" : "Pausing…"}
         onClick={() => toggle.mutate(paused)}
-        disabled={toggle.isPending}
       >
         {paused ? <Play /> : <Pause />}
         {paused ? "Resume" : "Pause"}
-      </Button>
+      </PendingButton>
       <span
         className={cn(
           "rounded-full border px-2.5 py-1 text-xs font-medium",

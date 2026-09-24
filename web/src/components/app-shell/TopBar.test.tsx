@@ -73,3 +73,64 @@ it("shows Resume and the paused indicator when paused", async () => {
 
   await waitFor(() => expect(resumeHit).toBe(1))
 })
+
+// The press keeps keyboard focus while its request runs: a disabled button
+// would drop it to <body>, and the next Tab would start from the page's top.
+it("Pause keeps keyboard focus on the button while its request runs", async () => {
+  let answer!: () => void
+  server.use(
+    http.get(`${ORIGIN}/api/summary`, () => HttpResponse.json(summary(false))),
+    http.post(
+      `${ORIGIN}/api/pause`,
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () => resolve(HttpResponse.json({ paused: true }))
+        }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(<TopBar />)
+
+  const btn = await screen.findByRole("button", { name: "Pause" })
+  btn.focus()
+  await user.keyboard("{Enter}")
+
+  await waitFor(() => expect(btn).toHaveAttribute("aria-disabled", "true"))
+  expect(btn).toHaveFocus()
+  expect(btn).toBeEnabled()
+  expect(btn).toHaveAccessibleName("Pausing…")
+  answer()
+  await waitFor(() => expect(btn).not.toHaveAttribute("aria-disabled"))
+  expect(btn).toHaveFocus()
+})
+
+// After a failure the flag is re-read too, not only after a success: a
+// failed press may still have changed it on the server, and the button must
+// not keep offering a state the server no longer has.
+it.each([
+  ["Pause", false, "pause"],
+  ["Resume", true, "resume"],
+])("a failed %s re-reads the pause flag", async (button, paused, path) => {
+  let summaryReads = 0
+  server.use(
+    http.get(`${ORIGIN}/api/summary`, () => {
+      summaryReads++
+      return HttpResponse.json(summary(paused))
+    }),
+    http.post(`${ORIGIN}/api/${path}`, () =>
+      HttpResponse.json({ error: SERVER_ERROR }, { status: 500 }),
+    ),
+  )
+  renderWithProviders(
+    <>
+      <TopBar />
+      <Toaster />
+    </>,
+  )
+
+  const btn = await screen.findByRole("button", { name: button })
+  const readsBefore = summaryReads
+  await userEvent.click(btn)
+  await screen.findByText(SERVER_ERROR)
+  await waitFor(() => expect(summaryReads).toBeGreaterThan(readsBefore))
+})
