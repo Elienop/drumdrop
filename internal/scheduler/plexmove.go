@@ -64,7 +64,9 @@ type plexMoveResult struct {
 	placed []string
 	// kept are entries of the lesson's previous download that are still its
 	// own when nothing was placed (the move refused, or was undone), plus any
-	// placed entry an undo could not take back.
+	// placed entry an undo could not take back. When the move placed the
+	// lesson, they are its recorded entries at this episode's base that the
+	// download did not bring back, which stay (owner ruling 2026-09-24 (j)).
 	kept []string
 	// known is false when the move stopped before it could tell what the
 	// lesson owns in the library (it could not start, or the lesson's own
@@ -109,7 +111,10 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 //     under an old title: a file, and a folder whose every file the download
 //     brings back. Any other folder of it stays where it is, no longer
 //     recorded, and the placement's kept says why (owner ruling 2026-09-24
-//     (e)). An entry at one of this episode's names is left to step 3.
+//     (e)). An entry at one of this episode's names is left to step 3. One
+//     at this episode's base that the download does not bring back
+//     (captions or a poster it failed to fetch again, a resources folder)
+//     stays where it is and stays recorded (owner ruling 2026-09-24 (j)).
 //  3. It sets aside an existing entry at one of its names, the lesson's own
 //     or one no lesson claims (a leftover drumdrop no longer tracks) (owner
 //     ruling #66), except a real folder at the name of a folder it places:
@@ -194,17 +199,30 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	// not replace stays. One at an old name goes if it is a file (the record
 	// proves it the lesson's, owner ruling #66), and a folder goes only if the
 	// download brings back every file in it; otherwise it stays, no longer
-	// recorded (previousStays).
+	// recorded (previousStays). One at this episode's base that no step
+	// places at is not a previous download under an old title: it stays, and
+	// stays the lesson's (owner ruling 2026-09-24 (j)).
 	tree, err := readDownloadTree(src.dir)
 	if err != nil {
 		return fail(err, nil)
 	}
-	var kept []keptFolder
+	listing, err := listFolder(seasonRoot)
+	if err != nil {
+		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
+	}
+	var (
+		kept  []keptFolder
+		stays []string
+	)
 	ours := make(map[string]bool, len(previous.Remove))
 	for _, p := range previous.Remove {
 		ours[p] = true
 		if dst := placedAt(p, plan.steps); dst != "" {
 			ours[dst] = true
+			continue
+		}
+		if atEpisodeBase(p, seasonDir, plan.episodeBase, listing) {
+			stays = append(stays, p)
 			continue
 		}
 		if why := tree.previousStays(heldPath{root: libraryDir, path: p}, plexFolderInto(plan.steps), "", "", true); why != "" {
@@ -246,12 +264,39 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		return fail(err, stuck)
 	}
 
-	res := plexMoveResult{seasonDir: seasonDir, videoPath: plan.videoPath, episodeBase: plan.episodeBase, known: true}
+	res := plexMoveResult{seasonDir: seasonDir, videoPath: plan.videoPath, episodeBase: plan.episodeBase, kept: stays, known: true}
 	for _, st := range plan.steps {
 		res.placed = append(res.placed, st.dst)
 	}
 	res.pending = &placement{dir: seasonDir, dest: seasonRoot, src: src.dir, steps: placed, merged: merged, aside: aside, kept: kept}
 	return res, errors.Join(notes...)
+}
+
+// atEpisodeBase reports whether p, an entry the lesson's record names, is in
+// the season folder seasonDir under one of the names the move gives the
+// episode base (library.EpisodeEntry): an entry of this episode, not of the
+// lesson's previous download under an old title. listing is the season
+// folder's entries (name -> isDir); an entry not in it is not there.
+func atEpisodeBase(p, seasonDir, base string, listing map[string]bool) bool {
+	if filepath.Dir(p) != filepath.Clean(seasonDir) {
+		return false
+	}
+	isDir, ok := listing[filepath.Base(p)]
+	return ok && library.EpisodeEntry(base, filepath.Base(p), isDir, listing)
+}
+
+// listFolder lists the folder dir holds open (name -> isDir; a symlink is not
+// a folder).
+func listFolder(dir *os.Root) (map[string]bool, error) {
+	entries, err := fs.ReadDir(dir.FS(), ".")
+	if err != nil {
+		return nil, err
+	}
+	l := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		l[e.Name()] = e.IsDir()
+	}
+	return l, nil
 }
 
 // scratchDir is a finished download's lesson folder in its private folder,

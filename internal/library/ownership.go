@@ -523,6 +523,15 @@ func legacyEpisodeBases(l database.Lesson, seasonDir string, listing map[string]
 // subtitleExts are the subtitle formats yt-dlp writes next to a lesson video.
 var subtitleExts = map[string]bool{"vtt": true, "srt": true, "ass": true, "ssa": true, "ttml": true, "lrc": true, "json3": true, "srv1": true, "srv2": true, "srv3": true}
 
+// EpisodeEntry reports whether name, an entry of a season folder whose
+// entries are listing (name -> isDir), is one of the entries the plex-tv move
+// gives the episode base: the grammar legacyEpisodeEntry documents. It says
+// nothing about whose the entry is; a caller that acts on it must know that
+// from a record.
+func EpisodeEntry(base, name string, isDir bool, listing map[string]bool) bool {
+	return legacyEpisodeEntry(base, name, isDir, listing)
+}
+
 // legacyEpisodeEntry reports whether name is one of the entries the plex-tv
 // move gave the episode base: exactly the shapes DownloadLesson produces, with
 // the scratch base swapped for base:

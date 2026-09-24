@@ -125,9 +125,9 @@ func TestPlexTVMoveAcceptsAnyName(t *testing.T) {
 // a tag or a suffix. Re-downloading any one of them replaces its own entries
 // and never touches the others', all recorded, or all moved before the record
 // existed (then the mover's own previous entries are found by name). The
-// mover's resources folder stays where it is, no longer owned: the
-// re-download has no resources, so it brings back none of its files (owner
-// ruling 2026-09-24 (e)).
+// mover's entries at its episode base that the re-download (a video and an
+// nfo) does not bring back, its poster, captions or resources folder, stay
+// where they are and stay its own (owner ruling 2026-09-24 (j)).
 func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for i, mover := range fiveTitles {
@@ -162,7 +162,6 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 						assertExist(t, true, paths(season, fiveLookAlikes[title]...)...)
 					}
 				}
-				base := "Show - s01e05 - " + mover
 				for _, p := range paths(season, fiveLookAlikes[mover]...) {
 					if strings.HasSuffix(p, ".mp4") || strings.HasSuffix(p, ".nfo") {
 						if got, _ := os.ReadFile(p); !strings.HasPrefix(string(got), "new") {
@@ -170,13 +169,9 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 						}
 						continue
 					}
-					if strings.HasSuffix(p, " resources") {
-						assertExist(t, true, p) // nothing of it was brought back
-						continue
-					}
-					assertExist(t, false, p) // the previous download's other files are gone
+					assertExist(t, true, p) // at the episode base, not brought back: kept
 				}
-				if want := paths(season, base+".mp4", base+".nfo"); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
+				if want := paths(season, fiveLookAlikes[mover]...); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
 					t.Errorf("owned %v, want %v", owned(res), want)
 				}
 			})
