@@ -1140,7 +1140,7 @@ describe("a downloaded lesson whose re-download failed", () => {
 
 // The server's not-returned note, verbatim (internal/scheduler, msgNotReturnedKept).
 const NOT_RETURNED_NOTE =
-  "Musora didn't return this lesson, so the earlier download was kept. It may be locked for your account, or removed."
+  "Musora didn't return this lesson, so the earlier download was kept. The lesson may be locked for your account, or removed."
 
 it("a downloaded lesson Musora didn't return shows the not-returned note, and its menu offers Download", async () => {
   const notReturned: LessonDTO = {
