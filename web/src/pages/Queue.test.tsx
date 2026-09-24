@@ -120,13 +120,35 @@ it("retries a failed job (202) and shows a success toast", async () => {
     .toBeInTheDocument()
 })
 
-// A 409 says why in the server's own sentence; the toast shows it as it is,
-// stays until closed, and the list refreshes (the row was out of date).
-const NOT_ACTIVE = "This job already finished, so there's nothing to cancel."
+// The server's sentences, verbatim from internal/server/messages.go.
+const NOT_ACTIVE = "This download has already ended, so there's nothing to cancel."
+const CANCEL_GONE =
+  "This download is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to cancel."
+const RETRY_GONE =
+  "This download is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to retry."
 const BEING_DELETED =
-  "This lesson's files are being deleted right now. Try again once that has finished."
+  "This lesson's files are being deleted right now. Try again once that's finished."
+const SERVER_ERROR =
+  "This may not have finished: something went wrong on the server. Check the server log, fix the problem, then try again."
 
-it("a 409 on cancel toasts the outcome with the server's sentence, and refreshes the list", async () => {
+// toastWith is the toast whose title is `title`.
+const toastWith = async (title: string) =>
+  (await screen.findByText(title)).closest<HTMLElement>("[data-sonner-toast]")!
+
+// A neutral note: not red, and no close button, since it goes away by itself
+// (failureToast's toasts have one, and stay until it is pressed).
+function expectNeutral(t: HTMLElement) {
+  expect(t).not.toHaveAttribute("data-type", "error")
+  expect(within(t).queryByRole("button", { name: "Close toast" })).not.toBeInTheDocument()
+}
+
+// A race with something done elsewhere (the job ended, or was removed) is
+// not a failure: a neutral note naming the lesson, and the list refreshes so
+// the stale row goes.
+it.each([
+  ["409: the job had already ended", 409, NOT_ACTIVE, "Already ended"],
+  ["404: the job was removed meanwhile", 404, CANCEL_GONE, "Already removed"],
+])("a cancel answered %s reads as a neutral note, and refreshes the list", async (_, status, sentence, title) => {
   let listFetches = 0
   server.use(
     http.get(`${ORIGIN}/api/jobs`, () => {
@@ -135,7 +157,7 @@ it("a 409 on cancel toasts the outcome with the server's sentence, and refreshes
     }),
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
     http.post(`${ORIGIN}/api/jobs/22/cancel`, () =>
-      HttpResponse.json({ error: NOT_ACTIVE }, { status: 409 }),
+      HttpResponse.json({ error: sentence }, { status }),
     ),
   )
   const user = userEvent.setup()
@@ -151,9 +173,74 @@ it("a 409 on cancel toasts the outcome with the server's sentence, and refreshes
   const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
   await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
 
-  expect(await screen.findByText("Couldn't cancel the job")).toBeInTheDocument()
-  expect(screen.getByText(NOT_ACTIVE, { selector: "[data-description]" })).toBeInTheDocument()
-  expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+  const t = await toastWith(title)
+  expect(within(t).getByText("Double Stroke Roll")).toBeInTheDocument()
+  expectNeutral(t)
+  expect(screen.queryByText("Couldn't cancel the job")).not.toBeInTheDocument()
+  await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
+})
+
+it("a retry answered 404 (the job was removed meanwhile) reads as a neutral note, and refreshes the list", async () => {
+  let listFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/jobs`, () => {
+      listFetches++
+      return HttpResponse.json([failedJob, runningJob])
+    }),
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
+    http.post(`${ORIGIN}/api/jobs/11/retry`, () =>
+      HttpResponse.json({ error: RETRY_GONE }, { status: 404 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Queue />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Single Stroke Roll")
+  const fetchesBefore = listFetches
+  const failedRow = screen.getByText("Single Stroke Roll").closest("tr")!
+  await user.click(within(failedRow).getByRole("button", { name: /retry/i }))
+
+  const t = await toastWith("Already removed")
+  expect(within(t).getByText("Single Stroke Roll")).toBeInTheDocument()
+  expectNeutral(t)
+  expect(screen.queryByText("Couldn't retry the job")).not.toBeInTheDocument()
+  await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
+})
+
+it("a cancel that really failed stays red with the server's sentence until closed, and refreshes the list", async () => {
+  let listFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/jobs`, () => {
+      listFetches++
+      return HttpResponse.json([failedJob, runningJob])
+    }),
+    http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)),
+    http.post(`${ORIGIN}/api/jobs/22/cancel`, () =>
+      HttpResponse.json({ error: SERVER_ERROR }, { status: 500 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Queue />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Double Stroke Roll")
+  const fetchesBefore = listFetches
+  const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
+  await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
+
+  const t = await toastWith("Couldn't cancel the job")
+  expect(t).toHaveAttribute("data-type", "error")
+  expect(within(t).getByText(SERVER_ERROR, { selector: "[data-description]" })).toBeInTheDocument()
+  expect(within(t).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
   await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
 })
 

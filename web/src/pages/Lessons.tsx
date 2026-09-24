@@ -8,7 +8,7 @@ import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { brandName, formatBytes, formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
-import { errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
+import { cancelOutcome, errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { ActiveDownload } from "@/lib/sse-reducer"
 import type { LessonDTO, LessonStatus } from "@/types"
 import { Badge } from "@/components/ui/badge"
@@ -150,44 +150,67 @@ export function Lessons() {
 
   // Row actions report a failure as a toast titled with the outcome and the
   // lesson, and the server's sentence (or our own, never "HTTP 502") below.
+  //
+  // A race with something done elsewhere is not a failure: a 404 (the
+  // lesson went with its follow, or a Skip or delete took its new download
+  // off the queue) reads "Already removed", and for Cancel a 409 (the
+  // download had already ended) reads "Already ended". Both are neutral notes
+  // that go away by themselves, like Skip's and Delete's. The lists refresh
+  // after a failure too, so a row that was out of date goes.
+  const refreshRows = () => {
+    qc.invalidateQueries({ queryKey: qk.jobs() })
+    qc.invalidateQueries({ queryKey: ["lessons"] })
+    qc.invalidateQueries({ queryKey: qk.summary })
+  }
+
   const download = useMutation({
-    mutationFn: (lesson: LessonDTO) => api.downloadLesson(lesson.railcontent_id),
-    onSuccess: ({ status: s }, lesson) => {
-      if (s === 202) toast.success("Queued", { description: lesson.title })
-      else toast.message("Already queued", { description: lesson.title })
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+    mutationFn: async (lesson: LessonDTO) => {
+      let queuedNow = false
+      const outcome = await itemOutcome(
+        api.downloadLesson(lesson.railcontent_id).then(({ status: s }) => {
+          queuedNow = s === 202
+        }),
+      )
+      return outcome === "already-gone" ? outcome : queuedNow ? "queued" : "already-queued"
+    },
+    onSuccess: (outcome, lesson) => {
+      const description = lesson.title
+      if (outcome === "already-gone") toast.message("Already removed", { description })
+      else if (outcome === "queued") toast.success("Queued", { description })
+      else toast.message("Already queued", { description })
     },
     onError: (err, lesson) => {
       failureToast(`Couldn't queue “${lesson.title}”`, errorMessage(err))
     },
+    onSettled: refreshRows,
   })
 
   const cancel = useMutation({
-    mutationFn: ({ jobId }: { jobId: number; lesson: LessonDTO }) => api.cancelJob(jobId),
-    onSuccess: (_job, { lesson }) => {
-      toast.success("Download canceled", { description: lesson.title })
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+    mutationFn: ({ jobId }: { jobId: number; lesson: LessonDTO }) =>
+      cancelOutcome(api.cancelJob(jobId)),
+    onSuccess: (outcome, { lesson }) => {
+      const description = lesson.title
+      if (outcome === "already-gone") toast.message("Already removed", { description })
+      else if (outcome === "already-ended") toast.message("Already ended", { description })
+      else toast.success("Download canceled", { description })
     },
     onError: (err, { lesson }) => {
       failureToast(`Couldn't cancel the download of “${lesson.title}”`, errorMessage(err))
     },
+    onSettled: refreshRows,
   })
 
   const unskip = useMutation({
-    mutationFn: (lesson: LessonDTO) => api.unskipLesson(lesson.railcontent_id),
-    onSuccess: (_l, lesson) => {
-      toast.success("Lesson un-skipped", { description: lesson.title })
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+    mutationFn: (lesson: LessonDTO) => itemOutcome(api.unskipLesson(lesson.railcontent_id)),
+    onSuccess: (outcome, lesson) => {
+      const description = lesson.title
+      if (outcome === "already-gone") toast.message("Already removed", { description })
+      else toast.success("Lesson un-skipped", { description })
     },
     onError: (err, lesson) => {
       failureToast(`Couldn't un-skip “${lesson.title}”`, errorMessage(err))
     },
+    onSettled: refreshRows,
   })
 
   // Per-lesson delete: the server first removes the lesson's queued and running

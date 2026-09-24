@@ -52,3 +52,17 @@ export function itemOutcome(request: Promise<unknown>): Promise<ItemOutcome> {
     },
   )
 }
+
+// cancelOutcome is itemOutcome for a job's Cancel, which has one more
+// harmless answer: "already-ended", the API's 409 when the job finished, failed
+// or was canceled before this request reached it (msgJobNotActive, the only
+// 409 the cancel handler writes). The user wanted it stopped and it has
+// stopped, so, like a 404, it is not a failure.
+export function cancelOutcome(request: Promise<unknown>): Promise<ItemOutcome | "already-ended"> {
+  return itemOutcome(request).catch((err: unknown) => {
+    if (err instanceof ApiHttpError && err.fromServer && err.status === 409) {
+      return "already-ended" as const
+    }
+    throw err
+  })
+}

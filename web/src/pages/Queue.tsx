@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom"
 import { RotateCcw, X } from "lucide-react"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
-import { errorMessage, failureToast } from "@/lib/errors"
+import { cancelOutcome, errorMessage, failureToast, itemOutcome } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { formatRelativeTime } from "@/lib/format"
 import type { JobDTO, JobStatus } from "@/types"
@@ -40,6 +40,17 @@ const RECENT_LIMIT = 50
 const CANCELABLE: JobStatus[] = ["queued", "running"]
 const RETRYABLE: JobStatus[] = ["failed", "canceled"]
 
+// A job a row action is about: its id, and the title its toasts name.
+interface JobRef {
+  id: number
+  title: string
+}
+
+// jobTitle names a job by its lesson's title, or by the lesson's id while
+// the title is not loaded.
+const jobTitle = (job: JobDTO, titleById: ReadonlyMap<number, string>) =>
+  titleById.get(job.railcontent_id) ?? `#${job.railcontent_id}`
+
 export function Queue() {
   const qc = useQueryClient()
   const [params, setParams] = useSearchParams()
@@ -72,31 +83,32 @@ export function Queue() {
     qc.invalidateQueries({ queryKey: qk.summary })
   }
 
-  // A failure shows the server's own sentence (a 409 says why: the job
-  // already finished, or its lesson's files are being deleted), and the list
-  // refreshes anyway: a refusal usually means the row is out of date.
+  // A race with something done elsewhere is not a failure: a job removed
+  // meanwhile (404), or, for Cancel, one that had already ended (409). Each
+  // gets a neutral note that goes away by itself, like Skip's and Delete's
+  // "Already removed". A real failure shows the server's own sentence (a
+  // retry's 409 says why: the job isn't failed or canceled, or its lesson's
+  // files are being deleted) and stays until closed. Either way the list
+  // refreshes: the row was out of date.
   const cancel = useMutation({
-    mutationFn: (id: number) => api.cancelJob(id),
-    onSuccess: () => {
-      toast.success("Job canceled")
-      invalidate()
+    mutationFn: ({ id }: JobRef) => cancelOutcome(api.cancelJob(id)),
+    onSuccess: (outcome, { title }) => {
+      if (outcome === "already-gone") toast.message("Already removed", { description: title })
+      else if (outcome === "already-ended") toast.message("Already ended", { description: title })
+      else toast.success("Job canceled", { description: title })
     },
-    onError: (err) => {
-      failureToast("Couldn't cancel the job", errorMessage(err))
-      invalidate()
-    },
+    onError: (err) => failureToast("Couldn't cancel the job", errorMessage(err)),
+    onSettled: invalidate,
   })
 
   const retry = useMutation({
-    mutationFn: (id: number) => api.retryJob(id),
-    onSuccess: () => {
-      toast.success("Retrying job")
-      invalidate()
+    mutationFn: ({ id }: JobRef) => itemOutcome(api.retryJob(id)),
+    onSuccess: (outcome, { title }) => {
+      if (outcome === "already-gone") toast.message("Already removed", { description: title })
+      else toast.success("Retrying job", { description: title })
     },
-    onError: (err) => {
-      failureToast("Couldn't retry the job", errorMessage(err))
-      invalidate()
-    },
+    onError: (err) => failureToast("Couldn't retry the job", errorMessage(err)),
+    onSettled: invalidate,
   })
 
   const onTabChange = (value: string) => {
@@ -153,17 +165,20 @@ export function Queue() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rows.map((job) => (
-                    <JobRow
-                      key={job.id}
-                      job={job}
-                      title={titleById.get(job.railcontent_id)}
-                      cancelPending={cancel.isPending && cancel.variables === job.id}
-                      retryPending={retry.isPending && retry.variables === job.id}
-                      onCancel={() => cancel.mutate(job.id)}
-                      onRetry={() => retry.mutate(job.id)}
-                    />
-                  ))}
+                  {rows.map((job) => {
+                    const ref: JobRef = { id: job.id, title: jobTitle(job, titleById) }
+                    return (
+                      <JobRow
+                        key={job.id}
+                        job={job}
+                        title={ref.title}
+                        cancelPending={cancel.isPending && cancel.variables.id === job.id}
+                        retryPending={retry.isPending && retry.variables.id === job.id}
+                        onCancel={() => cancel.mutate(ref)}
+                        onRetry={() => retry.mutate(ref)}
+                      />
+                    )
+                  })}
                 </TableBody>
               </Table>
             </TooltipProvider>
@@ -185,7 +200,7 @@ function JobRow({
   onRetry,
 }: {
   job: JobDTO
-  title: string | undefined
+  title: string
   cancelPending: boolean
   retryPending: boolean
   onCancel: () => void
@@ -198,9 +213,7 @@ function JobRow({
   return (
     <TableRow>
       <TableCell className="text-muted-foreground tabular-nums">{job.id}</TableCell>
-      <TableCell className="font-medium">
-        {title ?? `#${job.railcontent_id}`}
-      </TableCell>
+      <TableCell className="font-medium">{title}</TableCell>
       <TableCell>
         <StatusBadge status={job.status} />
       </TableCell>

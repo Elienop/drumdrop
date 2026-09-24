@@ -258,6 +258,113 @@ it("shows 'Already queued' when download returns 200", async () => {
   )
 })
 
+// --- Row actions that race something done elsewhere ---------------------------
+
+// The server's sentences, verbatim from internal/server/messages.go.
+const DOWNLOAD_GONE =
+  "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to download."
+const UNSKIP_GONE =
+  "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to un-skip."
+const CANCEL_GONE =
+  "This download is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to cancel."
+const JOB_ENDED = "This download has already ended, so there's nothing to cancel."
+const SERVER_ERROR =
+  "This may not have finished: something went wrong on the server. Check the server log, fix the problem, then try again."
+
+// A neutral note: not red, and no close button, since it goes away by itself
+// (failureToast's toasts have one, and stay until it is pressed).
+async function expectNeutralNote(title: string, lesson: string) {
+  const t = (await screen.findByText(title)).closest<HTMLElement>("[data-sonner-toast]")!
+  expect(within(t).getByText(lesson, { selector: "[data-description]" })).toBeInTheDocument()
+  expect(t).not.toHaveAttribute("data-type", "error")
+  expect(within(t).queryByRole("button", { name: "Close toast" })).not.toBeInTheDocument()
+  expect(screen.queryByText(/^Couldn't/)).not.toBeInTheDocument()
+}
+
+describe("a row action on a lesson removed meanwhile is a neutral note, and the row goes", () => {
+  it.each([
+    ["Download", lessons[1], /^download$/i, "download", DOWNLOAD_GONE],
+    ["Un-skip", skippedLesson, /un-?skip/i, "unskip", UNSKIP_GONE],
+  ])("%s answered 404", async (_, lesson, item, path, sentence) => {
+    let gone = false
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(gone ? [] : [lesson])),
+      http.post(`${ORIGIN}/api/lessons/:id/${path}`, () => {
+        gone = true
+        return HttpResponse.json({ error: sentence }, { status: 404 })
+      }),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    await user.click(await screen.findByRole("button", { name: `Actions for ${lesson.title}` }))
+    await user.click(await screen.findByRole("menuitem", { name: item }))
+
+    await expectNeutralNote("Already removed", lesson.title)
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: `Actions for ${lesson.title}` }),
+      ).not.toBeInTheDocument(),
+    )
+  })
+
+  it.each([
+    ["404: the download was removed meanwhile", 404, CANCEL_GONE, "Already removed"],
+    ["409: the download had already ended", 409, JOB_ENDED, "Already ended"],
+  ])("Cancel download answered %s", async (_, status, sentence, title) => {
+    let answered = false
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () =>
+        HttpResponse.json(answered ? [{ ...lessons[2], status: "downloaded" }] : [lessons[2]]),
+      ),
+      http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json(answered ? [] : [runningJob])),
+      http.post(`${ORIGIN}/api/jobs/:id/cancel`, () => {
+        answered = true
+        return HttpResponse.json({ error: sentence }, { status })
+      }),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    await user.click(await screen.findByRole("button", { name: "Actions for Paradiddle" }))
+    await user.click(await screen.findByRole("menuitem", { name: "Cancel download" }))
+
+    await expectNeutralNote(title, "Paradiddle")
+    // The refresh shows the row as it is now.
+    await waitFor(() => {
+      const row = screen.getByRole("button", { name: "Actions for Paradiddle" }).closest("tr")!
+      expect(within(row).getByText("downloaded")).toBeInTheDocument()
+    })
+  })
+})
+
+it("a row action that really failed stays red with the server's sentence until closed, and the rows refresh", async () => {
+  let listFetches = 0
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () => {
+      listFetches++
+      return HttpResponse.json([skippedLesson])
+    }),
+    http.post(`${ORIGIN}/api/lessons/:id/unskip`, () =>
+      HttpResponse.json({ error: SERVER_ERROR }, { status: 500 }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  await user.click(await screen.findByRole("button", { name: "Actions for Flam Tap" }))
+  const fetchesBefore = listFetches
+  await user.click(await screen.findByRole("menuitem", { name: /un-?skip/i }))
+
+  const t = (await screen.findByText("Couldn't un-skip “Flam Tap”")).closest<HTMLElement>(
+    "[data-sonner-toast]",
+  )!
+  expect(t).toHaveAttribute("data-type", "error")
+  expect(within(t).getByText(SERVER_ERROR, { selector: "[data-description]" })).toBeInTheDocument()
+  expect(within(t).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+  await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
+})
+
 // --- Delete ------------------------------------------------------------------
 
 // The server's fixed 500 when a lesson's files could not all be removed.
