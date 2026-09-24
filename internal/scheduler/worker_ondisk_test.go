@@ -254,6 +254,11 @@ func TestRecordedFilesPresent(t *testing.T) {
 		{"a recorded folder entry", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A resources")}, lib, true},
 		{"an entry a dangling symlink", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A-poster.jpg")}, lib, false},
 		{"an entry a symlink to a file", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A.en.srt")}, lib, true},
+		// A refused plex-tv move of a lesson that owned nothing in the library
+		// falls back to downloads and records an empty record (round-5d code
+		// L2): its downloads folder decides.
+		{"an empty record, its folder gone", database.Lesson{OutputDir: str(filepath.Join(tmp, "gone")), LibraryEntries: entries()}, lib, false},
+		{"an empty record, its folder there", database.Lesson{OutputDir: str(folder), LibraryEntries: entries()}, lib, true},
 		{"entries with no library folder", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo")}, "", false},
 		{"a damaged record", database.Lesson{OutputDir: str(season), LibraryEntries: str("not json")}, lib, false},
 		{"its folder, no video", database.Lesson{OutputDir: str(folder)}, lib, true},

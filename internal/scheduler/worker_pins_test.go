@@ -139,3 +139,42 @@ func TestWorkerRecordsTheVideoAResourcesOnlyReDownloadKeeps(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkerPlexTvResourcesOnlyReDownloadRecordsTheKeptVideo (round-5d code
+// L1) proves which kept entry a plex-tv resources-only re-download records as
+// the lesson's video: only a video of the episode base (keptVideo's
+// isLessonVideoName), not the captions that sort before it, and of a song's
+// versions the first in name order, [Drumless], as the move itself records
+// one (planPlexTVMove), whatever order the record lists them in.
+func TestWorkerPlexTvResourcesOnlyReDownloadRecordsTheKeptVideo(t *testing.T) {
+	base := "Beginner Course - s01e05 - Lesson A"
+	for _, c := range []struct {
+		name   string
+		record []string
+		want   string
+	}{
+		{"a lesson, its captions sort first", []string{base + ".mp4", base + ".en.vtt", base + ".nfo"}, base + ".mp4"},
+		{"a song's two versions", []string{base + " [Original].mp4", base + ".en.vtt", base + " [Drumless].mp4", base + ".nfo"}, base + " [Drumless].mp4"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, store, _, _, season := plexWorker(t)
+			w.Cfg.ResourcesOnly = true
+			w.Downloader = resourcesRedownload{}
+			seedSeason(t, season, c.record...)
+			prev := recordedRow(100, season, c.record...)
+			prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+			video := filepath.Join(season, c.want)
+			prev.VideoPath = sql.NullString{String: video, Valid: true}
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
+
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			rec := onlyRecord(t, store)
+			if want := int64(len(c.want)); rec.videoPath != video || rec.bytes != want {
+				t.Errorf("video %q, %d bytes; want %q, %d bytes", rec.videoPath, rec.bytes, video, want)
+			}
+		})
+	}
+}

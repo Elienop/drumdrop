@@ -57,40 +57,53 @@ func assertKeptInLibrary(t *testing.T, w *Worker, store *fakeWorkerStore) {
 // placed in the library (before a layout switch) keeps it when the plex-tv
 // move is refused: the downloads fallback would replace that folder, or leave
 // it untracked when it holds a file the download does not bring back. The
-// attempt fails instead, the folder stays whole and recorded.
+// attempt fails instead, the folder stays whole and recorded. That holds too
+// for a row that also keeps a record of season-folder entries from before an
+// earlier layout switch (a plex-tv row the default layout placed:
+// FinishDownload leaves its record as it is).
 func TestWorkerPlexTvRefusedMoveKeepsAFolderTheDefaultLayoutPlaced(t *testing.T) {
+	old := "Beginner Course - s01e05 - Old Title.nfo"
 	for _, how := range []string{"another lesson claims its name", "the placement fails"} {
 		for _, extra := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/owner's file=%v", how, extra), func(t *testing.T) {
-				w, store, _, lib, season := plexWorker(t)
-				dir := filepath.Join(lib, "Beginner Course", "05 - Lesson A")
-				files := map[string]string{"05 - Lesson A.mp4": "old mp4", "05 - Lesson A.nfo": "old nfo"}
-				if extra {
-					files["notes.txt"] = "owner notes"
-				}
-				writeTree(t, dir, files)
-				prev := database.Lesson{
-					RailcontentID: 100, Status: database.StatusDownloaded,
-					Position:  sql.NullInt64{Int64: 5, Valid: true},
-					OutputDir: sql.NullString{String: dir, Valid: true},
-					VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
-				}
-				store.lessons[100] = prev
-				store.withFiles = []database.Lesson{prev}
-				if how == "the placement fails" {
-					refuseIntoSeason(t, lib, season)
-				} else {
-					base := "Beginner Course - s01e05 - Lesson A"
-					seedSeason(t, season, base+".mp4")
-					store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
-				}
+			for _, recorded := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/owner's file=%v/recorded=%v", how, extra, recorded), func(t *testing.T) {
+					w, store, _, lib, season := plexWorker(t)
+					dir := filepath.Join(lib, "Beginner Course", "05 - Lesson A")
+					files := map[string]string{"05 - Lesson A.mp4": "old mp4", "05 - Lesson A.nfo": "old nfo"}
+					if extra {
+						files["notes.txt"] = "owner notes"
+					}
+					writeTree(t, dir, files)
+					prev := database.Lesson{
+						RailcontentID: 100, Status: database.StatusDownloaded,
+						Position:  sql.NullInt64{Int64: 5, Valid: true},
+						OutputDir: sql.NullString{String: dir, Valid: true},
+						VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
+					}
+					if recorded {
+						seedSeason(t, season, old)
+						prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, old))
+					}
+					store.lessons[100] = prev
+					store.withFiles = []database.Lesson{prev}
+					if how == "the placement fails" {
+						refuseIntoSeason(t, lib, season)
+					} else {
+						base := "Beginner Course - s01e05 - Lesson A"
+						seedSeason(t, season, base+".mp4")
+						store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
+					}
 
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				assertTree(t, dir, files)
-				assertKeptInLibrary(t, w, store)
-			})
+					if _, err := w.RunOnce(context.Background(), 0); err != nil {
+						t.Fatalf("RunOnce: %v", err)
+					}
+					assertTree(t, dir, files)
+					assertKeptInLibrary(t, w, store)
+					if recorded {
+						assertContent(t, season, old)
+					}
+				})
+			}
 		}
 	}
 }
