@@ -70,8 +70,12 @@ func CheckLibraryDir(downloadsDir, libraryDir string) error {
 
 // plexEpisodeBase is the flat episode base name of the plex-tv layout:
 // "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>". The move shortens it when a
-// name would not fit (fitEpisodeBase) and reports the base it used, which the
-// worker's episode-nfo write takes from the move's result.
+// name would not fit (fitEpisodeBase) and reports the base it used
+// (plexMoveResult.episodeBase), which the worker reads to find the video a
+// resources-only re-download keeps (keptVideo). The episode nfo needs no
+// base: it is written in the private folder under the download's own name,
+// before the entries are placed (writeScratchNFO), and takes the episode
+// base as every other entry does.
 func plexEpisodeBase(show, title string, season, episode int) string {
 	return fmt.Sprintf("%s%02d - %s", library.EpisodePrefix(musora.Sanitize(show), season), episode, musora.Sanitize(title))
 }
