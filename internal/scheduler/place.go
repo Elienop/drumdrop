@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -181,24 +180,35 @@ func (c *createdDir) keep() {
 }
 
 // placeSteps places every step's entry of src into dest (placeStep), or none:
-// on a failure every entry placed so far is taken back. Copies are flushed to
-// disk before it returns. stuck are entries an undo could not take back.
+// on a failure every entry placed so far is taken back. stuck are entries an
+// undo could not take back.
+//
+// What it placed is flushed to disk before it returns, however it got there
+// (security I2): dest, which now names the entries, and src, which a rename
+// took them out of. Without it a power loss after the download is recorded
+// could leave a recorded file still in its private folder, which the next
+// start's sweep removes. A failed flush is a failed placement.
 func placeSteps(dest, src *os.Root, steps []plexMoveStep) (placed []placedStep, stuck []string, err error) {
-	copied := false
+	anyRenamed := false
 	for _, st := range steps {
 		renamed, err := placeStep(dest, src, st)
 		if err != nil {
 			stuck, uerr := undoSteps(dest, src, placed)
 			return nil, stuck, errors.Join(err, uerr)
 		}
-		copied = copied || !renamed
+		anyRenamed = anyRenamed || renamed
 		placed = append(placed, placedStep{plexMoveStep: st, renamed: renamed})
 	}
-	if copied {
-		if err := syncIn(dest, "."); err != nil {
-			stuck, uerr := undoSteps(dest, src, placed)
-			return nil, stuck, errors.Join(fmt.Errorf("flush %q after the copy: %w", dest.Name(), err), uerr)
-		}
+	if len(placed) == 0 {
+		return nil, nil, nil
+	}
+	ferr := syncIn(dest, ".")
+	if ferr == nil && anyRenamed {
+		ferr = syncIn(src, ".")
+	}
+	if ferr != nil {
+		stuck, uerr := undoSteps(dest, src, placed)
+		return nil, stuck, errors.Join(fmt.Errorf("flush what was placed in %q: %w", dest.Name(), ferr), uerr)
 	}
 	return placed, nil, nil
 }
@@ -342,12 +352,12 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 		}
 		return fail(err)
 	}
-	// A copied lesson in a folder the placement made: the folder's own name
-	// is flushed too, as the copies were (placeSteps).
-	if created != nil && slices.ContainsFunc(placed, func(st placedStep) bool { return !st.renamed }) {
+	// A folder the placement made: its own name is flushed too, as what was
+	// placed in it was (placeSteps).
+	if created != nil {
 		if err := syncIn(parent, "."); err != nil {
 			stuck, uerr := undoSteps(dest, src.dir, placed)
-			return fail(errors.Join(fmt.Errorf("flush %q after the copy: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
+			return fail(errors.Join(fmt.Errorf("flush %q after the placement: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
 		}
 	}
 	p := &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, merged: merged, aside: aside, created: created}
