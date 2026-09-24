@@ -514,15 +514,17 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 }
 
 // shuttingDown reports whether ctx, the worker's run, has ended: drumdrop is
-// shutting down. The job is then left as it is, running, so the next start
-// requeues it (Daemon.Recover) and it starts over; the lesson is never skipped
-// or failed for it. Its end is reported, and its private folder goes with the
-// job.
+// shutting down. The job is then left as it is, running, and the lesson is
+// never skipped or failed for it. Only the startup of serve or a looping
+// daemon requeues it (Daemon.Recover), so it starts over; a daemon --once run
+// never does, and until one of those starts the job stays running, which
+// keeps the lesson from being queued again. Its end is reported, and its
+// private folder goes with the job.
 func (w *Worker) shuttingDown(ctx context.Context, job database.Job, lesson *musora.Lesson) bool {
 	if ctx.Err() == nil {
 		return false
 	}
-	fmt.Fprintf(w.log(), "  ⊗ %d stopped: shutting down; it starts over at the next start\n", job.RailcontentID)
+	fmt.Fprintf(w.log(), "  ⊗ %d stopped: shutting down; its job stays running until serve or a looping daemon (not --once) starts and queues it again\n", job.RailcontentID)
 	w.ended(job, lesson, msgShutdown)
 	return true
 }

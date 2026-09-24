@@ -132,7 +132,7 @@ const (
 	msgPreviewNothing     = "Enter a URL or id, or an instructor's name, slug or link, then Preview again."
 	msgBadKind            = "Choose Node or Instructor, then try again."
 	msgSlugRequired       = "Enter the instructor's name, slug or link, then Preview again."
-	msgBadSlug            = "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or their coach page's link, then Preview again. A lesson or course link goes under Node."
+	msgBadSlug            = "That instructor can't be looked up. Enter a name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a coach page's link; a lesson or course link goes under Node. Then Preview again."
 	msgBadBrand           = "That brand can't be looked up. Enter drumeo, pianote, guitareo, singeo or playbass, or leave Brand empty: a coach link then sets it, and drumeo is used otherwise. Then Preview again."
 	msgBrandMismatch      = "That coach page is for a different brand from the one in Brand. Leave Brand empty to use the link's, or change it to match, then Preview again."
 	msgNoInstructor       = "Musora has no instructor by that name, slug or link. Check its spelling, then Preview again."

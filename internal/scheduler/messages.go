@@ -33,11 +33,12 @@ var (
 		lesson: "Couldn't download this lesson. Check the server log, fix the problem, then Download again.",
 		job:    "Couldn't download this lesson. Check the server log, fix the problem, then Retry.",
 	}
-	// failNotStarted is a download not started because the lessons' records,
-	// which it needs to record its files, couldn't be read.
+	// failNotStarted is a download not started because a record it needs
+	// (the lesson's, its follow's, or the other lessons', which say whose
+	// files are where) couldn't be read.
 	failNotStarted = failure{
-		lesson: "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Download again.",
-		job:    "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Retry.",
+		lesson: "Didn't start this download: DrumDrop's records couldn't be read. Check the server log, fix the problem, then Download again.",
+		job:    "Didn't start this download: DrumDrop's records couldn't be read. Check the server log, fix the problem, then Retry.",
 	}
 	// failKeptInLibrary is a download whose last attempt couldn't be placed in
 	// the library, where the lesson already was (errKeptInLibrary): its copy

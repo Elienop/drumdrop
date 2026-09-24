@@ -18,7 +18,10 @@ import (
 // one download at a time with retry. With --once it runs a single plan+drain
 // cycle and exits (the cron-friendly / testing path). Otherwise it loops every
 // --interval until SIGINT/SIGTERM. Either way SIGINT/SIGTERM stops the
-// in-flight download, whose job starts over at the next daemon or serve start.
+// in-flight download, whose job is left running. Only the start of serve or of
+// a looping daemon queues it again (Daemon.Recover); --once never does, so
+// after a stopped --once run the job stays running, and the lesson is not
+// queued again, until one of those starts.
 func cmdDaemon(argv []string) error {
 	opts, err := parseDaemonArgs(argv)
 	if err != nil {
@@ -41,8 +44,9 @@ func cmdDaemon(argv []string) error {
 	// which stops the in-flight download (yt-dlp runs in its own process group,
 	// so a Ctrl-C at the terminal never reaches it: without this, drumdrop would
 	// die and leave it running on its own, writing into the job's private
-	// folder). The worker then removes that folder, leaves the job to start
-	// over, and claims nothing more.
+	// folder). The worker then removes that folder, leaves the job running, and
+	// claims nothing more. A --once run never requeues it (RunOnce does not call
+	// Daemon.Recover): the next serve or looping daemon start does.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
