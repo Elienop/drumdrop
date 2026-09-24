@@ -17,8 +17,8 @@ import (
 // jobs for newly discovered lessons and a sequential Worker that drains the queue
 // one download at a time with retry. With --once it runs a single plan+drain
 // cycle and exits (the cron-friendly / testing path). Otherwise it loops every
-// --interval until SIGINT/SIGTERM, then shuts down cleanly after the in-flight
-// download finishes.
+// --interval until SIGINT/SIGTERM. Either way SIGINT/SIGTERM stops the
+// in-flight download, whose job starts over at the next daemon or serve start.
 func cmdDaemon(argv []string) error {
 	opts, err := parseDaemonArgs(argv)
 	if err != nil {
@@ -37,15 +37,19 @@ func cmdDaemon(argv []string) error {
 	}
 	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
-	if opts.once {
-		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)
-		return daemon.RunOnce(context.Background())
-	}
-
-	// Graceful shutdown: SIGINT/SIGTERM cancels the context; the daemon stops
-	// claiming new jobs and returns after the in-flight download finishes.
+	// Graceful shutdown, --once included: SIGINT/SIGTERM cancels the context,
+	// which stops the in-flight download (yt-dlp runs in its own process group,
+	// so a Ctrl-C at the terminal never reaches it: without this, drumdrop would
+	// die and leave it running on its own, writing into the job's private
+	// folder). The worker then removes that folder, leaves the job to start
+	// over, and claims nothing more.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if opts.once {
+		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)
+		return daemon.RunOnce(ctx)
+	}
 
 	fmt.Printf("drumdrop daemon: auto-syncing every %s into %s (Ctrl-C to stop)\n", opts.interval, cfg.DownloadsDir)
 	if err := daemon.Run(ctx, opts.interval); err != nil {
