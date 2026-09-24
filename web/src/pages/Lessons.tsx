@@ -115,10 +115,19 @@ function RowMenu({
   const [openedAs, setOpenedAs] = React.useState<boolean | null>(null)
   // Whether the last close was this one, not the user's.
   const [cut, setCut] = React.useState(false)
-  // Reset during render, not in an effect, so the render that brings the
-  // changed items commits with the menu already closed. Clearing it (rather
-  // than only deriving `open`) keeps the menu from reopening by itself if
-  // the lesson flips back.
+  // The derived `open` below already closes the menu in the render that
+  // brings the changed items. This reset is for two other things:
+  // - It runs during render, not in an effect (nor a layout effect), so
+  //   `cut`, and with it the no-fade class, is already on the menu in the
+  //   commit that closes it. Radix's Presence reads the animation once, in
+  //   that commit (react-presence's usePresence): it sees none and removes
+  //   the menu at once. A class that arrives a commit later cancels the fade
+  //   Presence is waiting for, and the closed menu stays on screen and
+  //   clickable, with no end: in Chromium a click on it sent a cancel.
+  //   Pinned by "a menu closed by a start or an end is gone in the same
+  //   commit…" in Lessons.test.tsx.
+  // - Clearing `openedAs` (rather than only deriving `open`) keeps the menu
+  //   from reopening by itself if the lesson flips back.
   if (openedAs !== null && openedAs !== downloading) {
     setOpenedAs(null)
     setCut(true)
@@ -355,13 +364,23 @@ export function Lessons() {
   // No scroll anchoring on this page (owner's ruling 2026-09-24, (w)). The
   // page scrolls inside the app shell's <main> (App.tsx), not the window
   // and not the table's overflow-x wrapper, whose height is its content's.
-  // Chrome keeps the top visible row of <main> in place, so when that row's
-  // download starts and it moves to the top of All, the view followed it
-  // there: a jump of the whole page. overflow-anchor:none here takes the
-  // page out of <main>'s anchor choice, and <main> holds nothing else, so
-  // the view stays still and the rows below shift by one. Here rather than
-  // on <main>, so other pages keep anchoring (none of them reorders rows
-  // under the reader).
+  // With anchoring on, Chrome pins <main>'s view to a row in it, and when a
+  // lesson in view started downloading and moved to the top of All, the view
+  // followed it there: a jump of the whole page. Not only when it was the
+  // top visible row: one mid-view pulled the view up too (2270→0, measured
+  // in headless Chromium, round 5h UI review). overflow-anchor:none here
+  // takes the page out of <main>'s anchor choice, and <main> holds nothing
+  // else, so the view stays still and the rows below shift by one. Here
+  // rather than on <main>, so other pages keep anchoring (none of them
+  // reorders rows under the reader).
+  //
+  // One scroll is left on purpose (owner's ruling 2026-09-24, (x), "Follow
+  // the lesson"): when that lesson's ⋯ menu is open as it starts or stops
+  // downloading, (v) closes the menu and Radix hands focus back to ⋯ with a
+  // plain .focus() (@radix-ui/react-dropdown-menu, onCloseAutoFocus), which
+  // scrolls the page to the lesson. That keeps the reader with the lesson
+  // they were acting on. overflow-anchor does not stop it, and it must not
+  // be stopped with preventScroll.
   return (
     <div className="flex flex-col gap-6 [overflow-anchor:none]">
       <div className="flex flex-wrap items-center justify-between gap-4">

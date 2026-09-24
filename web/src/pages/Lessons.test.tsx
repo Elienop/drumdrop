@@ -1227,18 +1227,14 @@ it("a row note keeps its width, however short the titles on the page", async () 
   ])
 })
 
-// Owner's ruling 2026-09-24, (t). Below xl (1280px) the Brand and Quality
-// columns are hidden, header and cells, to give a row note room on a narrow
-// window. Every other column stays. jsdom has no layout, so this pins
-// the classes, by column: a header hidden without its cells (or the reverse)
-// would put every cell after it under the wrong header. The widths were
-// measured in a browser.
 // Owner's ruling 2026-09-24, (w). jsdom has no layout, so this pins only
 // where the opt-out sits: on the page's own root, which holds the list and
 // the paging below it, and so every row the app shell's <main> could anchor
-// to. Its effect was measured in headless Chromium (round 5h): a started
-// download moving the top visible row to the top of All no longer scrolls
-// the view with it.
+// to. Its effect was measured in headless Chromium (round 5h): a lesson in
+// view that starts downloading and moves to the top of All, whether it was
+// the top visible row or one mid-view, no longer pulls the view with it.
+// Its open ⋯ menu's focus return still does, on purpose ((x), see the
+// comment on the page's root in Lessons.tsx).
 it("the Lessons page takes itself out of scroll anchoring, table and paging included", async () => {
   server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
   renderLessons()
@@ -1251,6 +1247,12 @@ it("the Lessons page takes itself out of scroll anchoring, table and paging incl
   expect(root).toContainElement(screen.getByRole("button", { name: /next/i }))
 })
 
+// Owner's ruling 2026-09-24, (t). Below xl (1280px) the Brand and Quality
+// columns are hidden, header and cells, to give a row note room on a narrow
+// window. Every other column stays. jsdom has no layout, so this pins
+// the classes, by column: a header hidden without its cells (or the reverse)
+// would put every cell after it under the wrong header. The widths were
+// measured in a browser.
 it("below xl the table hides Brand and Quality, header and cells, and nothing else", async () => {
   server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
   renderLessons()
