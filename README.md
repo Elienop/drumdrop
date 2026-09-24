@@ -458,13 +458,13 @@ Each course becomes one *show*, each lesson an *episode*:
   on different filesystems (volumes on Windows), and a copy that fails removes only what it
   created. On Windows the rename goes by path and replaces an existing entry, so neither
   guarantee holds there. The default layout's move works the same way, and never places
-  into a library folder another lesson records anything in. When its move is refused or fails, though,
-  only a lesson that isn't in the library yet is placed in downloads instead (logged); one
-  whose folder is already in the library keeps its library copy, and the attempt fails
-  (see [Plex library](#plex-library-single-parent-bind-mount)). A file at one of its names
-  that no lesson claims (say, one kept when a follow was deleted without its files) is
-  replaced, and that is logged. A name too long for the filesystem (255 bytes) has its
-  title shortened; if even that can't fit, the move is refused.
+  into a library folder another lesson records anything in. When its move is refused or
+  fails, though, only a lesson that isn't in the library yet is placed in downloads instead
+  (logged); one whose folder is already in the library keeps its library copy, and the
+  attempt fails (see [Plex library](#plex-library-single-parent-bind-mount)). A file at one
+  of its names that no lesson claims (say, one kept when a follow was deleted without its
+  files) is replaced, and that is logged. A name too long for the filesystem (255 bytes) has
+  its title shortened; if even that can't fit, the move is refused.
 - It shapes **only** the library move: downloads still happen in their own folder, and a
   move failure is non-fatal: a half-done move is undone, and the lesson is placed in
   downloads, with the library files it already had still recorded. With no
