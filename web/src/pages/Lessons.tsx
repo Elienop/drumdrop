@@ -8,6 +8,7 @@ import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { brandName, formatBytes, formatRelativeTime } from "@/lib/format"
 import { rowFocusTargets } from "@/lib/focus"
+import { cn } from "@/lib/utils"
 import { cancelOutcome, errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { ActiveDownload } from "@/lib/sse-reducer"
 import type { LessonDTO, LessonStatus } from "@/types"
@@ -52,6 +53,14 @@ const STATUS_TABS: LessonStatus[] = [
   "skipped",
 ]
 const PAGE_SIZE = 50
+
+// WIDE_ONLY hides a column below xl (1280px). It is on the Brand and Quality
+// columns, header and cells alike, so the cells stay under their headers
+// (owner's ruling 2026-09-24, (t)). A row note keeps 28rem, so with short
+// titles the table needed 1243px of window before it stopped scrolling
+// sideways; without these two it needs 1109px. At 1024px it still scrolls
+// sideways, by 85px (measured in Chromium; BACKLOG D113).
+const WIDE_ONLY = "hidden xl:table-cell"
 
 // A dialog opened from a row remembers the row order at that moment, so focus
 // can return to a neighbour if the row itself has left the list on close.
@@ -368,8 +377,8 @@ export function Lessons() {
                 <TableRow>
                   <TableHead>Title</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Brand</TableHead>
-                  <TableHead>Quality</TableHead>
+                  <TableHead className={WIDE_ONLY}>Brand</TableHead>
+                  <TableHead className={WIDE_ONLY}>Quality</TableHead>
                   <TableHead>Size</TableHead>
                   <TableHead>Updated</TableHead>
                   <TableHead className="w-0" />
@@ -408,7 +417,8 @@ export function Lessons() {
                           // server writes fits in two lines (the longest,
                           // 147 characters, needs about 27rem). A narrow
                           // window scrolls the table sideways instead, as a
-                          // long title already makes it do.
+                          // long title already makes it do; below xl, Brand
+                          // and Quality give it room first (WIDE_ONLY).
                           <p
                             title={note}
                             className="mt-0.5 line-clamp-2 max-w-md min-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground"
@@ -431,8 +441,10 @@ export function Lessons() {
                       <TableCell>
                         <StatusBadge status={busy ? "deleting" : lesson.status} />
                       </TableCell>
-                      <TableCell className="text-muted-foreground">{brandName(lesson.brand)}</TableCell>
-                      <TableCell className="text-muted-foreground">
+                      <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
+                        {brandName(lesson.brand)}
+                      </TableCell>
+                      <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
                         {lesson.quality ?? "—"}
                       </TableCell>
                       <TableCell className="text-muted-foreground tabular-nums">

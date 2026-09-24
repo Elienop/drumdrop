@@ -1210,6 +1210,43 @@ it("a row note keeps its width, however short the titles on the page", async () 
   expect(note).toHaveClass("min-w-md", "max-w-md", "line-clamp-2")
 })
 
+// Owner's ruling 2026-09-24, (t). Below xl (1280px) the Brand and Quality
+// columns are hidden, header and cells, to give a note's 28rem room on a
+// narrow window. Every other column stays. jsdom has no layout, so this pins
+// the classes, by column: a header hidden without its cells (or the reverse)
+// would put every cell after it under the wrong header. The widths were
+// measured in a browser.
+it("below xl the table hides Brand and Quality, header and cells, and nothing else", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
+  renderLessons()
+  await screen.findByText(lessons[0].title)
+
+  const table = screen.getByRole("table")
+  const headers = within(table).getAllByRole("columnheader")
+  expect(headers.map((h) => h.textContent)).toEqual([
+    "Title",
+    "Status",
+    "Brand",
+    "Quality",
+    "Size",
+    "Updated",
+    "",
+  ])
+  const rows = within(table).getAllByRole("row").slice(1)
+  expect(rows).toHaveLength(lessons.length)
+  headers.forEach((header, i) => {
+    const column = [header, ...rows.map((row) => within(row).getAllByRole("cell")[i])]
+    for (const el of column) {
+      if (header.textContent === "Brand" || header.textContent === "Quality") {
+        expect(el).toHaveClass("hidden", "xl:table-cell")
+      } else {
+        expect(el).not.toHaveClass("hidden")
+        expect(el.className).not.toMatch(/(^|\s)\w+:(hidden|table-cell)(\s|$)/)
+      }
+    }
+  })
+})
+
 it("a delete's tombstone reads 'Files deleted' under the title, not a bare 'deleted'", async () => {
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([tombstoned(lessons[0])])),
