@@ -99,18 +99,29 @@ func openStaging(root string) (*os.Root, error) {
 }
 
 // openRealDir opens name inside r, refusing one that is not a real folder
-// (a symlink, a file).
+// (a symlink, a file). OpenRoot follows a symlink inside r, so what it opened
+// must be the very folder Lstat saw (os.SameFile): one swapped for a symlink
+// in between (to another lesson's folder, say) is refused (security I3).
 func openRealDir(r *os.Root, name string) (*os.Root, error) {
+	path := filepath.Join(r.Name(), name)
 	info, err := r.Lstat(name)
 	if err != nil {
-		return nil, fmt.Errorf("read %q: %w", filepath.Join(r.Name(), name), err)
+		return nil, fmt.Errorf("read %q: %w", path, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("refusing %q: not a real folder (mode %s)", filepath.Join(r.Name(), name), info.Mode().Type())
+		return nil, fmt.Errorf("refusing %q: not a real folder (mode %s)", path, info.Mode().Type())
 	}
 	d, err := r.OpenRoot(name)
 	if err != nil {
-		return nil, fmt.Errorf("open %q: %w", filepath.Join(r.Name(), name), err)
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	opened, err := d.Stat(".")
+	if err == nil && !os.SameFile(info, opened) {
+		err = errors.New("it was replaced while it was being opened")
+	}
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("refusing %q: %w", path, err)
 	}
 	return d, nil
 }
