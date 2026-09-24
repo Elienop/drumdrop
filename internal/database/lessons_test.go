@@ -222,6 +222,70 @@ func TestUpsertLessonFillsNullPosition(t *testing.T) {
 	}
 }
 
+// TestUpsertLessonStampsUpdatedAtOnlyOnAChange pins owner ruling 2026-09-24
+// (r): a sync stamps a lesson's updated_at only when one of the fields the
+// upsert stores changes (title, parent, a position filled in), never when it
+// finds the lesson as it was, or differs only in what a conflict leaves alone
+// (brand, follow, a position already set). The stamp is set to a fixed past
+// time first, so CURRENT_TIMESTAMP's one-second grain can't hide a write.
+func TestUpsertLessonStampsUpdatedAtOnlyOnAChange(t *testing.T) {
+	const past = "2026-01-01 00:00:00"
+	num := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
+	type upsert struct {
+		title         string
+		parent        sql.NullInt64
+		brand         string
+		position, flw sql.NullInt64
+		wantTitle     string
+		wantPos       sql.NullInt64
+		wantParent    sql.NullInt64
+		stamped       bool
+	}
+	for _, c := range []struct {
+		name     string
+		position sql.NullInt64 // the stored position before the sync
+		sync     upsert
+	}{
+		{"nothing changed", num(5), upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"only a brand, follow or position a conflict leaves alone", num(5), upsert{title: "Lesson", parent: num(7), brand: "pianote", position: num(9), flw: num(1), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"the title changed", num(5), upsert{title: "New Title", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"the parent changed", num(5), upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
+		{"the parent cleared", num(5), upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
+		{"a missing position filled in", sql.NullInt64{}, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7), stamped: true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			flw := sql.NullInt64{}
+			if c.sync.flw.Valid {
+				flw = num(seedFollowForLesson(t, s))
+				c.sync.flw = num(seedFollowForLesson(t, s))
+			}
+			if err := s.UpsertLesson(ctx, 1, "Lesson", num(7), "drumeo", c.position, flw); err != nil {
+				t.Fatalf("first UpsertLesson: %v", err)
+			}
+			if _, err := s.rawDB().Exec(`UPDATE lessons SET updated_at = ? WHERE railcontent_id = 1`, past); err != nil {
+				t.Fatalf("set updated_at: %v", err)
+			}
+			if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, c.sync.flw); err != nil {
+				t.Fatalf("second UpsertLesson: %v", err)
+			}
+			got, err := s.GetLesson(ctx, 1)
+			if err != nil {
+				t.Fatalf("GetLesson: %v", err)
+			}
+			if got.Title != c.sync.wantTitle || got.Position != c.sync.wantPos || got.ParentRailcontentID != c.sync.wantParent || got.FollowID != flw {
+				t.Errorf("stored title %q, position %+v, parent %+v, follow %+v; want %q, %+v, %+v, %+v",
+					got.Title, got.Position, got.ParentRailcontentID, got.FollowID, c.sync.wantTitle, c.sync.wantPos, c.sync.wantParent, flw)
+			}
+			stamped := !got.UpdatedAt.Valid || got.UpdatedAt.Time.UTC().Format("2006-01-02 15:04:05") != past
+			if stamped != c.sync.stamped {
+				t.Errorf("updated_at = %+v after the sync; want it stamped: %v", got.UpdatedAt, c.sync.stamped)
+			}
+		})
+	}
+}
+
 // seedFollowForLesson inserts a node follow and returns its id, so lesson rows can
 // satisfy the follow_id foreign key.
 func seedFollowForLesson(t *testing.T, s *Store) int64 {

@@ -105,7 +105,10 @@ func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
 }
 
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
-// railcontent_id. On conflict it updates only title, parent, and updated_at — it
+// railcontent_id. On conflict it updates only title, parent, and updated_at, and
+// only when one of the stored fields changes (owner ruling 2026-09-24 (r)): a
+// sync that finds the lesson as it was writes nothing, so its updated_at, and so
+// its place in the Lessons page's All tab (ListLessons), stay as they were. It
 // deliberately does NOT touch status, download metadata, or follow_id. This is
 // half of the dedup mechanism: a re-sync that re-discovers an already-downloaded
 // lesson must never downgrade it back to pending and trigger a redundant
@@ -127,7 +130,10 @@ func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title strin
 			     title                 = excluded.title,
 			     parent_railcontent_id = excluded.parent_railcontent_id,
 			     position              = COALESCE(lessons.position, excluded.position),
-			     updated_at            = CURRENT_TIMESTAMP`,
+			     updated_at            = CURRENT_TIMESTAMP
+			 WHERE lessons.title IS NOT excluded.title
+			    OR lessons.parent_railcontent_id IS NOT excluded.parent_railcontent_id
+			    OR (lessons.position IS NULL AND excluded.position IS NOT NULL)`,
 			railcontentID, title, parent, brand, position, followID,
 		)
 		if err != nil {
@@ -244,8 +250,10 @@ func (s *Store) ListLessonsByFollow(ctx context.Context, followID int64) ([]Less
 const defaultLessonListLimit = 100
 
 // ListLessons returns a page of lessons ordered by updated_at DESC then
-// railcontent_id (most recently touched first, stable within the same
-// timestamp). A limit <= 0 falls back to defaultLessonListLimit; offset pages
+// railcontent_id (most recently changed first, stable within the same
+// timestamp): a lesson moves up when it is first seen, when its status
+// changes, and when a sync changes its title, parent or position, never for a
+// sync that finds it as it was (UpsertLesson). A limit <= 0 falls back to defaultLessonListLimit; offset pages
 // through the result.
 func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, error) {
 	if limit <= 0 {
