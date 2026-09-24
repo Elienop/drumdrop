@@ -92,9 +92,13 @@ func TestWorkerRefusedLibraryPlacementIgnoresASymlinkToTheLibraryFolder(t *testi
 // 5f-5g I3), as it is not to the placement, which reads the name with Lstat
 // and replaces anything but a folder. With the library as the downloads
 // folder the row's folder is the fallback, and the library's (a tie), so
-// taking the file for it would let a refused placement fall back and replace
-// the file. The attempt fails instead, and the file stays as it was, in both
-// layouts.
+// taking the file for it would let a refused placement fall back. The attempt
+// fails instead with failKeptInLibrary, and the file stays as it was, in both
+// layouts. Only in plex-tv would the fallback replace the file: in the
+// default layout the fallback is the same path as the refused library
+// placement, so it is refused too and the file survives either way; there the
+// gate is checked by the failure kind alone (a fallback that is refused ends
+// with failDownload, not failKeptInLibrary).
 func TestWorkerRefusedLibraryPlacementDoesNotTakeAFileForTheLessonsFolder(t *testing.T) {
 	for _, layout := range []string{"", LayoutPlexTV} {
 		t.Run(layoutName(layout), func(t *testing.T) {

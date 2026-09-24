@@ -111,7 +111,9 @@ func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
 // updated_at, and so its place in the Lessons page's All tab (ListLessons), stay
 // as they were. That holds for a lesson two follows list too (a course follow
 // and an instructor follow, say), since each field a conflict writes has one
-// writer per sync (below). It deliberately does NOT touch status, download
+// value per sync (below): title is written by every follow that lists the
+// lesson, with the same value, and parent and position by one follow only. It
+// deliberately does NOT touch status, download
 // metadata, or follow_id. This is half of the dedup mechanism: a re-sync that
 // re-discovers an already-downloaded lesson must never downgrade it back to
 // pending and trigger a redundant re-download. Leaving follow_id untouched is
@@ -126,7 +128,9 @@ func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
 // each would count as a change. A change the attributed follow brings is still
 // written and stamped. A lesson whose follow was removed (follow_id set NULL)
 // keeps its last parent, as it keeps its follow_id: another follow listing it
-// writes neither.
+// writes neither. So does a row that predates follow_id (migration 002, NULL
+// since): the planner always passes a follow id, so none matches it. Nothing
+// reads parent to place or delete files.
 //
 // position is the lesson's sequence within its follow (the "NN - " folder
 // prefix). On conflict it is first-write-wins via COALESCE(lessons.position,
