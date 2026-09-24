@@ -199,11 +199,13 @@ func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, 
 }
 
 // writeFollowResult finishes a create: ErrAlreadyFollowing → 200 with the
-// existing row (idempotent), a nil error → 201 with the new row, any other
-// error → 500, its detail logged.
+// existing row (idempotent), a nil error → 201 with the new row, and a sync
+// started now, whose planning queues the new follow's lessons (owner ruling
+// 2026-09-24 (m)), any other error → 500, its detail logged.
 func (s *Server) writeFollowResult(w http.ResponseWriter, f database.Follow, err error) {
 	switch {
 	case err == nil:
+		s.kick()
 		writeJSON(w, http.StatusCreated, followDTO(f))
 	case errors.Is(err, database.ErrAlreadyFollowing):
 		writeJSON(w, http.StatusOK, followDTO(f))

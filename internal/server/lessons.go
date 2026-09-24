@@ -92,6 +92,9 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, msgDownloadGone)
 		return
 	}
+	// A job is queued (or already was): start a sync now, not at the next
+	// interval (owner ruling 2026-09-24 (m)).
+	s.kick()
 	job, err := s.store.GetJob(r.Context(), jobID)
 	if err != nil {
 		writeStoreErr(w, err, msgDownloadJobGone)
@@ -151,19 +154,27 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 // with 200. It reads the lesson first so an unknown id maps cleanly to 404
 // (UnskipLesson itself tolerates a non-skipped lesson as a benign no-op rather
 // than erroring). A non-integer id is a 400. It mirrors handleSkipLesson.
+//
+// Un-skip queues no job itself: a sync's planning does, for a pending lesson
+// its follow lists. So when it reset a skipped lesson, it starts a sync now
+// rather than at the next interval (owner ruling 2026-09-24 (m)).
 func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
 		return
 	}
 
-	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
+	before, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
 		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	if err := s.store.UnskipLesson(r.Context(), id); err != nil {
 		writeStoreErr(w, err, msgUnskipGone)
 		return
+	}
+	if before.Status == database.StatusSkipped {
+		s.kick()
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {

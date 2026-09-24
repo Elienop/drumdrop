@@ -119,13 +119,7 @@ func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
 	s.deps.Resume()
 	// Kick a cycle so lessons left queued while paused drain now, rather than
 	// waiting for the next scheduled tick (up to the full sync interval away).
-	// Non-blocking: a full buffer already means a cycle is pending.
-	if s.deps.Kick != nil {
-		select {
-		case s.deps.Kick <- struct{}{}:
-		default:
-		}
-	}
+	s.kick()
 	writeJSON(w, http.StatusOK, map[string]bool{"paused": false})
 }
 
@@ -147,6 +141,8 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err, msgRetryGone)
 		return
 	}
+	// The job is queued: start a sync now (owner ruling 2026-09-24 (m)).
+	s.kick()
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
 		writeStoreErr(w, err, msgRetryGone)

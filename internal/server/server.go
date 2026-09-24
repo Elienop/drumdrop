@@ -45,8 +45,10 @@ type Deps struct {
 	// sync would enqueue without touching the queue.
 	Planner *scheduler.Planner
 	// Kick is the buffered channel the daemon's Run select drains for an immediate
-	// out-of-band cycle. POST /api/sync does a non-blocking send on it. Nil when
-	// no daemon is attached (e.g. tests of read-only endpoints).
+	// out-of-band cycle. POST /api/sync and Resume send on it, and so does every
+	// press that queues a download or can (Download, Retry, Un-skip, and adding
+	// a follow), without blocking (Server.kick). Nil when no daemon is attached
+	// (e.g. tests of read-only endpoints).
 	Kick chan<- struct{}
 	// CancelRunning kills the in-flight download for a running job, returning true
 	// when the job was found in this process's worker registry (the worker then
