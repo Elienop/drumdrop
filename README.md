@@ -313,11 +313,14 @@ recorded: the attempt fails instead. Each attempt downloads the lesson again, an
 the last one fails this way the lesson stays downloaded, if its files are on disk (see
 [Daemon](#daemon-unattended-auto-sync)), with the note "Couldn't put this lesson in the
 library, so its copy there was kept. Check the server log, fix the problem, then Download
-again." A lesson whose recorded folder is in the downloads dir isn't in the library,
-even when the downloads dir sits inside the library (an earlier refused move kept it
-there): it is placed in downloads, and its old folder, when its title has changed since,
-is handled as any previous folder is (below). When the library is the downloads dir, a
-folder in it counts as the library's. The exception is a lesson whose recorded folder
+again." When the downloads dir sits inside the library, a lesson whose recorded folder
+is in the course folder of the downloads dir it would be placed in (an earlier refused
+move kept it there, under this title or an older one) isn't in the library: it is
+placed in downloads, and its old folder, when its title has changed since, is handled as
+any previous folder is (below). Any other folder inside the library counts as the
+library's, even one inside the downloads dir as written (a course named like the
+downloads dir), and so does every folder when the library is the downloads dir. The
+exception is a lesson whose recorded folder
 is the very folder it would be placed in within downloads (the library is the downloads
 dir, and an earlier refused move kept the lesson there): placing it there replaces only
 its own files at the names the download brings back, as any re-download does, so it is
