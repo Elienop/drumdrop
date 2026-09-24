@@ -116,7 +116,33 @@ it("retries a failed job (202) and shows a success toast", async () => {
   const failedRow = screen.getByText("Single Stroke Roll").closest("tr")!
   await user.click(within(failedRow).getByRole("button", { name: /retry/i }))
 
-  expect(await screen.findByText(/retr(y|ied|ying)/i, { selector: "[data-sonner-toast] *" }))
+  // Lessons' words: a download, named by its lesson.
+  const t = await toastWith("Download queued again")
+  expect(within(t).getByText("Single Stroke Roll", { selector: "[data-description]" }))
+    .toBeInTheDocument()
+})
+
+it("cancels a running job and says so in Lessons' words, naming the lesson", async () => {
+  server.use(
+    ...jobsAndLessons(),
+    http.post(`${ORIGIN}/api/jobs/22/cancel`, () =>
+      HttpResponse.json({ ...runningJob, status: "canceled" }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(
+    <>
+      <Queue />
+      <Toaster />
+    </>,
+  )
+
+  await screen.findByText("Double Stroke Roll")
+  const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
+  await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
+
+  const t = await toastWith("Download canceled")
+  expect(within(t).getByText("Double Stroke Roll", { selector: "[data-description]" }))
     .toBeInTheDocument()
 })
 
@@ -176,7 +202,7 @@ it.each([
   const t = await toastWith(title)
   expect(within(t).getByText("Double Stroke Roll")).toBeInTheDocument()
   expectNeutral(t)
-  expect(screen.queryByText("Couldn't cancel the job")).not.toBeInTheDocument()
+  expect(screen.queryByText(/^Couldn't cancel/)).not.toBeInTheDocument()
   await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
 })
 
@@ -205,10 +231,10 @@ it("a retry answered 404 (the job was removed meanwhile) reads as a neutral note
   const failedRow = screen.getByText("Single Stroke Roll").closest("tr")!
   await user.click(within(failedRow).getByRole("button", { name: /retry/i }))
 
-  const t = await toastWith("Already removed")
+  const t = await toastWith("Removed elsewhere")
   expect(within(t).getByText("Single Stroke Roll")).toBeInTheDocument()
   expectNeutral(t)
-  expect(screen.queryByText("Couldn't retry the job")).not.toBeInTheDocument()
+  expect(screen.queryByText(/^Couldn't retry/)).not.toBeInTheDocument()
   await waitFor(() => expect(listFetches).toBeGreaterThan(fetchesBefore))
 })
 
@@ -237,7 +263,7 @@ it("a cancel that really failed stays red with the server's sentence until close
   const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
   await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
 
-  const t = await toastWith("Couldn't cancel the job")
+  const t = await toastWith("Couldn't cancel the download of “Double Stroke Roll”")
   expect(t).toHaveAttribute("data-type", "error")
   expect(within(t).getByText(SERVER_ERROR, { selector: "[data-description]" })).toBeInTheDocument()
   expect(within(t).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
@@ -263,7 +289,7 @@ it("a 409 on retry shows the server's reason (files being deleted), not a guess 
   const failedRow = screen.getByText("Single Stroke Roll").closest("tr")!
   await user.click(within(failedRow).getByRole("button", { name: /retry/i }))
 
-  expect(await screen.findByText("Couldn't retry the job")).toBeInTheDocument()
+  expect(await screen.findByText("Couldn't retry the download of “Single Stroke Roll”")).toBeInTheDocument()
   expect(screen.getByText(BEING_DELETED, { selector: "[data-description]" })).toBeInTheDocument()
   expect(screen.queryByText(/not retryable/i)).not.toBeInTheDocument()
 })
@@ -292,7 +318,7 @@ it("a cancel answered by a proxy's HTML page toasts a sentence, never a JSON par
   const runningRow = screen.getByText("Double Stroke Roll").closest("tr")!
   await user.click(within(runningRow).getByRole("button", { name: /cancel/i }))
 
-  expect(await screen.findByText("Couldn't cancel the job")).toBeInTheDocument()
+  expect(await screen.findByText("Couldn't cancel the download of “Double Stroke Roll”")).toBeInTheDocument()
   expect(
     screen.getByText("Couldn't reach the server, or it answered unexpectedly. Try again."),
   ).toBeInTheDocument()

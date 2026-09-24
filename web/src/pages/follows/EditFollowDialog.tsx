@@ -84,7 +84,8 @@ export function EditFollowDialog({
         done: () => onOpenChange(false),
         announce: (outcome) => {
           if (outcome === "already-gone") {
-            toast.message("Already removed", { description: follow.title })
+            // Not "Already removed": the press wanted the follow changed, not gone.
+            toast.message("Removed elsewhere", { description: follow.title })
           } else {
             toast.success("Quality updated", { description: follow.title })
           }

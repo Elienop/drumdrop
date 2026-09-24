@@ -263,6 +263,8 @@ it("shows 'Already queued' when download returns 200", async () => {
 // The server's sentences, verbatim from internal/server/messages.go.
 const DOWNLOAD_GONE =
   "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to download."
+const DOWNLOAD_JOB_GONE =
+  "It won't download: a Skip or delete elsewhere took it off the queue right after it was queued."
 const UNSKIP_GONE =
   "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to un-skip."
 const CANCEL_GONE =
@@ -281,11 +283,20 @@ async function expectNeutralNote(title: string, lesson: string) {
   expect(screen.queryByText(/^Couldn't/)).not.toBeInTheDocument()
 }
 
-describe("a row action on a lesson removed meanwhile is a neutral note, and the row goes", () => {
+describe("a row action raced by something done elsewhere is a neutral note, and the list refreshes", () => {
+  // The title says what happened. "Already removed" would misread here: the
+  // press wanted the lesson downloaded, or back.
   it.each([
-    ["Download", lessons[1], /^download$/i, "download", DOWNLOAD_GONE],
-    ["Un-skip", skippedLesson, /un-?skip/i, "unskip", UNSKIP_GONE],
-  ])("%s answered 404", async (_, lesson, item, path, sentence) => {
+    [
+      "Download",
+      lessons[1],
+      /^download$/i,
+      "download",
+      DOWNLOAD_GONE,
+      "Won't download: skipped or removed elsewhere",
+    ],
+    ["Un-skip", skippedLesson, /un-?skip/i, "unskip", UNSKIP_GONE, "Removed elsewhere"],
+  ])("%s answered 404", async (_, lesson, item, path, sentence, title) => {
     let gone = false
     server.use(
       http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(gone ? [] : [lesson])),
@@ -300,12 +311,39 @@ describe("a row action on a lesson removed meanwhile is a neutral note, and the 
     await user.click(await screen.findByRole("button", { name: `Actions for ${lesson.title}` }))
     await user.click(await screen.findByRole("menuitem", { name: item }))
 
-    await expectNeutralNote("Already removed", lesson.title)
+    await expectNeutralNote(title, lesson.title)
     await waitFor(() =>
       expect(
         screen.queryByRole("button", { name: `Actions for ${lesson.title}` }),
       ).not.toBeInTheDocument(),
     )
+  })
+
+  // Download's other 404 (msgDownloadJobGone): a Skip or delete elsewhere
+  // took the new download off the queue. The lesson stays listed, now
+  // skipped, so the note must not say it was removed.
+  it("Download answered 404 because a Skip elsewhere took it off the queue: the same note, and the row stays", async () => {
+    let skipped = false
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () =>
+        HttpResponse.json([skipped ? { ...lessons[1], status: "skipped" } : lessons[1]]),
+      ),
+      http.post(`${ORIGIN}/api/lessons/:id/download`, () => {
+        skipped = true
+        return HttpResponse.json({ error: DOWNLOAD_JOB_GONE }, { status: 404 })
+      }),
+    )
+    const user = userEvent.setup()
+    renderLessons()
+
+    await user.click(await screen.findByRole("button", { name: `Actions for ${lessons[1].title}` }))
+    await user.click(await screen.findByRole("menuitem", { name: /^download$/i }))
+
+    await expectNeutralNote("Won't download: skipped or removed elsewhere", lessons[1].title)
+    expect(screen.queryByText("Already removed")).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: `Actions for ${lessons[1].title}` }),
+    ).toBeInTheDocument()
   })
 
   it.each([

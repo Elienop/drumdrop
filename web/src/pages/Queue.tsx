@@ -85,29 +85,34 @@ export function Queue() {
 
   // A race with something done elsewhere is not a failure: a job removed
   // meanwhile (404), or, for Cancel, one that had already ended (409). Each
-  // gets a neutral note that goes away by itself, like Skip's and Delete's
-  // "Already removed". A real failure shows the server's own sentence (a
-  // retry's 409 says why: the job isn't failed or canceled, or its lesson's
-  // files are being deleted) and stays until closed. Either way the list
-  // refreshes: the row was out of date.
+  // gets a neutral note that goes away by itself, titled with what happened:
+  // "Already removed" and "Already ended" for a Cancel, which wanted the
+  // download gone or stopped, but "Removed elsewhere" for a Retry, which
+  // wanted it back. A real failure shows the server's own sentence (a
+  // retry's 409 says why: the download isn't failed or canceled, or its
+  // lesson's files are being deleted) and stays until closed. Either way the
+  // list refreshes: the row was out of date. The words match Lessons': a
+  // download, named by its lesson.
   const cancel = useMutation({
     mutationFn: ({ id }: JobRef) => cancelOutcome(api.cancelJob(id)),
     onSuccess: (outcome, { title }) => {
       if (outcome === "already-gone") toast.message("Already removed", { description: title })
       else if (outcome === "already-ended") toast.message("Already ended", { description: title })
-      else toast.success("Job canceled", { description: title })
+      else toast.success("Download canceled", { description: title })
     },
-    onError: (err) => failureToast("Couldn't cancel the job", errorMessage(err)),
+    onError: (err, { title }) =>
+      failureToast(`Couldn't cancel the download of “${title}”`, errorMessage(err)),
     onSettled: invalidate,
   })
 
   const retry = useMutation({
     mutationFn: ({ id }: JobRef) => itemOutcome(api.retryJob(id)),
     onSuccess: (outcome, { title }) => {
-      if (outcome === "already-gone") toast.message("Already removed", { description: title })
-      else toast.success("Retrying job", { description: title })
+      if (outcome === "already-gone") toast.message("Removed elsewhere", { description: title })
+      else toast.success("Download queued again", { description: title })
     },
-    onError: (err) => failureToast("Couldn't retry the job", errorMessage(err)),
+    onError: (err, { title }) =>
+      failureToast(`Couldn't retry the download of “${title}”`, errorMessage(err)),
     onSettled: invalidate,
   })
 

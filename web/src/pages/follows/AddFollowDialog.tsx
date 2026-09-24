@@ -258,7 +258,7 @@ export function AddFollowDialog({
               <Label htmlFor="follow-brand">Brand (optional)</Label>
               <Input
                 id="follow-brand"
-                placeholder="drumeo"
+                placeholder="Drumeo"
                 value={brand}
                 disabled={adding}
                 onChange={edit(setBrand)}
@@ -300,15 +300,19 @@ export function AddFollowDialog({
                   was typed: "Jared Falk" previews as @jared-falk. The brand
                   ends the count line, as the count is of that brand's
                   lessons: a pianote link with Brand empty reads "… lessons on
-                  Pianote". */}
+                  Pianote".
+                  The {" "} between the parts is for the live region: a
+                  screen reader joins its text, and without them it reads
+                  "Falk@jared-falk40". Blank text between flex items is not
+                  rendered, so nothing moves on screen. */}
               <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="font-medium">{shown.data.title}</span>
+                <span className="font-medium">{shown.data.title}</span>{" "}
                 {shown.data.slug && (
                   <span className="text-sm wrap-anywhere text-muted-foreground">
                     @{shown.data.slug}
                   </span>
                 )}
-              </div>
+              </div>{" "}
               <span className="text-sm text-muted-foreground">
                 {countOf(shown.data.lesson_count, "lesson", "lessons")}
                 {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
@@ -328,7 +332,10 @@ export function AddFollowDialog({
           </Button>
           {/* The fill marks the next step, and only one button has it:
               Preview until a preview of this input is shown, then Add
-              (owner, 2026-09-24). Add is not filled while it cannot run. */}
+              (owner, 2026-09-24). The fill follows the step, not whether
+              the button can run: Preview stays filled, dimmed, while an
+              empty field disables it, and Add stays outline until a
+              preview is shown. */}
           <PendingButton
             variant={shown ? "outline" : "default"}
             pending={pending && step === "preview"}

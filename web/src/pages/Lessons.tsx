@@ -151,12 +151,18 @@ export function Lessons() {
   // Row actions report a failure as a toast titled with the outcome and the
   // lesson, and the server's sentence (or our own, never "HTTP 502") below.
   //
-  // A race with something done elsewhere is not a failure: a 404 (the
-  // lesson went with its follow, or a Skip or delete took its new download
-  // off the queue) reads "Already removed", and for Cancel a 409 (the
-  // download had already ended) reads "Already ended". Both are neutral notes
-  // that go away by themselves, like Skip's and Delete's. The lists refresh
-  // after a failure too, so a row that was out of date goes.
+  // A race with something done elsewhere is not a failure. It gets a
+  // neutral note that goes away by itself, like Skip's and Delete's, titled
+  // with what happened:
+  // - Cancel: a 404 reads "Already removed" and a 409 (the download had
+  //   already ended) "Already ended". "Already" fits: the press wanted it
+  //   gone or stopped.
+  // - Download: a 404 has two causes, the lesson went with its follow
+  //   (msgDownloadGone), or a Skip or a delete elsewhere took the new
+  //   download off the queue and the row stays, marked skipped
+  //   (msgDownloadJobGone). The title is true of both.
+  // - Un-skip: a 404 reads "Removed elsewhere"; the press wanted it back.
+  // The lists refresh after a failure too, so a row that was out of date goes.
   const refreshRows = () => {
     qc.invalidateQueries({ queryKey: qk.jobs() })
     qc.invalidateQueries({ queryKey: ["lessons"] })
@@ -175,8 +181,9 @@ export function Lessons() {
     },
     onSuccess: (outcome, lesson) => {
       const description = lesson.title
-      if (outcome === "already-gone") toast.message("Already removed", { description })
-      else if (outcome === "queued") toast.success("Queued", { description })
+      if (outcome === "already-gone") {
+        toast.message("Won't download: skipped or removed elsewhere", { description })
+      } else if (outcome === "queued") toast.success("Queued", { description })
       else toast.message("Already queued", { description })
     },
     onError: (err, lesson) => {
@@ -204,7 +211,7 @@ export function Lessons() {
     mutationFn: (lesson: LessonDTO) => itemOutcome(api.unskipLesson(lesson.railcontent_id)),
     onSuccess: (outcome, lesson) => {
       const description = lesson.title
-      if (outcome === "already-gone") toast.message("Already removed", { description })
+      if (outcome === "already-gone") toast.message("Removed elsewhere", { description })
       else toast.success("Lesson un-skipped", { description })
     },
     onError: (err, lesson) => {

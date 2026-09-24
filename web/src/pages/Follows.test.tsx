@@ -723,7 +723,7 @@ it("a 404 on save (the follow was removed meanwhile) closes Edit as done, naming
   await user.click(within(dialog).getByRole("button", { name: /^save$/i }))
 
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
-  expect(await screen.findByText("Already removed")).toBeInTheDocument()
+  expect(await screen.findByText("Removed elsewhere")).toBeInTheDocument()
   expect(screen.getByText("Stick Control", { selector: "[data-description]" })).toBeInTheDocument()
   expect(screen.queryByText(/quality updated/i)).not.toBeInTheDocument()
   expect(screen.queryByText(/isn't in DrumDrop anymore/)).not.toBeInTheDocument()
@@ -1066,7 +1066,11 @@ it("the preview lands in a status region that is always there, so a screen reade
 
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
   await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "Jared Falk{Enter}")
-  await waitFor(() => expect(status).toHaveTextContent("Jared Falk@jared-falk40 lessons on Drumeo"))
+  // Read as a screen reader joins it: with a space between the parts, not
+  // "Falk@jared-falk40".
+  await waitFor(() =>
+    expect(status).toHaveTextContent(/^Jared Falk @jared-falk 40 lessons on Drumeo$/),
+  )
   expect(within(dialog).getByRole("status")).toBe(status)
 })
 
@@ -1224,7 +1228,7 @@ it("a node preview shows no slug and no brand", async () => {
 it("an instructor input nothing can normalise shows the server's sentence inline", async () => {
   // msgBadSlug, verbatim from internal/server/messages.go.
   const BAD =
-    "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or their coach page's link, then Preview again. A lesson or course link goes under Node."
+    "That instructor can't be looked up. Enter a name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a coach page's link; a lesson or course link goes under Node. Then Preview again."
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: BAD }, { status: 400 })),
