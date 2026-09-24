@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from "@testing-library/react"
+import { act, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
 import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import { TopBar } from "./TopBar"
 
@@ -216,3 +217,46 @@ it.each([
   await screen.findByText(SERVER_ERROR)
   await waitFor(() => expect(summaryReads).toBeGreaterThan(readsBefore))
 })
+
+// Code review round 5c, I5: while a press runs, the button keeps the verb that
+// was pressed even when the flag is re-read meanwhile (another tab or client
+// changed it, or something else refreshed the summary) and says the opposite.
+// Only the answer to the press, and the re-read after it, decide what the
+// button offers next.
+it.each([
+  ["Pause", false, "pause", "Resume"],
+  ["Resume", true, "resume", "Pause"],
+] as const)(
+  "while %s runs, a re-read of a flag that already changed leaves its label alone",
+  async (verb, startPaused, path, next) => {
+    let paused: boolean = startPaused
+    let answer!: () => void
+    server.use(
+      http.get(`${ORIGIN}/api/summary`, () => HttpResponse.json(summary(paused))),
+      http.post(
+        `${ORIGIN}/api/${path}`,
+        () =>
+          new Promise<Response>((resolve) => {
+            answer = () => resolve(HttpResponse.json({ paused }))
+          }),
+      ),
+    )
+    const user = userEvent.setup()
+    const { qc } = renderWithProviders(<TopBar />)
+
+    const btn = await screen.findByRole("button", { name: verb })
+    await user.click(btn)
+    await waitFor(() => expect(answer).toBeTypeOf("function"))
+
+    // The flag flips on the server and is re-read while the press still runs.
+    paused = !startPaused
+    await act(() => qc.refetchQueries({ queryKey: qk.summary }))
+    expect(qc.getQueryData<{ paused: boolean }>(qk.summary)?.paused).toBe(!startPaused)
+    expect(btn).toHaveAttribute("aria-disabled", "true")
+    expect(btn).toHaveAccessibleName(verb)
+
+    answer()
+    await waitFor(() => expect(btn).not.toHaveAttribute("aria-disabled"))
+    expect(btn).toHaveAccessibleName(next)
+  },
+)
