@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,16 +62,73 @@ func runCasefold(t *testing.T, run func(t *testing.T, dir string)) {
 	runtime.LockOSThread()
 	out, err := cmd.CombinedOutput()
 	runtime.UnlockOSThread()
+	switch v, why := judgeChild(t.Name(), string(out), err); v {
+	case childSkipped:
+		t.Skip(why)
+	case childFailed:
+		t.Fatal(why)
+	}
+}
+
+// childVerdict is what the parent makes of the child's run.
+type childVerdict int
+
+const (
+	childPassed childVerdict = iota
+	childSkipped
+	childFailed
+)
+
+// judgeChild reads the child's run of the test named name, from its output
+// and exit error: skipped when it could not start (no user namespace) or it
+// reports that very test skipped, and exited 0; failed when it exited
+// non-zero, whatever its output says (a subtest that skipped beside one that
+// failed, or a message quoting "--- SKIP", is still a failure), or it doesn't
+// report that test passed; passed otherwise. why says which, with the output.
+func judgeChild(name, out string, err error) (childVerdict, string) {
 	var exit *exec.ExitError
 	switch {
 	case err != nil && !errors.As(err, &exit):
-		t.Skipf("no user namespace for a casefold mount: %v", err)
-	case strings.Contains(string(out), "--- SKIP"):
-		t.Skipf("the child skipped:\n%s", out)
+		return childSkipped, fmt.Sprintf("no user namespace for a casefold mount: %v", err)
 	case err != nil:
-		t.Fatalf("the child failed: %v\n%s", err, out)
-	case !strings.Contains(string(out), "--- PASS: "+t.Name()+" ("):
-		t.Fatalf("the child did not report %s as passed:\n%s", t.Name(), out)
+		return childFailed, fmt.Sprintf("the child failed: %v\n%s", err, out)
+	case strings.Contains(out, "--- SKIP: "+name+" ("):
+		return childSkipped, fmt.Sprintf("the child skipped:\n%s", out)
+	case !strings.Contains(out, "--- PASS: "+name+" ("):
+		return childFailed, fmt.Sprintf("the child did not report %s as passed:\n%s", name, out)
+	}
+	return childPassed, ""
+}
+
+// TestJudgeCasefoldChild (round-5c security L2) proves a child that failed
+// is never taken for one that skipped: its exit status is read before any
+// "--- SKIP" in its output, and only a skip of the test itself counts.
+func TestJudgeCasefoldChild(t *testing.T) {
+	const name = "TestX/a+b_(c)"
+	exit := exec.Command("false").Run()
+	var exitErr *exec.ExitError
+	if !errors.As(exit, &exitErr) {
+		t.Fatalf("no exit error to test with: %v", exit)
+	}
+	for _, c := range []struct {
+		why  string
+		out  string
+		err  error
+		want childVerdict
+	}{
+		{"passed", "=== RUN   TestX/a+b_(c)\n    --- PASS: TestX/a+b_(c) (0.00s)\nPASS\n", nil, childPassed},
+		{"skipped", "    --- SKIP: TestX/a+b_(c) (0.00s)\n        no casefold\nPASS\n", nil, childSkipped},
+		{"could not start", "", errors.New("fork/exec: operation not permitted"), childSkipped},
+		{"a subtest skipped, another failed", "        --- SKIP: TestX/a+b_(c)/skips (0.00s)\n        --- FAIL: TestX/a+b_(c)/fails (0.00s)\n    --- FAIL: TestX/a+b_(c) (0.00s)\n    --- SKIP: TestX/a+b_(c) (0.00s)\nFAIL\n", exit, childFailed},
+		{"its failure quotes a skip", "    x_test.go:1: unexpected output:\n        --- SKIP: TestX/a+b_(c) (0.00s)\n    --- FAIL: TestX/a+b_(c) (0.00s)\nFAIL\n", exit, childFailed},
+		{"a subtest of it skipped", "        --- SKIP: TestX/a+b_(c)/sub (0.00s)\n    --- PASS: TestX/a+b_(c) (0.00s)\nPASS\n", nil, childPassed},
+		{"another test skipped, this one never ran", "--- SKIP: TestY (0.00s)\nPASS\n", nil, childFailed},
+	} {
+		t.Run(c.why, func(t *testing.T) {
+			if got, why := judgeChild(name, c.out, c.err); got != c.want {
+				t.Errorf("verdict = %d (%s), want %d", got, why, c.want)
+			}
+		})
 	}
 }
 

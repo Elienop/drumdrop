@@ -115,3 +115,45 @@ func TestWorkerPlexTvSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T)
 		})
 	}
 }
+
+// TestWorkerPlexTvSameTitleReDownloadOfALegacyRow (round-5c security I2)
+// pins ruling (j) for a legacy row (no record: it owns its season-folder
+// entries by the name grammar alone). A same-title re-download keeps what the
+// grammar gives the lesson and it did not bring back, and records it: here
+// the captions, and an unclaimed "<base> [Live].mp4", which the grammar reads
+// as a version of this episode (the name can't say whether it is a song
+// version or a leftover of a lesson whose row is gone). An entry another
+// lesson claims, by record or by its own legacy match, is never the lesson's:
+// it stays untouched and out of its record.
+func TestWorkerPlexTvSameTitleReDownloadOfALegacyRow(t *testing.T) {
+	const base = "Beginner Course - s01e05 - Lesson A"
+	live := base + " [Live].mp4"
+	for _, who := range []string{"no one", "lesson 200's record", "lesson 200's legacy match"} {
+		t.Run("[Live] claimed by "+who, func(t *testing.T) {
+			w, store, _, _, season := plexWorker(t)
+			seedSeason(t, season, base+".mp4", base+".nfo", base+".en.vtt", live)
+			prev := legacyRow(100, "Lesson A", 5, season, base+".mp4")
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
+			switch who {
+			case "lesson 200's record":
+				store.withFiles = append(store.withFiles, recordedRow(200, season, live))
+			case "lesson 200's legacy match":
+				store.withFiles = append(store.withFiles, legacyRow(200, "Lesson A [Live]", 5, season, live))
+			}
+
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			rec := onlyRecord(t, store)
+			assertContent(t, season, base+".en.vtt", live)
+			want := recordOf(season, base+".mp4", base+".nfo", base+".en.vtt")
+			if who == "no one" {
+				want = append(want, recordOf(season, live)...)
+			}
+			if got := slices.Sorted(slices.Values(rec.entries)); !reflect.DeepEqual(got, slices.Sorted(slices.Values(want))) {
+				t.Errorf("entries = %v, want %v", got, want)
+			}
+		})
+	}
+}

@@ -74,8 +74,17 @@ func chmodAllOnCleanup(t *testing.T, root string) {
 // the two previous folders a placement may never touch, one another lesson
 // records something in and one outside the downloads folder and the library
 // (the library moved, say), are left as they were and logged with why, as
-// every other previous folder that stays is.
+// every other previous folder that stays is; in the default layout and in
+// plex-tv (round-5c code L4), whose move asks the same question.
 func TestWorkerLogsAPreviousFolderItMayNotTouch(t *testing.T) {
+	for _, pc := range []previousCase{previousCases[0], previousCases[3]} {
+		t.Run(pc.name, func(t *testing.T) { logsAPreviousFolderItMayNotTouch(t, pc) })
+	}
+}
+
+// logsAPreviousFolderItMayNotTouch is TestWorkerLogsAPreviousFolderItMayNotTouch
+// in pc's setup, placed where pc places the re-download.
+func logsAPreviousFolderItMayNotTouch(t *testing.T, pc previousCase) {
 	for _, c := range []struct {
 		name string
 		// dir is the previous folder, under the downloads folder dl.
@@ -90,7 +99,6 @@ func TestWorkerLogsAPreviousFolderItMayNotTouch(t *testing.T) {
 		}, false, "it is inside neither the downloads folder nor the library"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			pc := previousCases[0] // title changed, no library
 			w, store, log := previousWorker(t, pc)
 			dir, files := seedLessonFolder(t, store, c.dir(w.Cfg.DownloadsDir), ownerExtras)
 			if c.other {
