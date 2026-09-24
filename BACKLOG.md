@@ -2021,7 +2021,14 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       `TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere` and
       `TestKeptInLibraryDecidesByWhatTheRowRecords` (which also keeps round 5h's
       course-folder rule pinned, now that a moved library is refused first). The web
-      half: _web commits and tests to follow_.
+      half (`6e2d66e`, `083a3d6`): the no-fade test now pins *when* the class arrives
+      (code Low 1): the menu must be gone in the commit that closes it, after a start and
+      after an end, because Radix Presence reads the animation once, in that render
+      (`web/node_modules/@radix-ui/react-presence/dist/index.mjs:59-66`); with the flag set
+      from an effect the menu stayed on screen and clickable, and a click cancelled. The
+      RowMenu comment says what the render-time reset buys, and the `overflow-anchor`
+      comment is widened (a lesson starting mid-view pulled the view too, 2270→0) and
+      records (x); the (w) and (t) tests each carry their own comment again (code Info 2).
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -2035,7 +2042,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'under its open menu|stays closed when that attempt fails|no exit fade|stays open, its highlight|out of scroll anchoring|start downloading|reads as not paused'`
     (web commits `3e04844`, `e4a71a2`, `909f7fb`, `b040729`, `6bb675c`)
     · round 5i: `go test -count=1 -run 'LeftBehind|TheMoveLooksForElsewhere|KeptInLibraryDecidesByWhatTheRowRecords|KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|DoesNotTakeAFileForTheLessonsFolder|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
-    and _the web half's command to follow_
+    and `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'gone in the same commit|takes itself out of scroll anchoring'`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
     the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
@@ -2107,8 +2114,10 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     keeps a closing menu on screen for its fade, already showing the new items, and it
     still takes clicks. In headless Chromium, with only the first commit, a click on
     *Download*'s old spot during the fade still sent the cancel 3 times out of 3; with
-    the no-fade close, 0 of 5. A close the reader makes keeps its fade. Cases (v)
-    doesn't cover are D135.
+    the no-fade close, 0 of 5. A close the reader makes keeps its fade. The class has to
+    be on the menu in the render that closes it: set from an effect, the menu stayed on
+    screen and clickable (round-5h code seat); round 5i's test pins that timing, after a
+    start and after an end (`6e2d66e`). Cases (v) doesn't cover are D135.
   - *Evidence:* `grep -n 'function RowMenu' web/src/pages/Lessons.tsx` ·
     `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'under its open menu|stays closed when that attempt fails|no exit fade|stays open, its highlight'`
 - **D78 · A Skip was undone by a queued or running download.** This branch
