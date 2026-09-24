@@ -1185,6 +1185,31 @@ it("a clamped row note carries its full text in a title", async () => {
   expect(note).toHaveAttribute("title", long.trim())
 })
 
+// UI review round 5e, Low D. Titles don't wrap, so the title column is as wide
+// as the longest title on the page: with short titles only it left a note
+// 244px wide at 1024px, and the clamp cut the sentence. The note keeps 28rem
+// whatever the titles are, which fits every sentence the server writes in two
+// lines (the longest, 147 characters, measured at about 27rem in Chromium).
+// jsdom has no layout, so this pins the class; the width was measured in a
+// browser.
+it("a row note keeps its width, however short the titles on the page", async () => {
+  // failMusora's lesson sentence, the longest (internal/scheduler/messages.go).
+  const NOTE =
+    "Couldn't get this lesson from Musora: it didn't answer, or its answer couldn't be read. Check the server log, fix the problem, then Download again."
+  const failed: LessonDTO = {
+    ...lessons[1],
+    railcontent_id: 801,
+    title: "Flams",
+    status: "failed",
+    error: NOTE,
+  }
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([failed])))
+  renderLessons()
+
+  const note = await screen.findByText(NOTE)
+  expect(note).toHaveClass("min-w-md", "max-w-md", "line-clamp-2")
+})
+
 it("a delete's tombstone reads 'Files deleted' under the title, not a bare 'deleted'", async () => {
   server.use(
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([tombstoned(lessons[0])])),

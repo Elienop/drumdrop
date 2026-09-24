@@ -400,10 +400,18 @@ export function Lessons() {
                         {lesson.title}
                         {note && (
                           // Clamped to two lines; the title attribute carries
-                          // all of it (a failure can be a long worker line).
+                          // all of it (a skip's reason is whatever was typed).
+                          // min-w-md: titles don't wrap, so the column is as
+                          // wide as the longest one on the page, and with
+                          // short titles only it left a note 244px at 1024px,
+                          // cut after a clause. At 28rem every sentence the
+                          // server writes fits in two lines (the longest,
+                          // 147 characters, needs about 27rem). A narrow
+                          // window scrolls the table sideways instead, as a
+                          // long title already makes it do.
                           <p
                             title={note}
-                            className="mt-0.5 line-clamp-2 max-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground"
+                            className="mt-0.5 line-clamp-2 max-w-md min-w-md text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground"
                           >
                             {note}
                           </p>
