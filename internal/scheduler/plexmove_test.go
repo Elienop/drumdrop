@@ -538,7 +538,7 @@ func TestMoveToLibraryCopyIsFlushedBeforeTheSourceGoes(t *testing.T) {
 
 	newDir, err := testPlace(t, downloadsDir, libraryDir, lessonDir, database.Lesson{})
 	if err != nil {
-		t.Fatalf("moveToLibrary: %v", err)
+		t.Fatalf("placeLessonFolder: %v", err)
 	}
 	want := append(paths(newDir, lessonFiles...), newDir, filepath.Dir(newDir))
 	for _, w := range want {

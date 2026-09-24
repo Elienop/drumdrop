@@ -234,10 +234,13 @@ func cliNodeFollow(id int64, rc int) database.Follow {
 	}
 }
 
-func newSyncHarness(store *cliStore, exp cliExpander, dl *cliDownloader) (*scheduler.Planner, *scheduler.Worker) {
+// newSyncHarness is a planner and a worker over store, downloading into a
+// folder of the test's own: the worker writes real folders there (D66).
+func newSyncHarness(t *testing.T, store *cliStore, exp cliExpander, dl *cliDownloader) (*scheduler.Planner, *scheduler.Worker) {
+	t.Helper()
 	planner := &scheduler.Planner{Store: store, Expander: exp, PermIDs: "perm"}
 	cfg := scheduler.DefaultConfig()
-	cfg.DownloadsDir = "/tmp/x"
+	cfg.DownloadsDir = t.TempDir()
 	worker := scheduler.NewWorker(store, cliResolver{}, dl, cfg, "perm", nil)
 	return planner, worker
 }
@@ -248,7 +251,7 @@ func TestRunSyncDryRunDownloadsNothing(t *testing.T) {
 	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
 	exp := cliExpander{ids: map[int64][]int{1: {11, 12, 13}}}
 	dl := &cliDownloader{}
-	planner, worker := newSyncHarness(store, exp, dl)
+	planner, worker := newSyncHarness(t, store, exp, dl)
 
 	var buf bytes.Buffer
 	if err := runSync(context.Background(), planner, worker, true /* dryRun */, 0, &buf); err != nil {
@@ -286,7 +289,7 @@ func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
 		2: {21, 22},
 	}}
 	dl := &cliDownloader{}
-	planner, worker := newSyncHarness(store, exp, dl)
+	planner, worker := newSyncHarness(t, store, exp, dl)
 
 	var buf bytes.Buffer
 	if err := runSync(context.Background(), planner, worker, false, 2 /* limit */, &buf); err != nil {

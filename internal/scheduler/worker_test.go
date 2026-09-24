@@ -1594,10 +1594,10 @@ func TestWorkerNoLibraryDirKeepsInDownloads(t *testing.T) {
 	}
 }
 
-// TestWorkerMoveToLibraryFailureNonFatal proves a move failure never fails the
-// job: when both the rename and the copy-tree fallback fail (the library parent
-// is occupied by a regular file, so MkdirAll of the parent fails), the job is
-// still Done and output_dir stays the downloads path (the file is still there).
+// TestWorkerMoveToLibraryFailureNonFatal proves a placement in the library
+// that fails never fails the job: when the lesson's folder can't be made there
+// (the library is a regular file), the job is still Done, the lesson is placed
+// in the downloads folder instead, and output_dir records that path.
 func TestWorkerMoveToLibraryFailureNonFatal(t *testing.T) {
 	job := queuedJob(1, nodeFollow().ID, 100)
 	store := newFakeWorkerStore(job)
@@ -1609,8 +1609,9 @@ func TestWorkerMoveToLibraryFailureNonFatal(t *testing.T) {
 
 	tmp := t.TempDir()
 	downloads := filepath.Join(tmp, "dl")
-	// Make the LibraryDir itself a regular file so MkdirAll of the destination
-	// parent under it always fails -> moveToLibrary errors (non-fatal path).
+	// Make the LibraryDir itself a regular file, so the lesson's folder can't
+	// be made under it: placeLessonFolder fails there, and the worker places
+	// the lesson in downloads instead (non-fatal).
 	library := filepath.Join(tmp, "lib")
 	if err := os.WriteFile(library, []byte("not a dir"), 0o644); err != nil {
 		t.Fatalf("write library-as-file: %v", err)
