@@ -137,11 +137,26 @@ loop: it periodically re-checks every follow for new lessons, queues them, and
 downloads them **one at a time** with **automatic retry** (3 attempts, waiting 5s
 before the second and 30s before the third). `sync` is the one-shot equivalent of a
 single daemon cycle. A lesson whose download fails every attempt is marked failed and
-tried again next cycle, unless it was downloaded before and still records those files:
-then it stays downloaded, with a note saying the re-download failed and the earlier
-download was kept. Syncs leave that lesson alone; *Download* on the web UI's Lessons
-page (or *Retry* in the Queue) tries again, and a download that succeeds clears the
-note.
+tried again next cycle, unless it was downloaded before and the files it records are
+still on disk when the attempt ends: then it stays downloaded, with a note saying the
+re-download failed and the earlier download was kept. Syncs leave that lesson alone;
+*Download* on the web UI's Lessons page (or *Retry* in the Queue) tries again, and a
+download that succeeds clears the note. The files checked are the lesson's recorded
+video; for a lesson without one, every file its Plex TV record names, or else its
+folder. One that can't be read counts as gone, so with the library drive unplugged a
+failed re-download marks the lesson failed, and every sync tries it again until the
+drive is back.
+
+A lesson Musora doesn't return (locked for your account, or removed) is skipped, and
+syncs leave it alone until it is un-skipped. One whose earlier download is still on
+disk stays downloaded instead, with a note saying Musora didn't return it and the
+earlier download was kept; only its job fails, and syncs leave it alone too.
+
+In the web UI, *Download*, *Retry* and *Un-skip*, and adding a follow, start a sync at
+once instead of waiting for the next `--interval` (a press that queues nothing, like
+Un-skip on a lesson that wasn't skipped, starts none). A press never waits on the
+daemon: presses made while a sync runs share one more sync after it, and while the
+daemon is paused a press starts none; *Resume* starts it.
 
 On startup the daemon reclaims any job left `running` by a previous crash or shutdown,
 and removes the folders stopped downloads left in `.drumdrop-in-progress`, then runs
@@ -265,15 +280,20 @@ Point Plex at `/mnt/pool/media/library`. Two **separate** binds (e.g. `./downloa
 and `./library:/library`) cross filesystems inside the container, so the move falls back
 to a copy-then-delete (correct, just not instant). A copied file is flushed to disk before
 the download's own copy is removed. A move that is refused or fails is undone (a copy that
-fails part-way is taken back out of the library) and logged. A lesson that isn't in the
-library yet is then placed in the downloads dir instead and recorded there, and the
-download still succeeds. In the default layout a lesson whose folder is already in the
-library is not placed in downloads, so that its library copy stays as it was and stays
-the one recorded: the attempt fails instead. Each attempt downloads the lesson again, and
-when the last one fails this way the lesson stays downloaded with the note "Couldn't put
-this lesson in the library, so its copy there was kept. Check the server log, fix the
-problem, then Download again." In the plex-tv layout the lesson is placed in downloads
-either way, and the library files it already had stay recorded (see
+fails part-way is taken back out of the library) and logged. The lesson is then placed
+in the downloads dir instead and recorded there, and the download still succeeds, unless
+that would delete a library file the lesson owns, or stop recording one. That is so for a
+lesson whose own folder is in the library, whatever the layout is today (a plex-tv
+install can still record a folder the default layout placed before the layout was
+switched), and for a lesson a version before the plex-tv record placed in a season
+folder, whose files drumdrop can't name (the default layout never names them). Such a
+lesson is not placed in downloads, so its library copy stays as it was and stays the one
+recorded: the attempt fails instead. Each attempt downloads the lesson again, and when
+the last one fails this way the lesson stays downloaded, if its files are on disk (see
+[Daemon](#daemon-unattended-auto-sync)), with the note "Couldn't put this lesson in the
+library, so its copy there was kept. Check the server log, fix the problem, then Download
+again." Any other lesson, a plex-tv one whose library files are recorded or one with
+none, is placed in downloads, and the library files it already had stay recorded (see
 [Plex TV layout](#plex-tv-layout)). If the copy finished but the download's own folder
 can't be removed afterwards, the library copy is kept and recorded, and the folder left
 behind is removed at the next `serve` or looping `daemon` start. Anything drumdrop could
@@ -304,7 +324,9 @@ which is the lesson's own earlier file or one no lesson records (say, a file kep
 follow was removed without its files). Everything else stays. In the default layout the
 new files are merged into the lesson's folder, and a subfolder such as `resources/` is
 merged the same way, file by file at every depth, so a file in it that the download didn't
-bring back (a PDF whose fetch failed this time, or one you put there) stays. An entry of
+bring back (a PDF whose fetch failed this time, or one you put there) stays. A
+re-download that brings no video (resources only) leaves the earlier video in the
+folder, and it stays the lesson's recorded video. An entry of
 another kind than the one the download places at its name (a file where it places a
 folder, or a folder where it places a file) is replaced whole.
 
@@ -369,7 +391,10 @@ is undone, and the lesson's own earlier files are not put back, since the delete
 them. Removing a follow *without* its files keeps every file its lessons recorded: a
 download it stops leaves nothing, not even a finished one that was being placed. It never
 stops another follow's download, even one it queued. Canceling a re-download leaves the
-lesson's earlier files as they were, and the lesson downloaded. A Cancel that lands once
+lesson's earlier files as they were, and the lesson downloaded if those files are still
+on disk (checked as under [Daemon](#daemon-unattended-auto-sync)); otherwise it is
+skipped with the note "The download stopped before it finished. Download again to get
+this lesson.", as a canceled first download is. A Cancel that lands once
 the download is being placed is too late: the download is recorded.
 
 Skipping a lesson stops its queued or running download for good: that download records
@@ -381,10 +406,13 @@ A download that fails every attempt leaves nothing either: the lesson's earlier 
 everything else, stay as they were. A download is not started at all when Musora doesn't
 answer for the lesson (or its answer can't be read), when a record it needs can't be read
 (the lesson's own, its follow's, or the other lessons', which say whose files are where),
-or when its own folder can't be made. Either way, a lesson with no files from an earlier
-download is marked failed and tried again next cycle; one that still records them stays
-downloaded, with a note, and syncs leave it alone until you press *Download* (or *Retry*
-in the Queue), as described under [Daemon](#daemon-unattended-auto-sync).
+or when its own folder can't be made. Either way, a lesson whose earlier download is still
+on disk stays downloaded, with a note, and syncs leave it alone until you press
+*Download* (or *Retry* in the Queue); any other lesson, one whose earlier files are gone
+or whose own record can't be read included, is marked failed and tried again next cycle,
+as described under [Daemon](#daemon-unattended-auto-sync). A lesson Musora doesn't
+return (locked or removed) is not a failure: it is skipped, or kept, as described there
+too.
 
 drumdrop writes the files it fetches itself (the poster, resources, play-along audio,
 sheet music and the `.nfo`) through the download's own folder, which it holds open, never
@@ -438,36 +466,42 @@ Each course becomes one *show*, each lesson an *episode*:
   places, file by file, as in the default layout. What the lesson recorded at the same
   episode name that the re-download didn't bring back (captions or a poster it failed to
   fetch this time, a resources folder) stays where it is and stays recorded, so a later
-  delete removes it. After a title change, the lesson's recorded files at the old episode
+  delete removes it; a re-download that brings no video (resources only) keeps the earlier
+  one as the lesson's video. A lesson moved by a version before the record existed keeps,
+  the same way, what the name matching above gives it at its episode name, and from then
+  on it is recorded. After a title change, the lesson's recorded files at the old episode
   name go, whether or not the re-download brought each back; a recorded folder there goes
   only when the download brought back every file in it, and otherwise stays, no longer
   recorded, and logged as above (one more reason applies here: the new download has no
   folder in its place). A re-download never overwrites or removes another lesson's file:
   if one of its names is taken by another lesson, the move is refused and the lesson is
   placed in downloads instead (logged), and the library files it already had stay
-  recorded. Every write and removal in the library goes through the library folder itself,
-  so a symlink planted in it can't send one outside: the season folder must resolve inside
-  the library, each copied file is created afresh rather than written through whatever is
-  at its name, and on Linux and macOS each rename acts on the folders drumdrop holds open,
-  so a folder swapped for a symlink after the checks can't redirect it either. A rename
-  there also refuses an entry already at its name (`RENAME_NOREPLACE`, `RENAME_EXCL`),
-  except on a filesystem without that flag (some network filesystems), where it retries
-  without it and replaces. When a rename refuses, the move refuses: the lesson is placed
-  in downloads instead, recorded there, and the entry in the way is neither removed nor
-  copied into. drumdrop copies instead of renaming only when downloads and the library are
-  on different filesystems (volumes on Windows), and a copy that fails removes only what it
-  created. On Windows the rename goes by path and replaces an existing entry, so neither
-  guarantee holds there. The default layout's move works the same way, and never places
-  into a library folder another lesson records anything in. When its move is refused or
-  fails, though, only a lesson that isn't in the library yet is placed in downloads instead
-  (logged); one whose folder is already in the library keeps its library copy, and the
-  attempt fails (see [Plex library](#plex-library-single-parent-bind-mount)). A file at one
-  of its names that no lesson claims (say, one kept when a follow was deleted without its
-  files) is replaced, and that is logged. A name too long for the filesystem (255 bytes) has
-  its title shortened; if even that can't fit, the move is refused.
+  recorded; when they can't be (a lesson whose files drumdrop can't name, or a folder the
+  default layout placed), the attempt fails instead, as described under [Plex
+  library](#plex-library-single-parent-bind-mount). Every write and removal in the library
+  goes through the library folder itself, so a symlink planted in it can't send one
+  outside: the season folder must resolve inside the library, each copied file is created
+  afresh rather than written through whatever is at its name, and on Linux and macOS each
+  rename acts on the folders drumdrop holds open, so a folder swapped for a symlink after
+  the checks can't redirect it either. A rename there also refuses an entry already at its
+  name (`RENAME_NOREPLACE`, `RENAME_EXCL`), except on a filesystem without that flag (some
+  network filesystems), where it retries without it and replaces. When a rename refuses,
+  the move refuses, as above, and the entry in the way is neither removed nor copied into.
+  drumdrop copies instead of renaming only when downloads and the library are on different
+  filesystems (volumes on Windows), and a copy that fails removes only what it created. On
+  Windows the rename goes by path and replaces an existing entry, so neither guarantee
+  holds there. The default layout's move works the same way, and never places into a
+  library folder another lesson records anything in. When its move is refused or fails,
+  the same rule says whether the lesson is placed in downloads instead (logged): one whose
+  folder is already in the library keeps its library copy, and the attempt fails (see
+  [Plex library](#plex-library-single-parent-bind-mount)). A file at one of its names that
+  no lesson claims (say, one kept when a follow was deleted without its files) is
+  replaced, and that is logged. A name too long for the filesystem (255 bytes) has its
+  title shortened; if even that can't fit, the move is refused.
 - It shapes **only** the library move: downloads still happen in their own folder, and a
-  move failure is non-fatal: a half-done move is undone, and the lesson is placed in
-  downloads, with the library files it already had still recorded. With no
+  move failure never costs a file: a half-done move is undone, and the lesson is placed in
+  downloads, with the library files it already had still recorded, or else the attempt
+  fails and its library copy stays the one recorded. With no
   `DRUMDROP_LIBRARY_DIR` the setting does nothing.
 - The `.nfo` written here is a Kodi/Plex **`<episodedetails>`** doc (not the default
   `<movie>`): it carries the episode `<title>`, `<showtitle>`, `<season>`/`<episode>`,
