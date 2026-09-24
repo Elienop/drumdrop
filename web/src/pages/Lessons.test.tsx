@@ -1133,6 +1133,40 @@ describe("a downloaded lesson whose re-download failed", () => {
   })
 })
 
+// Owner's ruling 2026-09-24, (n): a re-download Musora answers with "no such
+// lesson" (locked or removed), for a lesson that has files, leaves it
+// "downloaded" with the not-returned note, as (h) does. The row treats it like
+// (h)'s note: shown under the title, and the menu offers Download.
+
+// The server's not-returned note, verbatim (internal/scheduler, msgNotResolved).
+const NOT_RETURNED_NOTE =
+  "Musora didn't return this lesson. It may be locked for your account, or removed."
+
+it("a downloaded lesson Musora didn't return shows the not-returned note, and its menu offers Download", async () => {
+  const notReturned: LessonDTO = {
+    ...lessons[0],
+    railcontent_id: 1001,
+    title: "Swiss Army Triplet",
+    error: NOT_RETURNED_NOTE,
+  }
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([notReturned])))
+  const user = userEvent.setup()
+  renderLessons()
+
+  const note = await screen.findByText(NOT_RETURNED_NOTE)
+  expect(note).toHaveClass("text-muted-foreground", "line-clamp-2")
+  expect(note.closest("td")).toHaveTextContent(/^Swiss Army Triplet/)
+  expect(within(note.closest("tr")!).getByText("downloaded")).toBeInTheDocument()
+
+  await user.click(screen.getByRole("button", { name: "Actions for Swiss Army Triplet" }))
+  await screen.findByRole("menuitem", { name: /copy path/i })
+  expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+    "Download",
+    "Copy path",
+    "Delete",
+  ])
+})
+
 it("a clamped row note carries its full text in a title", async () => {
   const long = `yt-dlp exited 1: ${"ERROR: [youtube] unable to extract player response ".repeat(4)}`
   const failed: LessonDTO = {
