@@ -82,7 +82,10 @@ export function AddFollowDialog({
 }) {
   const qc = useQueryClient()
   // The daemon's pause flag, from the top bar's query and read as it reads
-  // it. Only while open, so opening the dialog re-reads a stale flag.
+  // it. Only while open, so opening the dialog re-reads a stale flag. An
+  // unknown flag (the summary still loading, failed, or without the field)
+  // reads as not paused, as the top bar reads it (it then offers Pause): a
+  // paused line would point to a Resume the top bar isn't showing.
   const summary = useQuery({ queryKey: qk.summary, queryFn: api.summary, enabled: open })
   const paused = summary.data?.paused ?? false
   const [kind, setKind] = React.useState<Kind>("node")
@@ -213,7 +216,7 @@ export function AddFollowDialog({
             Preview a node or instructor, then add it to your follows.{" "}
             {paused
               ? "Syncing is paused: its lessons start downloading when you Resume."
-              : "Its lessons start downloading right away, or after the sync that's running."}
+              : "Its lessons start downloading right away, or after any sync already running."}
           </DialogDescription>
         </DialogHeader>
 

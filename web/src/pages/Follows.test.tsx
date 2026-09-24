@@ -636,7 +636,7 @@ function renderAdd() {
 it.each([
   [
     false,
-    "Preview a node or instructor, then add it to your follows. Its lessons start downloading right away, or after the sync that's running.",
+    "Preview a node or instructor, then add it to your follows. Its lessons start downloading right away, or after any sync already running.",
   ],
   [
     true,
@@ -653,6 +653,36 @@ it.each([
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
   const dialog = await screen.findByRole("dialog")
   await waitFor(() => expect(dialog).toHaveAccessibleDescription(text))
+})
+
+// An unknown pause flag reads as not paused, as the top bar reads it (it then
+// offers Pause, not Resume): the dialog must not point to a Resume the top
+// bar isn't showing. Checked once the summary has answered, so the line read
+// is the one the answer left.
+it.each([
+  ["the summary fails", () => HttpResponse.json({ error: "boom" }, { status: 500 })],
+  [
+    "the summary has no pause flag",
+    () => HttpResponse.json({ follows: 0, lessons: {}, jobs: {} }),
+  ],
+])("the Add follow dialog reads as not paused when %s", async (_, answer) => {
+  let answered = 0
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/summary`, () => {
+      answered++
+      return answer()
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await waitFor(() => expect(answered).toBeGreaterThan(0))
+  // Let the answer land in the query before reading the line.
+  await act(async () => {})
+  expect(dialog).toHaveAccessibleDescription(
+    "Preview a node or instructor, then add it to your follows. Its lessons start downloading right away, or after any sync already running.",
+  )
 })
 
 const previewOf = ({ request }: { request: Request }) => {
