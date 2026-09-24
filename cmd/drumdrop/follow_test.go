@@ -177,7 +177,7 @@ func (s *cliStore) FinishDownload(ctx context.Context, jobID int64, id int, rec 
 	s.setJobStatus(jobID, database.JobDone)
 	return nil
 }
-func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
+func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
 	s.setJobStatus(jobID, database.JobFailed)
 	return nil
 }

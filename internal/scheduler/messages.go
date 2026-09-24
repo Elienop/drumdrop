@@ -20,12 +20,31 @@ const (
 	// msgCanceled is a download a Cancel stopped. (A shutdown is msgShutdown:
 	// the job starts over.)
 	msgCanceled = "Stopped before it finished: the download was canceled."
+	// msgKeptInLibrary is failKeptInLibrary's sentence under the lesson.
+	msgKeptInLibrary = "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Download again."
 )
+
+// msgEarlierKept is the note a failed download leaves on a lesson that still
+// records files from an earlier download: the lesson stays 'downloaded', so
+// syncs don't retry it (owner ruling 2026-09-24 (h)). It is shown under the
+// lesson, whose menu offers Download.
+const msgEarlierKept = "The re-download failed, so the earlier download was kept. Check the server log, fix the problem, then Download again."
 
 // failure is what a failed job records, twice: lesson under the lesson, whose
 // menu offers Download, and job on the job, shown in the Queue beside Retry.
-// Each names the button of the place it is shown in.
-type failure struct{ lesson, job string }
+// Each names the button of the place it is shown in. kept, when set, replaces
+// msgEarlierKept as the lesson's note when the lesson still records files
+// from an earlier download (see keptNote).
+type failure struct{ lesson, job, kept string }
+
+// keptNote is the note f leaves on a lesson that still records files from an
+// earlier download, which stays 'downloaded' (database.Store.FailDownload).
+func (f failure) keptNote() string {
+	if f.kept != "" {
+		return f.kept
+	}
+	return msgEarlierKept
+}
 
 var (
 	// failDownload is a download that failed every attempt.
@@ -42,10 +61,11 @@ var (
 	}
 	// failKeptInLibrary is a download whose last attempt couldn't be placed in
 	// the library, where the lesson already was (errKeptInLibrary): its copy
-	// there is kept, still recorded.
+	// there is kept, still recorded, and its sentence is the lesson's note.
 	failKeptInLibrary = failure{
-		lesson: "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Download again.",
+		lesson: msgKeptInLibrary,
 		job:    "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Retry.",
+		kept:   msgKeptInLibrary,
 	}
 	// failNoFolder is a download not started because its private folder, in
 	// the downloads folder, couldn't be made.

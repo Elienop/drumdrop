@@ -623,7 +623,7 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	forceRunning(t, s, id)
-	if err := s.FailDownload(ctx, id, lesson, "yt-dlp exited 1", "yt-dlp exited 1"); err != nil {
+	if err := s.FailDownload(ctx, id, lesson, "yt-dlp exited 1", "kept", "yt-dlp exited 1"); err != nil {
 		t.Fatalf("FailDownload: %v", err)
 	}
 

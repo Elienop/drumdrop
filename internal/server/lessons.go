@@ -72,7 +72,10 @@ type skipLessonRequest struct {
 // queued-or-running job that existing job is returned with 200; otherwise a new
 // job is enqueued (inheriting the lesson's follow_id) and returned with 202. The
 // created bool carries the dedup signal, so no separate active-job lookup is
-// needed. A non-integer id is a 400.
+// needed. Any status is queued, a downloaded lesson's too: that is how the
+// owner retries a failed re-download, which leaves the lesson downloaded and
+// which syncs never queue again (owner ruling 2026-09-24 (h)). A non-integer
+// id is a 400.
 func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {

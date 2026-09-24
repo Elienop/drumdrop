@@ -169,8 +169,10 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 // 'downloaded' (already have it) OR 'skipped' (intentionally passed over, e.g.
 // locked/missing content — re-enqueuing would loop forever), or while a delete
 // is removing its files. A 'failed' lesson is deliberately NOT skipped so it is
-// retried. An unknown id is not an error: it reports false, so a never-seen
-// lesson enqueues normally.
+// retried; a failed re-download of a lesson that still records files leaves it
+// 'downloaded' (FailDownload), so it is not retried until the owner asks. An
+// unknown id is not an error: it reports false, so a never-seen lesson
+// enqueues normally.
 func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,

@@ -42,6 +42,10 @@ type fakeWorkerStore struct {
 	// lessonErr is the error each FailDownload/SkipDownload stored on the
 	// lesson (the job's is in jobs[id].Error).
 	lessonErr map[int]string
+	// keptErr is the note each FailDownload passed for a lesson that still
+	// records files from an earlier download (the store then keeps it
+	// 'downloaded' with it; this fake records the call only).
+	keptErr map[int]string
 
 	// ctx.Err() observed at each SkipDownload/CancelDownload call, so the
 	// shutdown-finalize test can assert those writes do NOT ride a cancelled ctx.
@@ -96,6 +100,7 @@ func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
 		lessons: map[int]database.Lesson{},
 
 		lessonErr: map[int]string{},
+		keptErr:   map[int]string{},
 	}
 	for _, j := range jobs {
 		s.queue = append(s.queue, j)
@@ -233,13 +238,14 @@ func (s *fakeWorkerStore) FinishDownload(ctx context.Context, jobID int64, id in
 	return nil
 }
 
-func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
+func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
 	}
 	s.markFailed = append(s.markFailed, id)
 	s.markFailedCtxErr = append(s.markFailedCtxErr, ctx.Err())
 	s.lessonErr[id] = lessonMsg
+	s.keptErr[id] = keptMsg
 	s.markJobFailedAs(jobID, jobMsg)
 	return nil
 }

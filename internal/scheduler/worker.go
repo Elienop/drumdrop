@@ -22,8 +22,9 @@ import (
 // Worker drains the jobs table sequentially: it claims one queued job at a
 // time, resolves and downloads the lesson, and records the outcome. A failed
 // download is retried up to Cfg.MaxAttempts with a growing backoff between
-// attempts; after the final attempt the lesson and job are marked failed. A
-// single bad job never aborts the run — every per-job failure is recorded and
+// attempts; after the final attempt the job is marked failed, and so is the
+// lesson unless it still records files from an earlier download (it then
+// stays downloaded, with a note). A single bad job never aborts the run — every per-job failure is recorded and
 // the worker moves on to the next claim.
 type Worker struct {
 	// Store claims jobs, loads follows, and records lesson/job outcomes.
@@ -494,16 +495,19 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		})
 	}
 
-	// Every attempt failed: record the lesson + job as failed and move on. The
-	// next planner cycle re-enqueues the lesson (it is not downloaded, and the
-	// job is no longer active), giving it another chance next interval. Each
-	// attempt's error was logged above; the lesson records a sentence. What the
+	// Every attempt failed: record the job as failed and move on. A lesson
+	// with no files from an earlier download is failed too, and the next
+	// planner cycle re-enqueues it, giving it another chance next interval;
+	// one that still records files stays downloaded with a note, so syncs
+	// don't download it again and again, and the owner's Download retries it
+	// (owner ruling 2026-09-24 (h)). Each attempt's error was logged above;
+	// the lesson records a sentence. What the
 	// download wrote goes with its private folder; nothing outside it was
 	// touched. WithoutCancel for parity with the cancel/resolve branches: the
 	// per-attempt ctx.Err() guard makes a cancelled ctx here practically
 	// unreachable, but keeping all terminal writes uncancellable makes
 	// "shutdown never strands a job" a single, obvious invariant.
-	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.job); {
+	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.keptNote(), final.job); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
 		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it failed; nothing was recorded\n", id)
 	case errors.Is(ferr, database.ErrDownloadCanceled):
@@ -532,8 +536,10 @@ func (w *Worker) shuttingDown(ctx context.Context, job database.Job, lesson *mus
 // failBeforeDownload fails a job that can not start its download (Musora
 // couldn't be asked for the lesson, or a precondition can not pass), without
 // downloading anything: its reason is logged, reported as a failed attempt
-// (the job's one terminal event), and the lesson and job are marked failed
-// with f (the next cycle tries again). The event and the records carry f's
+// (the job's one terminal event), and the job is marked failed with f, and
+// the lesson too (the next cycle tries again) unless it still records files
+// from an earlier download: that one stays downloaded with f's kept note
+// (database.Store.FailDownload). The event and the records carry f's
 // sentences, written for the user, not the reason. title is the lesson's, or
 // "" when it is not known.
 func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title string, reason error, f failure) {
@@ -550,7 +556,7 @@ func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title
 		Err:           f.lesson,
 		Time:          time.Now(),
 	})
-	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.job))
+	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.keptNote(), f.job))
 }
 
 // ended reports the end of a job that stopped without downloading, failing or

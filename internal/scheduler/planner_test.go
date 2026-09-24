@@ -118,7 +118,7 @@ func (s *fakePlannerStore) StartDownload(ctx context.Context, jobID int64, id in
 func (s *fakePlannerStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
 	panic("FinishDownload: not expected from Planner")
 }
-func (s *fakePlannerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
+func (s *fakePlannerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
 	panic("FailDownload: not expected from Planner")
 }
 func (s *fakePlannerStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {

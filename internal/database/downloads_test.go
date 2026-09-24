@@ -202,7 +202,7 @@ func recordDownloaded(t *testing.T, s *Store, id int, rec DownloadRecord) {
 // a claimed job, then FailDownload.
 func recordFailed(t *testing.T, s *Store, id int, msg string) {
 	t.Helper()
-	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg, msg); err != nil {
+	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg, msg, msg); err != nil {
 		t.Fatalf("FailDownload %d: %v", id, err)
 	}
 }
@@ -215,7 +215,7 @@ func guardedWrites(ctx context.Context) map[string]func(s *Store, jobID int64, i
 		"FinishDownload": func(s *Store, j int64, id int) error {
 			return s.FinishDownload(ctx, j, id, DownloadRecord{OutputDir: "/x", LibraryEntries: []string{"S/Season 01/y"}})
 		},
-		"FailDownload":   func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom", "boom") },
+		"FailDownload":   func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom", "kept", "boom") },
 		"SkipDownload":   func(s *Store, j int64, id int) error { return s.SkipDownload(ctx, j, id, "gated") },
 		"CancelDownload": func(s *Store, j int64, id int) error { return s.CancelDownload(ctx, j, id) },
 	}
@@ -341,31 +341,42 @@ func mustLesson(t *testing.T, s *Store, id int) Lesson {
 }
 
 // TestGuardedFailSkipCancelWrites pins what each guarded terminal write sets on
-// the lesson and the job while the job is live. A canceled download of a
-// lesson that still records files from an earlier download leaves it
-// 'downloaded' (D63): 'skipped' would hide files that are still there.
+// the lesson and the job while the job is live. A canceled or failed download
+// of a lesson that still records files from an earlier download (an
+// output_dir, or only a library record) leaves it 'downloaded' (D63; owner
+// ruling 2026-09-24 (h)): 'skipped' would hide files that are still there, and
+// the planner re-enqueues a 'failed' lesson every cycle. A failed one carries
+// the kept note; the job carries its own sentence either way.
 func TestGuardedFailSkipCancelWrites(t *testing.T) {
 	ctx := context.Background()
+	fail := func(s *Store, j int64) error {
+		return s.FailDownload(ctx, j, 1, "press Download", "kept", "press Retry")
+	}
 	cases := []struct {
 		name       string
-		files      bool
+		files      string // "", "folder" (an output_dir) or "record" (library entries only)
 		write      func(s *Store, j int64) error
 		lesson     string
 		lessonErr  string
 		jobStatus  string
 		jobErrText string
 	}{
-		{"fail", false, func(s *Store, j int64) error { return s.FailDownload(ctx, j, 1, "press Download", "press Retry") }, StatusFailed, "press Download", JobFailed, "press Retry"},
-		{"skip", false, func(s *Store, j int64) error { return s.SkipDownload(ctx, j, 1, "gated") }, StatusSkipped, "gated", JobFailed, "gated"},
-		{"cancel", false, func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusSkipped, stoppedNote, JobCanceled, ""},
-		{"cancel with files", true, func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusDownloaded, "", JobCanceled, ""},
+		{"fail", "", fail, StatusFailed, "press Download", JobFailed, "press Retry"},
+		{"fail with files", "folder", fail, StatusDownloaded, "kept", JobFailed, "press Retry"},
+		{"fail with a library record", "record", fail, StatusDownloaded, "kept", JobFailed, "press Retry"},
+		{"skip", "", func(s *Store, j int64) error { return s.SkipDownload(ctx, j, 1, "gated") }, StatusSkipped, "gated", JobFailed, "gated"},
+		{"cancel", "", func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusSkipped, stoppedNote, JobCanceled, ""},
+		{"cancel with files", "folder", func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusDownloaded, "", JobCanceled, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := newTestStore(t)
 			jobID := claimed(t, s, 1, sql.NullInt64{})
-			if c.files {
+			switch c.files {
+			case "folder":
 				seedFiles(t, s, 1, "/dl/F/01 - L", "/dl/F/01 - L/01 - L.mp4", sql.NullString{})
+			case "record":
+				seedFiles(t, s, 1, "", "", sql.NullString{String: `["S/Season 01/S - s01e01 - L.mp4"]`, Valid: true})
 			}
 			if err := s.StartDownload(ctx, jobID, 1); err != nil {
 				t.Fatalf("StartDownload: %v", err)
@@ -382,6 +393,39 @@ func TestGuardedFailSkipCancelWrites(t *testing.T) {
 				t.Errorf("job = %s/%q finished=%v, want %s/%q finished", j.Status, j.Error.String, j.FinishedAt.Valid, c.jobStatus, c.jobErrText)
 			}
 		})
+	}
+}
+
+// TestAFailedReDownloadKeepsTheLessonDownloadedUntilTheNextSuccess (owner
+// ruling 2026-09-24 (h)) proves the cycle on the store: a failed re-download
+// leaves the lesson 'downloaded' with its files and the note, the planner's
+// check skips it, the owner's Download (EnqueueJob) still queues it, and a
+// later successful download clears the note.
+func TestAFailedReDownloadKeepsTheLessonDownloadedUntilTheNextSuccess(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	rec := DownloadRecord{OutputDir: "/dl/F/01 - L", VideoPath: "/dl/F/01 - L/01 - L.mp4", Bytes: 5}
+	recordDownloaded(t, s, 1, rec)
+	jobID := claimed(t, s, 1, sql.NullInt64{})
+	if err := s.StartDownload(ctx, jobID, 1); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	if err := s.FailDownload(ctx, jobID, 1, "failed", "kept", "retry"); err != nil {
+		t.Fatalf("FailDownload: %v", err)
+	}
+	l := mustLesson(t, s, 1)
+	if l.Status != StatusDownloaded || l.Error.String != "kept" || l.OutputDir.String != rec.OutputDir || l.VideoPath.String != rec.VideoPath {
+		t.Errorf("lesson = %+v, want downloaded with its files and the note", l)
+	}
+	if skip, err := s.ShouldSkipEnqueue(ctx, 1); err != nil || !skip {
+		t.Errorf("ShouldSkipEnqueue = %v, %v; want true (syncs don't retry it)", skip, err)
+	}
+	if _, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1); err != nil || !created {
+		t.Fatalf("EnqueueJob = %v, %v; want a new job (the owner's Download)", created, err)
+	}
+	recordDownloaded(t, s, 1, rec)
+	if l := mustLesson(t, s, 1); l.Status != StatusDownloaded || l.Error.Valid {
+		t.Errorf("lesson = %s/%v, want downloaded with no note", l.Status, l.Error)
 	}
 }
 

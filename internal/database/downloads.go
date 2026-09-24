@@ -272,16 +272,29 @@ func (s *Store) FinishDownload(ctx context.Context, jobID int64, id int, rec Dow
 	})
 }
 
-// FailDownload records a download that failed: the lesson becomes 'failed'
-// with lessonMsg, and the job 'failed' with jobMsg unless it was canceled
-// meanwhile, in one transaction. It lands only while the job and lesson still
-// exist (ErrDownloadAbandoned otherwise). The two are shown in different
-// places, each beside its own button: the lesson's error under the lesson,
-// whose menu offers Download, and the job's in the Queue, beside Retry. So a
-// sentence that names what to press next needs one version for each.
-func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, jobMsg string) error {
-	return s.finishWith(ctx, jobID, id, StatusFailed, lessonMsg, jobMsg, JobFailed)
+// FailDownload records a download that failed, and its job 'failed' with
+// jobMsg unless it was canceled meanwhile, in one transaction. A lesson that
+// still records files from an earlier download (hasFilesSQL) stays
+// 'downloaded' with keptMsg as its note, as endDownloadSQL keeps one a cancel
+// stopped: its files are there, and the planner re-enqueues a 'failed' lesson
+// every cycle, which would download it again and again (owner ruling
+// 2026-09-24 (h)). Any other lesson becomes 'failed' with lessonMsg. It lands
+// only while the job and lesson still exist (ErrDownloadAbandoned otherwise).
+// The lesson's sentence and the job's are shown in different places, each
+// beside its own button: the lesson's under the lesson, whose menu offers
+// Download, and the job's in the Queue, beside Retry. So a sentence that names
+// what to press next needs one version for each.
+func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
+	return s.finishWith(ctx, jobID, id, failSQL, []any{keptMsg, lessonMsg, id}, jobMsg, JobFailed)
 }
+
+// failSQL is what a failed download leaves on its lesson (FailDownload). Its
+// arguments are the kept note, the failure sentence and the lesson id.
+const failSQL = `UPDATE lessons
+	    SET status = CASE WHEN ` + hasFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + StatusFailed + `' END,
+	        error = CASE WHEN ` + hasFilesSQL + ` THEN ? ELSE ? END,
+	        updated_at = CURRENT_TIMESTAMP
+	  WHERE railcontent_id = ?`
 
 // SkipDownload records a lesson Musora answered with no match (gated or
 // missing): the lesson becomes 'skipped' with reason, and the job 'failed'
@@ -289,17 +302,18 @@ func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg
 // both still exist (ErrDownloadAbandoned otherwise). reason is shown both
 // under the lesson and in the Queue, so it must name no button.
 func (s *Store) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
-	return s.finishWith(ctx, jobID, id, StatusSkipped, reason, reason, JobFailed)
+	return s.finishWith(ctx, jobID, id,
+		`UPDATE lessons SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE railcontent_id = ?`,
+		[]any{StatusSkipped, reason, id}, reason, JobFailed)
 }
 
-// finishWith is the shared body of FailDownload and SkipDownload.
-func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonStatus, lessonMsg, jobMsg, jobStatus string) error {
+// finishWith is the shared body of FailDownload and SkipDownload: lessonSQL
+// with lessonArgs updates the lesson, and the job, if still running, becomes
+// jobStatus with jobMsg.
+func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonSQL string, lessonArgs []any, jobMsg, jobStatus string) error {
 	return s.withLiveJob(ctx, jobID, id, runningOrCanceled, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE lessons SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE railcontent_id = ?`,
-			lessonStatus, lessonMsg, id,
-		); err != nil {
-			return fmt.Errorf("mark lesson %d %s: %w", id, lessonStatus, err)
+		if _, err := tx.ExecContext(ctx, lessonSQL, lessonArgs...); err != nil {
+			return fmt.Errorf("record the end of lesson %d's download: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE jobs SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,

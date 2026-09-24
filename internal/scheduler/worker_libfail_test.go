@@ -77,8 +77,8 @@ func TestWorkerLibraryPlacementFailureKeepsTheLibraryCopy(t *testing.T) {
 	if dl.calls != 2 {
 		t.Errorf("attempts = %d, want 2", dl.calls)
 	}
-	if !reflect.DeepEqual(store.markFailed, []int{100}) || store.lessonErr[100] != failKeptInLibrary.lesson || store.jobs[1].Error.String != failKeptInLibrary.job {
-		t.Errorf("failed %v, lesson %q, job %q; want lesson 100 failed with failKeptInLibrary", store.markFailed, store.lessonErr[100], store.jobs[1].Error.String)
+	if !reflect.DeepEqual(store.markFailed, []int{100}) || store.lessonErr[100] != failKeptInLibrary.lesson || store.keptErr[100] != failKeptInLibrary.lesson || store.jobs[1].Error.String != failKeptInLibrary.job {
+		t.Errorf("failed %v, lesson %q, kept note %q, job %q; want lesson 100 ended with failKeptInLibrary", store.markFailed, store.lessonErr[100], store.keptErr[100], store.jobs[1].Error.String)
 	}
 	assertExist(t, false, filepath.Join(w.Cfg.DownloadsDir, "Beginner Course"))
 	if p := findContent(t, w.Cfg.DownloadsDir, "new mp4"); p != "" {
