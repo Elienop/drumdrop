@@ -109,6 +109,11 @@ func TestPlexTVCaseOnlyTitleChangeMergesOnACaseInsensitiveDisk(t *testing.T) {
 		if err != nil || res.seasonDir != season {
 			t.Fatalf("move = (%+v, %v)", res, err)
 		}
+		// The recorded folder IS the one placed at: it was merged, not decided
+		// on as a previous folder elsewhere and logged as left behind.
+		if len(res.pending.kept) != 0 {
+			t.Errorf("kept %+v, want none", res.pending.kept)
+		}
 		assertTree(t, filepath.Join(season, "Show - s01e05 - Five resources"), map[string]string{
 			"my-notes.txt": "mine",
 			"new.pdf":      "new",

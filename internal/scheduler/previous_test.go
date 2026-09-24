@@ -130,3 +130,35 @@ func TestPlacedAtIsByIdentity(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviousStaysKeepsWhatIsNotARealFolder proves the rule's answers for
+// what is at a previous place: nothing there may "go" (there is nothing to
+// set aside); a recorded plex-tv file goes (ruling #66); anything else that is
+// not a real folder (a file or a symlink where a lesson folder was) stays.
+func TestPreviousStaysKeepsWhatIsNotARealFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	tmp := t.TempDir()
+	writeTree(t, tmp, map[string]string{"Course/05 - File": "a file", "elsewhere/05 - Old/a.pdf": "a"})
+	if err := os.Symlink(filepath.Join(tmp, "elsewhere", "05 - Old"), filepath.Join(tmp, "Course", "05 - Link")); err != nil {
+		t.Fatal(err)
+	}
+	tree := downloadTree{"a.pdf": false}
+	for _, c := range []struct {
+		name      string
+		fileIsOwn bool
+		want      string
+	}{
+		{"05 - Missing", false, ""},
+		{"05 - File", true, ""},
+		{"05 - File", false, "it is not a real folder"},
+		{"05 - Link", false, "it is not a real folder"},
+		{"05 - Link", true, ""},
+	} {
+		h := heldPath{root: tmp, path: filepath.Join(tmp, "Course", c.name)}
+		if got := tree.previousStays(h, lessonFolderInto, "", "", c.fileIsOwn); got != c.want {
+			t.Errorf("previousStays(%s, fileIsOwn=%v) = %q, want %q", c.name, c.fileIsOwn, got, c.want)
+		}
+	}
+}
