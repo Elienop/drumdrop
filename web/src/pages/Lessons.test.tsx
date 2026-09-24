@@ -1446,78 +1446,208 @@ describe("when a download starts", () => {
     ])
   })
 
-  // Owner's ruling 2026-09-24, (q). The menu is built from the live row, so a
-  // download that starts while it is open swaps Download for Cancel download
-  // under the user. Radix then highlights the menu's first item (focus-scope
-  // refocuses the menu when the focused item is removed, and the menu focuses
-  // its first item), so that item must be harmless: Enter copies the path and
-  // never cancels (UI review round 5e, Low A). The highlighted Download must
-  // also go, not be reused as the Cancel download in its place.
-  it("an open menu whose lesson starts downloading highlights Copy path, and Enter doesn't cancel", async () => {
-    const queued: LessonDTO = { ...lessons[1], railcontent_id: 250, title: "Swiss Army Triplet" }
-    const downloading: LessonDTO = {
-      ...queued,
-      status: "downloading",
-      output_dir: "/media/drumeo/250",
-    }
-    // The running job is listed from the start, so Cancel download is enabled
-    // the moment it appears: the worst case, where the jobs refresh lands
-    // before the lessons one. A disabled Cancel would be skipped by the
-    // highlight and hide a wrong order.
-    const running: JobDTO = { ...job, id: 88, railcontent_id: 250, status: "running", attempts: 1 }
-    let started = false
-    let canceled = false
+  // Owner's ruling 2026-09-24, (v), superseding (u). The menu is built from
+  // the live row, so a download that starts or stops while it is open would
+  // swap its items under the user: Radix moves the highlight onto whatever is
+  // first now, and a resting pointer ends up over another item (UI review
+  // round 5f/5g, finding 1; code review I1). So the menu closes, focus goes
+  // back to the ⋯ trigger as Escape leaves it, and the Enter meant for the
+  // old item only reopens the menu, with the current items.
+  //
+  // Each test counts every request an item of either menu could send.
+  const countActions = () => {
+    const sent = { download: 0, cancel: 0 }
     server.use(
-      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([started ? downloading : queued])),
-      http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json([running])),
+      http.post(`${ORIGIN}/api/lessons/:id/download`, () => {
+        sent.download++
+        return HttpResponse.json({}, { status: 202 })
+      }),
       http.post(`${ORIGIN}/api/jobs/:id/cancel`, () => {
-        canceled = true
-        return HttpResponse.json({ ...running, status: "canceled" })
+        sent.cancel++
+        return HttpResponse.json({})
       }),
     )
-    setToken("test-token") // the event stream opens only with a stored token
+    return sent
+  }
+
+  // Opens a row's menu from the keyboard and moves the highlight to `item`.
+  const openAt = async (user: ReturnType<typeof userEvent.setup>, title: string, item: string) => {
+    const trigger = await screen.findByRole("button", { name: `Actions for ${title}` })
+    trigger.focus()
+    await user.keyboard("{Enter}")
+    const target = await screen.findByRole("menuitem", { name: item })
+    for (let i = 0; i < 5 && !target.hasAttribute("data-highlighted"); i++) {
+      await user.keyboard("{ArrowDown}")
+    }
+    await waitFor(() => expect(target).toHaveFocus())
+    expect(target).toHaveAttribute("data-highlighted")
+    return trigger
+  }
+
+  // hidden: while a menu is open, Radix hides the rest of the page from the
+  // accessibility tree, and the row must be found either way.
+  const rowOf = (title: string) =>
+    screen.getByRole("button", { name: `Actions for ${title}`, hidden: true }).closest("tr")!
+
+  it.each([
+    ["pending", { ...lessons[1] }],
+    // A failed lesson with a note: the most common Download (finding 1).
+    ["failed", { ...lessons[1], status: "failed" as const, error: FAILED_NOTE }],
+    // A re-download that failed and kept the earlier files: Download, then
+    // Copy path, then Delete.
+    [
+      "downloaded-with-a-note",
+      { ...lessons[0], error: "The re-download failed, so the earlier download was kept." },
+    ],
+  ])(
+    "a %s lesson starts downloading under its open menu, Download highlighted: the menu closes, focus is on ⋯, and Enter sends nothing",
+    async (_, before) => {
+      const lesson: LessonDTO = { ...before, railcontent_id: 250, title: "Swiss Army Triplet" }
+      const downloading: LessonDTO = { ...lesson, status: "downloading", output_dir: "/media/drumeo/250" }
+      // The running job is listed from the start, so an unclosed menu's
+      // Cancel download would be enabled at once: the worst case.
+      const running: JobDTO = { ...job, id: 88, railcontent_id: 250, status: "running", attempts: 1 }
+      let started = false
+      server.use(
+        http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([started ? downloading : lesson])),
+        http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json([running])),
+      )
+      const sent = countActions()
+      setToken("test-token") // the event stream opens only with a stored token
+      const user = userEvent.setup()
+      renderLessons()
+
+      const trigger = await openAt(user, "Swiss Army Triplet", "Download")
+
+      started = true
+      act(() =>
+        sendEvent({
+          kind: "download_started",
+          job_id: 88,
+          railcontent_id: 250,
+          title: "Swiss Army Triplet",
+          attempt: 1,
+          max_attempts: 3,
+        }),
+      )
+
+      await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("downloading"))
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+      await waitFor(() => expect(trigger).toHaveFocus())
+
+      // The Enter meant for Download reopens the menu with the current items,
+      // the harmless one highlighted ((q)'s order), and sends nothing.
+      await user.keyboard("{Enter}")
+      await waitFor(() =>
+        expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual(
+          lesson.has_files
+            ? ["Copy path", "Cancel download", "Delete"]
+            : ["Copy path", "Cancel download"],
+        ),
+      )
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: "Copy path" })).toHaveFocus())
+      expect(sent).toEqual({ download: 0, cancel: 0 })
+    },
+  )
+
+  it("a downloading lesson's attempt fails under its open menu, Cancel download highlighted: the menu closes, focus is on ⋯, and Enter sends nothing", async () => {
+    const downloading: LessonDTO = {
+      ...lessons[1],
+      railcontent_id: 260,
+      title: "Swiss Army Triplet",
+      status: "downloading",
+    }
+    const failed: LessonDTO = { ...downloading, status: "failed", error: FAILED_NOTE }
+    const running: JobDTO = { ...job, id: 89, railcontent_id: 260, status: "running", attempts: 3 }
+    let ended = false
+    let jobsServed = false
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([ended ? failed : downloading])),
+      http.get(`${ORIGIN}/api/jobs`, () => {
+        jobsServed = true
+        return HttpResponse.json(ended ? [] : [running])
+      }),
+    )
+    const sent = countActions()
+    setToken("test-token")
     const user = userEvent.setup()
     renderLessons()
 
-    // Opened from the keyboard, the menu highlights its first item: Download.
-    const trigger = await screen.findByRole("button", { name: "Actions for Swiss Army Triplet" })
-    trigger.focus()
-    await user.keyboard("{Enter}")
-    const downloadItem = await screen.findByRole("menuitem", { name: "Download" })
-    await waitFor(() => expect(downloadItem).toHaveFocus())
-    expect(downloadItem).toHaveAttribute("data-highlighted")
+    // Cancel download is enabled (and so can be highlighted) only once the
+    // running jobs are in.
+    await waitFor(() => expect(jobsServed).toBe(true))
+    const trigger = await openAt(user, "Swiss Army Triplet", "Cancel download")
 
+    ended = true
+    act(() =>
+      sendEvent({
+        kind: "attempt_failed",
+        job_id: 89,
+        railcontent_id: 260,
+        title: "Swiss Army Triplet",
+        attempt: 3,
+        max_attempts: 3,
+        error: "The download failed.",
+      }),
+    )
+
+    await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("failed"))
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    await waitFor(() => expect(trigger).toHaveFocus())
+
+    await user.keyboard("{Enter}")
+    await waitFor(() =>
+      expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+        "Download",
+        "Skip",
+        "Copy path",
+      ]),
+    )
+    expect(sent).toEqual({ download: 0, cancel: 0 })
+  })
+
+  it("an open menu stays open, its highlight where it was, when a refetch changes nothing about its lesson", async () => {
+    const mine: LessonDTO = { ...lessons[1], railcontent_id: 270, title: "Swiss Army Triplet" }
+    const other: LessonDTO = { ...lessons[1], railcontent_id: 271, title: "Flam Accent" }
+    let started = false
+    let fetches = 0
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => {
+        fetches++
+        // Every answer is a fresh object for the same lesson: equal, never
+        // the same reference.
+        return HttpResponse.json([{ ...mine }, started ? { ...other, status: "downloading" } : other])
+      }),
+    )
+    setToken("test-token")
+    const user = userEvent.setup()
+    renderLessons()
+
+    await openAt(user, "Swiss Army Triplet", "Download")
+    const before = fetches
+
+    // Another lesson starts downloading: the list refetches.
     started = true
     act(() =>
       sendEvent({
         kind: "download_started",
-        job_id: 88,
-        railcontent_id: 250,
-        title: "Swiss Army Triplet",
+        job_id: 90,
+        railcontent_id: 271,
+        title: "Flam Accent",
         attempt: 1,
         max_attempts: 3,
       }),
     )
+    await waitFor(() => expect(fetches).toBeGreaterThan(before))
+    await waitFor(() => expect(rowOf("Flam Accent")).toHaveTextContent("downloading"))
 
-    // The same open menu now reads the downloading lesson's items, and the
-    // highlight is on Copy path.
-    await waitFor(() =>
-      expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
-        "Copy path",
-        "Cancel download",
-      ]),
-    )
-    expect(screen.getByRole("menuitem", { name: "Cancel download" })).not.toHaveAttribute(
-      "aria-disabled",
-    )
-    const copy = screen.getByRole("menuitem", { name: "Copy path" })
-    await waitFor(() => expect(copy).toHaveFocus())
-
-    await user.keyboard("{Enter}")
-    expect(await screen.findByText("Path copied")).toBeInTheDocument()
-    await expect(navigator.clipboard.readText()).resolves.toBe("/media/drumeo/250")
-    expect(canceled).toBe(false)
-    expect(screen.queryByText("Download canceled")).not.toBeInTheDocument()
+    expect(screen.getByRole("menu")).toBeInTheDocument()
+    expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+      "Download",
+      "Skip",
+      "Copy path",
+    ])
+    expect(screen.getByRole("menuitem", { name: "Download" })).toHaveFocus()
   })
 })
 

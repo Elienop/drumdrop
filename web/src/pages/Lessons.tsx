@@ -93,6 +93,34 @@ function rowNote(lesson: LessonDTO): string | null {
   return note ? note : null
 }
 
+// RowMenu is a row's ⋯ menu, closed by itself when its lesson starts or stops
+// downloading while it is open (owner's ruling 2026-09-24, (v)). The items
+// are built from the live row, so that change swaps them under the user:
+// Radix re-anchors the open menu on every layout change and a click selects
+// whatever item is under the pointer, so a resting pointer (or a highlight
+// moved by the swap) would choose from a menu the user never read. Closing
+// hands focus back to the ⋯ trigger, as Escape does, and opening it again
+// shows the current items. Anything else about the row (a refetch, another
+// lesson's event, Cancel learning its job) leaves the menu open.
+function RowMenu({ downloading, children }: { downloading: boolean; children: React.ReactNode }) {
+  // What `downloading` was when the menu opened; null while it is closed.
+  const [openedAs, setOpenedAs] = React.useState<boolean | null>(null)
+  // Reset during render, not in an effect: the render that brings the
+  // changed items then commits with the menu closed, so no frame of them
+  // is ever on screen to take a click or an Enter. Clearing it (rather than
+  // only deriving `open`) keeps the menu from reopening by itself if the
+  // lesson flips back.
+  if (openedAs !== null && openedAs !== downloading) setOpenedAs(null)
+  return (
+    <DropdownMenu
+      open={openedAs === downloading}
+      onOpenChange={(open) => setOpenedAs(open ? downloading : null)}
+    >
+      {children}
+    </DropdownMenu>
+  )
+}
+
 export function Lessons() {
   const qc = useQueryClient()
   const [params, setParams] = useSearchParams()
@@ -397,6 +425,8 @@ export function Lessons() {
                   // item in the same place for the next status's item: the
                   // highlighted Download would become Cancel download, still
                   // highlighted, when the download starts (ruling (q)).
+                  // RowMenu now closes on that change (ruling (v)); the keys
+                  // stay, so no item is ever reused for another action.
                   const copyItem = (
                     <DropdownMenuItem key="copy" onSelect={() => copyPath(lesson)}>
                       Copy path
@@ -455,7 +485,7 @@ export function Lessons() {
                         {formatRelativeTime(lesson.updated_at)}
                       </TableCell>
                       <TableCell className="text-right">
-                        <DropdownMenu>
+                        <RowMenu downloading={lesson.status === "downloading"}>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
@@ -471,12 +501,13 @@ export function Lessons() {
                               {busy ? (
                                 copyItem
                               ) : lesson.status === "downloading" ? (
-                                // Copy path first. The menu is built from the
-                                // live row, so it changes if the download starts
-                                // while it is open: Radix then highlights the
-                                // first item, where Download was, and Enter must
-                                // land on something harmless, never on Cancel
-                                // (owner's ruling 2026-09-24, (q)).
+                                // Copy path first, Cancel download after
+                                // (owner's ruling 2026-09-24, (q)). An open menu
+                                // no longer changes into this one: RowMenu
+                                // closes it when the download starts (ruling
+                                // (v)). The order stays, so the first item,
+                                // where a reopened menu's highlight lands, is
+                                // still the harmless one.
                                 <>
                                   {copyItem}
                                   <DropdownMenuItem
@@ -537,7 +568,7 @@ export function Lessons() {
                               </>
                             )}
                           </DropdownMenuContent>
-                        </DropdownMenu>
+                        </RowMenu>
                       </TableCell>
                     </TableRow>
                   )
