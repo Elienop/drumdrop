@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/musora"
 )
 
 // TestInlineAnswersAreFixedSentences (D14, UI N3, security Info 6) proves the
@@ -163,5 +164,25 @@ func TestStoreFailuresSayWhatHappened(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, httptest.NewRequest(c.method, c.target, nil))
 		wantError(t, rec, http.StatusInternalServerError, c.msg)
+	}
+}
+
+// TestBadBrandNamesTheBrandsAsTheUIDoes (round-5c UI) proves msgBadBrand
+// names each brand Musora has as the web UI shows it (brandName,
+// web/src/lib/format.ts: "Pianote"; playbass, whose casing is unconfirmed,
+// as sent), and that each name it gives is one the Brand field accepts.
+func TestBadBrandNamesTheBrandsAsTheUIDoes(t *testing.T) {
+	for _, name := range []string{"Drumeo", "Pianote", "Guitareo", "Singeo", "playbass"} {
+		if !strings.Contains(msgBadBrand, " "+name+",") && !strings.Contains(msgBadBrand, " "+name+" ") {
+			t.Errorf("msgBadBrand %q does not name %s", msgBadBrand, name)
+		}
+		if _, err := musora.NodeBrand(name); err != nil {
+			t.Errorf("the Brand field refuses %q, which msgBadBrand offers: %v", name, err)
+		}
+	}
+	for _, lower := range []string{"drumeo", "pianote", "guitareo", "singeo"} {
+		if strings.Contains(msgBadBrand, lower) {
+			t.Errorf("msgBadBrand %q names %s in lower case, where the UI capitalises it", msgBadBrand, lower)
+		}
 	}
 }
