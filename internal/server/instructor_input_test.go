@@ -59,7 +59,9 @@ func previewThenAdd(t *testing.T, input, brand string) (preview, add *httptest.R
 // TestInstructorInputIsNormalisedAlike (ruling #70) proves a name, a slug in
 // any case and a coach-page link are normalised the same way on preview and
 // on add: the preview's slug is the one the add stores, both ask Musora for
-// that slug only, and a link's brand fills an empty Brand.
+// that slug only, and a link's brand fills an empty Brand. What the UI itself
+// shows is accepted back (round-5 code Low 4, UI M1): "@jared-falk", and a
+// brand as the tables write it ("Pianote"), padded, or in capitals.
 func TestInstructorInputIsNormalisedAlike(t *testing.T) {
 	for _, c := range []struct {
 		input, brand    string
@@ -71,6 +73,10 @@ func TestInstructorInputIsNormalisedAlike(t *testing.T) {
 		{"https://app.musora.com/drumeo/coaches/jared-falk/31880", "", "jared-falk", "drumeo"},
 		{"https://app.musora.com/singeo/coaches/jared-falk/314120", "", "jared-falk", "singeo"},
 		{"https://app.musora.com/singeo/coaches/jared-falk/314120", "singeo", "jared-falk", "singeo"},
+		{"@jared-falk", "", "jared-falk", "drumeo"},
+		{"jared-falk", "Pianote", "jared-falk", "pianote"},
+		{"jared-falk", " pianote", "jared-falk", "pianote"},
+		{"Jared Falk", "DRUMEO", "jared-falk", "drumeo"},
 	} {
 		t.Run(c.input+" "+c.brand, func(t *testing.T) {
 			queries := recordSanity(t)

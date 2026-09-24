@@ -37,6 +37,8 @@ func TestFollowAtNameFollowsTheSlug(t *testing.T) {
 		{[]string{"@Jared Falk", "--brand", "pianote"}, "pianote"},
 		{[]string{"--instructor", "JARED FALK"}, "drumeo"},
 		{[]string{"@https://app.musora.com/singeo/coaches/jared-falk/314120"}, "singeo"},
+		{[]string{"--instructor", "@jared-falk"}, "drumeo"},
+		{[]string{"@jared-falk", "--brand", "Pianote"}, "pianote"},
 	} {
 		t.Run(c.argv[0], func(t *testing.T) {
 			stubInstructorSanity(t)
@@ -94,6 +96,7 @@ func TestFollowNodeDefaultsToDrumeo(t *testing.T) {
 func TestFollowRefusesWhatCantBeNormalised(t *testing.T) {
 	for _, argv := range [][]string{
 		{"@"},
+		{"@@jared-falk"},
 		{"@jared_falk"},
 		{"@https://app.musora.com/drumeo/lessons/course/409875/409875"},
 		{"--instructor", "a\nb"},

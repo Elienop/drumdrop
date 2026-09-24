@@ -58,14 +58,16 @@ func parseFollowArgs(argv []string) (followArgs, error) {
 
 // instructorInput returns what was typed for an instructor follow, and whether
 // this is one: --instructor wins, else a leading @ on the first positional.
-// A bare "@" is an instructor follow with nothing typed, which the normaliser
+// The @ stays in what it returns: the normaliser drops one, as it does for the
+// web's preview and add, so "@@jared-falk" is refused on every path. A bare
+// "@" is an instructor follow with nothing typed, which the normaliser
 // refuses, rather than a node follow of "@".
 func instructorInput(args followArgs) (string, bool) {
 	if args.instructor != "" {
 		return args.instructor, true
 	}
 	if len(args.positionals) > 0 && strings.HasPrefix(args.positionals[0], "@") {
-		return strings.TrimPrefix(args.positionals[0], "@"), true
+		return args.positionals[0], true
 	}
 	return "", false
 }

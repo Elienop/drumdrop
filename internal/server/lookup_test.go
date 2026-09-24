@@ -92,7 +92,8 @@ func TestAMalformedInstructorNameIs400(t *testing.T) {
 func TestABrandMusoraDoesNotHaveIs400(t *testing.T) {
 	calls := countSanity(t, `{"result":[{"_id":"abc","name":"Jane","id":7}]}`)
 	wantError(t, previewSlug(t, "jane", "rockstar"), http.StatusBadRequest, msgBadBrand)
-	wantError(t, addInstructor(t, "jane", "Drumeo"), http.StatusBadRequest, msgBadBrand)
+	wantError(t, addInstructor(t, "jane", "Rockstar"), http.StatusBadRequest, msgBadBrand)
+	wantError(t, addInstructor(t, "jane", "drümeo"), http.StatusBadRequest, msgBadBrand)
 	if n := calls.Load(); n != 0 {
 		t.Errorf("Musora was asked %d times, want none", n)
 	}

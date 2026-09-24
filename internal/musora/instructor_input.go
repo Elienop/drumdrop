@@ -27,7 +27,8 @@ const coachesSegment = "coaches"
 // the one normalisation the preview, the add-follow route and the CLI share,
 // so what a preview shows is what an add stores.
 //
-// input is accepted in three forms:
+// input is accepted in three forms, each with one leading "@" or none (the
+// preview shows an instructor as "@jared-falk"):
 //   - a slug, "jared-falk";
 //   - a name, "Jared Falk": ASCII only, lower-cased, each run of spaces
 //     turned into one hyphen;
@@ -40,16 +41,21 @@ const coachesSegment = "coaches"
 // apostrophes, dots, tabs and newlines inside the input, and any link that
 // isn't a coach page. A refusal wraps ErrBadSlug, and none reaches the network.
 //
-// brand is the one the user gave, or "" for none. It must be one of Musora's
-// (ErrBadBrand), and when a link names another it's ErrBrandMismatch. With
-// neither, the brand is DefaultBrand.
+// brand is the one the user gave, or "" for none. It is trimmed and its
+// ASCII letters lower-cased, so it may be written as the tables show it
+// ("Pianote"). It must then be one of Musora's (ErrBadBrand), and when a link
+// names another it's ErrBrandMismatch. With neither, the brand is
+// DefaultBrand.
 func NormalizeInstructor(input, brand string) (slug, outBrand string, err error) {
-	if brand != "" {
+	if brand = lowerASCII(strings.TrimSpace(brand)); brand != "" {
 		if err := ValidateBrand(brand); err != nil {
 			return "", "", err
 		}
 	}
 	s := strings.TrimSpace(input)
+	if rest, ok := strings.CutPrefix(s, "@"); ok {
+		s = strings.TrimSpace(rest)
+	}
 	linkBrand := ""
 	if isLink(s) {
 		slug, linkBrand, err = slugFromCoachLink(s)
@@ -77,15 +83,13 @@ func isLink(s string) bool {
 	return strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
 }
 
-// slugFromName lower-cases a name or slug and turns each run of spaces into
-// one hyphen, then checks the result has Musora's slug form. Only the ASCII
-// space is joined, so a tab or newline inside a name is refused. It works on
-// bytes and folds only A-Z: strings.ToLower would fold a look-alike, such as
-// the Kelvin sign, into an ASCII letter that then passes; here every
-// non-ASCII byte is left as it is, for validateSlug to refuse.
+// slugFromName lower-cases a name or slug (lowerASCII) and turns each run of
+// spaces into one hyphen, then checks the result has Musora's slug form. Only
+// the ASCII space is joined, so a tab or newline inside a name is refused.
 func slugFromName(s string) (string, error) {
 	var b strings.Builder
 	space := false
+	s = lowerASCII(s)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == ' ' {
@@ -96,9 +100,6 @@ func slugFromName(s string) (string, error) {
 			b.WriteByte('-')
 			space = false
 		}
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
-		}
 		b.WriteByte(c)
 	}
 	slug := b.String()
@@ -106,6 +107,20 @@ func slugFromName(s string) (string, error) {
 		return "", err
 	}
 	return slug, nil
+}
+
+// lowerASCII folds A-Z to a-z, byte by byte, and leaves every other byte as
+// it is. strings.ToLower would fold a look-alike, such as the Kelvin sign,
+// into an ASCII letter that then passes a check; here a non-ASCII byte stays,
+// for the check to refuse.
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // slugFromCoachLink takes the slug and brand out of a coach-page link, whose
