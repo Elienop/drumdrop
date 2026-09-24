@@ -242,7 +242,9 @@ export function Follows() {
         returnFocus={rowReturn(removing, removeSelector)}
       >
         {({ pending }) => (
-          <div className="flex items-center justify-center gap-2 sm:justify-start">
+          // Left-aligned at every width, phones included, like the dialog's
+          // failure message (InlineError) below it.
+          <div className="flex items-center gap-2">
             <Checkbox
               id={deleteFilesId}
               checked={deleteFiles}

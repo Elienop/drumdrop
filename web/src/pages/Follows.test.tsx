@@ -295,6 +295,20 @@ it("the remove dialog says removing stops the follow's queued and running downlo
   expect(dialog).toHaveAccessibleDescription(/stops its queued and running downloads/i)
 })
 
+it("the remove dialog's files checkbox is left-aligned at every width, like its failure message", async () => {
+  server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json(follows)))
+  const user = userEvent.setup()
+  renderWithProviders(<Follows />)
+
+  await user.click(await screen.findByRole("button", { name: /remove stick control/i }))
+  const dialog = await screen.findByRole("alertdialog")
+  const row = within(dialog).getByRole("checkbox", { name: /also delete downloaded files/i })
+    .parentElement!
+  // No centring below sm (justify-center), so nothing to undo from sm up.
+  expect(row.className).not.toMatch(/justify-/)
+  expect(row).toHaveClass("flex", "items-center")
+})
+
 it("a failed unfollow (500) keeps the dialog open with the server's message and the files choice, and refreshes follows, lessons, jobs and summary", async () => {
   let listFetches = 0
   const deletedUrls: string[] = []
