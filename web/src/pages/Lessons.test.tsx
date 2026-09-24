@@ -1606,6 +1606,31 @@ describe("when a download starts", () => {
     expect(sent).toEqual({ download: 0, cancel: 0 })
   })
 
+  it("a menu closed by a start stays closed when that attempt fails at once", async () => {
+    const pending: LessonDTO = { ...lessons[1], railcontent_id: 280, title: "Swiss Army Triplet" }
+    let now: LessonDTO = pending
+    server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([now])))
+    setToken("test-token")
+    const user = userEvent.setup()
+    renderLessons()
+
+    const trigger = await openAt(user, "Swiss Army Triplet", "Download")
+    const event = { job_id: 91, railcontent_id: 280, title: "Swiss Army Triplet", attempt: 1, max_attempts: 1 }
+
+    now = { ...pending, status: "downloading" }
+    act(() => sendEvent({ kind: "download_started", ...event }))
+    await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("downloading"))
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+
+    // Back to what it was when the menu opened: the menu must not come back
+    // by itself.
+    now = { ...pending, status: "failed", error: FAILED_NOTE }
+    act(() => sendEvent({ kind: "attempt_failed", ...event, error: "The download failed." }))
+    await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("failed"))
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
+
   it("an open menu stays open, its highlight where it was, when a refetch changes nothing about its lesson", async () => {
     const mine: LessonDTO = { ...lessons[1], railcontent_id: 270, title: "Swiss Army Triplet" }
     const other: LessonDTO = { ...lessons[1], railcontent_id: 271, title: "Flam Accent" }
