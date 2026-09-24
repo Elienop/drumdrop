@@ -313,20 +313,28 @@ recorded: the attempt fails instead. Each attempt downloads the lesson again, an
 the last one fails this way the lesson stays downloaded, if its files are on disk (see
 [Daemon](#daemon-unattended-auto-sync)), with the note "Couldn't put this lesson in the
 library, so its copy there was kept. Check the server log, fix the problem, then Download
-again." When the downloads dir sits inside the library, a lesson whose recorded folder
-is in the course folder of the downloads dir it would be placed in (an earlier refused
-move kept it there, under this title or an older one) isn't in the library: it is
-placed in downloads, and its old folder, when its title has changed since, is handled as
-any previous folder is (below). Any other folder inside the library counts as the
-library's, even one inside the downloads dir as written (a course named like the
+again." When the downloads dir sits inside the library, a lesson whose recorded lesson
+folder is in the course folder of the downloads dir it would be placed in (an earlier
+refused move kept it there, under this title or an older one) isn't in the library: it
+is placed in downloads, and its old folder, when its title has changed since, is handled
+as any previous folder is (below). A season folder there is still the library's, since
+drumdrop never places one in downloads. Any other folder inside the library counts as
+the library's, even one inside the downloads dir as written (a course named like the
 downloads dir), and so does every folder when the library is the downloads dir. The
 exception is a lesson whose recorded folder
 is the very folder it would be placed in within downloads (the library is the downloads
 dir, and an earlier refused move kept the lesson there): placing it there replaces only
 its own files at the names the download brings back, as any re-download does, so it is
-placed and recorded. A symlink at that path doesn't count, even one that leads to the
-lesson's library folder: the placement would replace the symlink with a new folder and
-leave the library folder recorded by no lesson, so the attempt fails instead. Any other
+placed and recorded. A symlink or a file at that path doesn't count, even a symlink that
+leads to the lesson's library folder: the placement would replace it with a new folder
+and leave the library folder recorded by no lesson (or the file gone), so the attempt
+fails instead. drumdrop decides all this from the paths alone, so it can guess wrong: a
+library lesson folder that sits in the downloads course folder counts as downloads (an
+instructor named like the downloads dir, or a folder placed before you moved the
+library up a level), and a folder recorded under another spelling of the library's path
+(`DRUMDROP_LIBRARY_DIR` set through a symlink, or a remount) isn't recognised as the
+library's. Either way a refused placement falls back to downloads, which may replace that
+folder, or leaves it where it is, recorded by no lesson (BACKLOG D128 and D58). Any other
 lesson, a plex-tv one whose library files are recorded or one with
 none, is placed in downloads, and the library files it already had stay recorded (see
 [Plex TV layout](#plex-tv-layout)). If the copy finished but the download's own folder

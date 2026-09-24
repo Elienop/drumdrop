@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D132 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D135 on 2026-09-24 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -37,7 +37,9 @@ the round-5d reviews for round-5c findings. The round-5f pass (same day and bran
 D126–D128 and corrected D58, D101, D113, D120, D121 and D125 against its own code, and
 the round-5e security seat's probes. The round-5g pass (same day and branch) added
 D129–D131 (D131 settled the same day by the refined ruling (t)) and extended D101 and
-D113 against its own code and a Chromium probe._
+D113 against its own code and a Chromium probe. The round-5h pass (same day and branch)
+added D132–D134, settled D129 by ruling (v), and corrected D58, D113, D128 and D130
+against its own code and the round-5f/5g seats' probes._
 
 ## Next up
 
@@ -134,9 +136,10 @@ D53 waits on an owner decision.
     and the move succeeds: the record holds only what it placed, and the log says only
     "…not known, so none were removed"; (b) a legacy row with no video owns its files
     through its current title alone (`legacyEpisodeBases` builds the episode name from
-    it), and the planner rewrites the title every cycle (`UpsertLesson`), so a rename on
-    Musora's side un-claims them with no download at all; (c) `DRUMDROP_LIBRARY_DIR`
-    unset (the setting removed after plex-tv placed the row): `place()` never asks
+    it), and a sync writes the new title as soon as Musora changes it (`UpsertLesson`),
+    so a rename on Musora's side un-claims them with no download at all; (c)
+    `DRUMDROP_LIBRARY_DIR` unset (the setting removed after plex-tv placed the row):
+    `place()` never asks
     `keptInLibrary` without a library, so a re-download is placed in downloads, records
     that folder, and the season files are claimed by nobody, with no log line; (d) a
     switch to the default layout, told in full as D119. Round 5f closed one path into
@@ -149,6 +152,23 @@ D53 waits on an owner decision.
     `previousFolder` uses it, so the library folder is the lesson's previous folder: it
     stays, and is logged, as it is without the symlink
     (`TestWorkerPlacementWithoutALibraryLeavesTheFolderASymlinkLedTo`).
+  - *A library folder spelled another way is not seen by ruling (f)'s refusal*
+    (round-5f/5g security review, N3; the same at `5cb8fbe`, before round 5f). The
+    refusal asks `inLibrary` first, and its first test is lexical
+    (`library.Inside(lib, …)`, `internal/scheduler/worker_record.go:298`). With
+    `DRUMDROP_LIBRARY_DIR` set through a symlink (or the library remounted at another
+    path) and the row's folder spelled the real way, a refused library placement falls
+    back to downloads, and the library folder is left where it is, logged as "inside
+    neither the downloads folder nor the library" (`previousFolder`,
+    `internal/scheduler/place.go:419`) and claimed by no lesson; when the refused
+    target is the row's own folder under the other spelling, the same happens to it.
+    A row spelled through the symlink is refused as it should be. The delete side of
+    the same spelling gap is D67. *Fix (new mechanism, can wait):* decide containment
+    by identity, as the repo already does in `Claims.within`
+    (`internal/library/ownership.go:438`, through `sameFolder`, `:181-186`) and in
+    `library.Remove`'s root lookup (`internal/library/remove.go:28-31`), both on
+    `os.SameFile`. Seen in the security seat's scratch probe (S2, S2b, S3), not
+    pinned by a committed test.
   - *Why:* Plex shows the old copy too, and no delete will ever remove it. For a lesson
     with a record, a folder left this way is the owner's ruling and is logged; the legacy
     rows leave theirs without a word.
@@ -485,16 +505,45 @@ D53 waits on an owner decision.
     disk, so nothing in the store does this.
   - *Evidence:* `grep -n 'l.OutputDir.Valid' -A3 internal/scheduler/ondisk.go` ·
     `grep -n 'func (c \*Claims) Plan' internal/library/ownership.go`
-- **D128 · Some lessons kept in a downloads folder inside the library are still refused.**
+- **D128 · Where the library and the downloads folder nest, the path guesses who placed a
+  folder: some lessons are refused, and a few library folders stop being recorded.**
   - *What:* since round 5f (security round 5e S3) a lesson an earlier refused move kept in
     a downloads folder that sits inside the library falls back to downloads when its
-    library placement is refused again, but only when its recorded folder is in the
-    course folder the fallback goes into (`inLibrary`). Two setups still refuse it on every
-    *Download* press, as every nested setup did before: the course folder changed too (the
-    follow was retitled, or an instructor lesson's parent course changed), and a downloads
-    folder set through a symlink into the library (or spelled in another case) when the
-    title changed. Nothing is lost: the attempt fails with `failKeptInLibrary`, and the
-    old folder stays whole (round-5f scratch probe `TestR5fResidualRefusals`).
+    library placement is refused again, but only when its recorded lesson folder is in
+    the course folder the fallback goes into (`inLibrary`,
+    `internal/scheduler/worker_record.go:297-303`). Since round 5h a season folder there
+    counts as the library's, since the fallback only writes `NN - Title` folders
+    (round-5f/5g security review, N1: after the library root moved up, a legacy plex-tv
+    or default-layout season row fell back and its season files were claimed by no
+    lesson; `TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName`,
+    `TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow`).
+  - *Refused (nothing lost: the attempt fails with `failKeptInLibrary`, and the old
+    folder stays whole and recorded), on every* Download *press:*
+    - the course folder changed too (the follow was retitled, or an instructor
+      lesson's parent course changed), and a downloads folder set through a symlink into
+      the library (or spelled in another case) when the title changed (round-5f scratch
+      probe `TestR5fResidualRefusals`);
+    - the mirror case, the library inside the downloads folder (`dl/library`) with a
+      follow titled like the library folder (`library`): a lesson kept in downloads at
+      `dl/library/05 - Old Title` is inside the library as written, and the course-folder
+      exception applies only when the downloads folder is the one nested, so it is
+      refused whenever its title has changed (round-5f/5g code review, I5).
+  - *Lost (the rule takes a library folder for a downloads one):* the fallback replaces
+    that folder when the download brings back every file in it (logged "↻ … replaced …
+    (the lesson's earlier download)"), or else leaves it where it is, no longer recorded
+    and claimed by no lesson (logged "⚠ … left its previous folder … no longer
+    recorded"). Before round 5f both cases were refused. Two setups, both seen only in
+    the security seat's scratch probe:
+    - an instructor whose name sanitises to the downloads folder's name (`downloads`,
+      with downloads at `lib/downloads`), so the library placed the lesson at
+      `lib/downloads/<Course>/05 - Old Title`; the owner unfollowed it and kept the
+      files (the row's follow becomes NULL), Musora renamed the lesson, and a
+      *Download* (filed under its parent course,
+      `internal/scheduler/worker.go:688-692`) has its library placement fail
+      (round-5f/5g security review, N2: A1, A1o, A2);
+    - the library root moved up a level from a tie (library and downloads both
+      `media/drumeo`, then the library at `media`), and the lesson's title changed: its
+      folder, placed while the two were one, is now in the downloads course folder (B3).
   - *Why the narrow rule:* the spelling can't tell a downloads folder from a library one
     it happens to contain. With the downloads folder at `lib/downloads`, a course named
     `downloads` is placed by the library at `lib/downloads/05 - …`; the plain longest-root
@@ -502,13 +551,31 @@ D53 waits on an owner decision.
     recorded by no lesson (ruling (f)'s declined outcome;
     `TestWorkerRefusedLibraryPlacementKeepsALibraryFolderInsideTheDownloadsFolder`).
     Instructor follows nest one level deeper, so the folder's depth can't tell either.
-  - *Fix (new mechanism, can wait):* record which root a row's folder was placed under,
-    rather than reading it back from the path.
-  - *Evidence:* `grep -n 'func inLibrary' -A6 internal/scheduler/worker_record.go` ·
-    `go test -count=1 -run 'OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder' ./internal/scheduler/`
+  - *Fix (new mechanism, can wait):* record which placement wrote a row's folder (the
+    library's, or the downloads fallback), rather than reading it back from the path.
+    That closes both the refusals and the losses above: a folder the fallback wrote
+    falls back, and one the library placed is refused, wherever the roots sit. Neither
+    SQLite nor the path records it today; the repo's root-relative pattern is the
+    library record (`library.Resolve`, `internal/library/record.go:77`).
+  - *Evidence:* `grep -n 'func inLibrary' -A7 internal/scheduler/worker_record.go` ·
+    `go test -count=1 -run 'OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder|KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow' ./internal/scheduler/`
 - **D130 · Some writes stamp a lesson's updated_at when nothing about it changed.**
   - *What:* the All tab lists lessons by updated_at, newest first (`ListLessons`), and
     ruling (r) stopped only the sync's upsert from stamping a lesson it didn't change.
+    Since round 5h that holds for a lesson two follows list too (a course follow and an
+    instructor follow, say): before, each wrote its own parent every sync, the course's
+    id and the instructor's NULL, so the lesson was stamped every sync (round-5f/5g code
+    review, L1; security review, N4). Parent is now written only by the follow the
+    lesson is attributed to (`follow_id`), as `follow_id` and `position` are already
+    first-follow-wins (`UpsertLesson`, `internal/database/lessons.go:140-152`;
+    `TestPlanDoesNotRestampALessonTwoFollowsList`). The trade: a lesson whose follow was
+    removed keeps its last parent, as it keeps its `follow_id` (NULL then), and another
+    follow that lists it writes neither. Nothing a user sees changes with it: the parent
+    reaches the web only as `parent_railcontent_id` in the lesson DTO
+    (`internal/server/dto.go:43`, `web/src/types.ts:21`), which no page reads, and a
+    download with no follow files the lesson under the parent course title Musora
+    returns, not the stored parent (`lessonParentTitle`,
+    `internal/scheduler/worker.go:688`).
     Three other writes still stamp every time:
     - `StartDownload` sets `downloading` and stamps at the start of every attempt.
       Nothing changes the lesson between attempts, so on attempts 2 and 3 it is already
@@ -777,26 +844,6 @@ D53 waits on an owner decision.
     then either no bar before `download_started`, or a refresh on `job_claimed`.
   - *Evidence:* `grep -n 'case "job_claimed"' web/src/lib/sse-reducer.ts` ·
     `grep -n 'Kind:          "job_claimed"' internal/scheduler/worker.go`
-- **D129 · A click on a skipped lesson's *Download* can land on *Cancel download*.**
-  - *What:* a skipped lesson's row menu reads *Un-skip*, *Download*, *Copy path*. The
-    menu is built from the live row, so when the download starts it reads *Copy path*,
-    *Cancel download*, and *Cancel download* is second, where *Download* was. A pointer
-    resting on *Download* (say, the menu reopened to press it again while its job is
-    queued: the lesson reads skipped until the download starts) that clicks without
-    moving just as the download starts presses *Cancel download*. The download stops,
-    and the lesson ends skipped again, with the stopped sentence as its note in place of
-    the skip's reason; a lesson whose recorded files are on disk ends downloaded
-    (`CancelDownload`). No file is lost. Ruling (q) guards the keyboard (Radix
-    highlights the first item, *Copy path*), not the pointer. The same swap puts
-    *Cancel download* under a resting pointer on the second item of other menus: *Skip*
-    on a pending or failed lesson, *Copy path* on a downloaded lesson with a note.
-    Recorded, not fixed, by the owner's ruling (u), 2026-09-24.
-  - *Why:* one click undoes the download the owner asked for.
-  - *Fix (can wait):* put *Cancel download* after a separator, where no item of the
-    menu before the swap sits. Related: D127 (whether a skipped lesson needs both
-    *Un-skip* and *Download*).
-  - *Evidence:* `grep -n 'key="unskip"\|key="download"\|key="skip"\|key="cancel"' web/src/pages/Lessons.tsx`
-    · `grep -n 'const endDownloadSQL' -A5 internal/database/downloads.go`
 - **D72 · On Windows the library move renames by path.**
   - *What:* on Linux and macOS each rename of the move acts on the folders it holds open
     (`renameat2`/`renameatx_np`), so a folder swapped for a symlink between the move's
@@ -1191,6 +1238,37 @@ Three choices described in their own entries are also waiting on the owner: D3's
 rebuild, D53's fix for the tokenless loopback mode (options A, B or C), and whether D81's
 lease holder token goes into the unreleased migration 004 (before this branch merges).
 
+- **D132 · A long title makes the Lessons table scroll sideways, and then every ⋯ is out
+  of view.**
+  - *Context:* ruling (t) made the table fit a 1024px window with short titles (D131).
+    Measured by the round-5f/5g UI seat in headless Chromium (Noto Sans, overlay
+    scrollbars; finding 3): at 1024px the table fits only while no title on the page is
+    longer than about 53 characters (55 overflow by 2px, 60 by 28px, 70 by 94px); at
+    1280px the limit is about 75. With a 91-character title, 1279px fits but 1280px
+    overflows by 112px, because Brand and Quality come back at 1280; 1366px fits again.
+    Whenever the table overflows (at 900px even with short titles, D131), every row's ⋯
+    is off-screen, and the only horizontal scrollbar sits under the 50-row table.
+  - *The question:* whether to let titles wrap below the `xl` breakpoint (the seat's
+    option, a design call), or leave it.
+  - *Evidence:* `grep -n 'WIDE_ONLY\|min-w-88' web/src/pages/Lessons.tsx` · on a page of
+    All, compare `scrollWidth` with `clientWidth` on the table's parent at 1024, 1279
+    and 1280px, with a title over 53 characters on the page.
+- **D133 · In a three-line row the other cells sit lower than the title.**
+  - *Context:* the badge, Size, Updated and ⋯ are centred on the row, so in a row whose
+    note wraps to three lines they sit 26px below the title's midline (18px in a
+    two-line row); they line up with the note's first line. It still reads fine at
+    1024px (round-5f/5g UI review, finding 4, polish).
+  - *The question:* align the row's cells to the top (the seat's option), or keep them
+    centred.
+  - *Evidence:* the Lessons table row in `web/src/pages/Lessons.tsx` (the seat cited
+    `:407-428` at `4eedce9`).
+- **D134 · Below 1280px a lesson's downloaded quality isn't shown anywhere.**
+  - *Context:* ruling (t) hides the Quality column below 1280px (D131). Follows shows the
+    quality a follow asks for, not the one each lesson got, so at those widths nothing
+    says what a lesson was downloaded at (round-5f/5g UI review, finding 6). Nothing else
+    is lost: headers and cells hide together, and no cell spans columns.
+  - *The question:* whether the quality needs a place below 1280px, and where.
+  - *Evidence:* `grep -n 'WIDE_ONLY' web/src/pages/Lessons.tsx`
 - **D127 · A skipped lesson's menu offers *Un-skip* and *Download*, which now do almost
   the same thing.**
   - *Context:* since ruling (m) both start a sync at once. *Un-skip* sets the lesson
@@ -1542,7 +1620,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `git config --show-origin --get core.hooksPath` (`file:.git/config
     scripts/hooks`) · `printf 'bad subject\n' > /tmp/m && git hook run commit-msg -- /tmp/m`
     (exits 1 with the bypass hint).
-- **D113 · Round 5: what the review seats found, and the owner's rulings (a)–(u).** This
+- **D113 · Round 5: what the review seats found, and the owner's rulings (a)–(w).** This
   branch (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* at `8ee019d` the round-5 seats (code, security, UI), and the seats on each fix
     round after it, found:
@@ -1658,7 +1736,13 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       the table fits with no note cut and no sideways scroll; a long title still scrolls
       it (D131 has the measurements). (u) A
       pointer resting on a skipped lesson's *Download* that clicks just as the download
-      starts presses *Cancel download*: recorded, not fixed (D129).
+      starts presses *Cancel download*: recorded, not fixed (D129). Superseded by (v).
+    - (v) When a lesson starts or stops downloading while its ⋯ menu is open, the menu
+      closes, so nothing can be clicked or chosen on a menu whose items just changed:
+      the pointer and the keyboard, at the start and when an attempt fails or ends
+      (D129). (w) Scroll anchoring is off on the lessons list: when a started download
+      moves to the top of All, the reader's view stays still, and the rows below it
+      shift by one row, with no jump.
     - Corrected lines: `daemon --once` stops its download on `Ctrl-C` or SIGTERM (D95
       (d)); a Cancel during a backoff lands at once; a follow that can't be read fails the
       job before downloading (`failNotStarted`); `openRealDir` refuses a folder swapped
@@ -1722,9 +1806,31 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       running.", and while syncing is paused, "Syncing is paused: its lessons start
       downloading when you Resume." UI Low C is settled by (r) during planning: a lesson
       whose download starts still changes (its status), so it still moves to the top of
-      All then; whether the page still jumps at that moment is for the browser pass. D125
+      All then; whether the page still jumps at that moment is for the browser pass (it
+      does: round 5h, below). D125
       takes the security seat's empty-folder residual; D101 takes UI Low B; D126–D128 are
       recorded, and D129–D131 after the web half (D131 since settled).
+    - Round 5h's corrected lines (from the round-5f/5g reviews): a season folder in the
+      course folder the downloads fallback goes into counts as the library's, since the
+      fallback only writes `NN - Title` folders (`inLibrary`,
+      `internal/scheduler/worker_record.go:302`; security N1, a regression from 5f:
+      after the library root moved up from the downloads folder, a legacy season row fell
+      back and its season files were claimed by no lesson); `inLibrary`'s comment states
+      its rule and where it differs from `previousFolder`'s longest root (code I4); a
+      lesson two follows list is no longer stamped by every sync: only the follow it is
+      attributed to writes its parent (`UpsertLesson`, code L1, security N4; D130). New
+      pins: the downloads-inside-library rule at the plex-tv call site of `keptInLibrary`
+      (code L2, mutant MF), and a regular file at the recorded folder's name, which is not
+      the lesson's folder (code I3, mutant MC). D128 now lists the losses the path rule
+      still allows (security N2, B3) and the mirror refusal (code I5); D58 records that
+      ruling (f)'s refusal doesn't see a library folder spelled another way (security
+      N3). The web half builds rulings (v) and (w): (v) settles D129 and code I1 (the
+      reverse flip, *Cancel download* to *Download* on a failed attempt, where Enter
+      pressed *Download*); (w) settles UI finding 2, the page jump when a download
+      starts: with lessons that share a stamp, listed by id, a reader holding the view
+      at 1500px was moved 18 times in 15s, once per start, whenever the started lesson
+      was the row Chrome anchored to (the top visible row). UI findings 3, 4 and 6 are
+      recorded for the owner as D132–D134.
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -1732,10 +1838,12 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     and `cd web && npx vitest run src/lib/sse-reducer.test.ts src/pages/Queue.test.tsx src/pages/Follows.test.tsx src/pages/Lessons.test.tsx`
     · round 5f: `go test -count=1 -run 'IgnoresASymlinkToTheLibraryFolder|WithoutALibraryLeavesTheFolderASymlinkLedTo|OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder|FallsBackIntoTheLessonsOwnFolder|KeepsALegacyEpisodeItCanNotName|StampsUpdatedAtOnlyOnAChange' ./internal/scheduler/ ./internal/database/`
     and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'start downloading|starts downloading highlights|keeps its width|hides Brand and Quality'`
+    · round 5h: `go test -count=1 -run 'KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|OfALessonKeptInDownloads|DoesNotTakeAFileForTheLessonsFolder|StampsUpdatedAtOnlyOnAChange|DoesNotRestampALessonTwoFollowsList' ./internal/scheduler/ ./internal/database/`
+    and the web half's tests for (v) and (w)
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
-    the round-5d reviews; D126–D128, from the round-5e reviews; D129 and D130, from the
-    round-5f web half and its rulings;
+    the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
+    web half and its rulings; D132–D134, from the round-5f/5g UI review;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
@@ -1767,6 +1875,36 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     1279px, where Brand and Quality go, and at 1440px.
   - *Evidence:* `grep -n 'WIDE_ONLY\|min-w-88' web/src/pages/Lessons.tsx` ·
     `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'keeps its width|hides Brand and Quality'`
+- **D129 · A click or a key meant for a lesson's row menu could press *Cancel download*
+  or *Download* as the lesson started or stopped downloading.** This branch
+  (`fix-library-delete-and-move`), PR number to follow. Settled by the owner's ruling
+  (v), 2026-09-24, which supersedes (u); built by the web half of round 5h.
+  - *Was:* the row menu is built from the live row, so its items change when a download
+    starts or stops. Ruling (u) recorded one case, not fixed: a pointer resting on a
+    skipped lesson's *Download* (*Un-skip*, *Download*, *Copy path*) that clicks just as
+    the download starts presses *Cancel download*, now second. The round-5f/5g UI seat
+    measured the pointer case wider (finding 1). The open menu moves with its row:
+    Radix Popper re-anchors it on every layout change
+    (`web/node_modules/@radix-ui/react-popper/dist/index.mjs:95-99`), and a click
+    selects whatever item is under the pointer
+    (`web/node_modules/@radix-ui/react-menu/dist/index.mjs:393`, `:398-400`). At 1280px
+    on All, a failed lesson with a two-line note, the pointer resting on *Download*, the
+    first item: at the claim the row grew from 71 to 133px and the menu slid from top
+    444 to 475; at the start the row moved to the top of All and shrank to 99px, the
+    menu went up to 405, and the resting pointer was over *Cancel download*. The click
+    sent the cancel ("Download canceled"). So the suggested fix, *Cancel download* after
+    a separator, would not have helped: the whole menu moves under the pointer. The
+    keyboard had the reverse flip (round-5f/5g code review, I1): a downloading lesson's
+    menu open from the keyboard, *Cancel download* highlighted, and the attempt fails;
+    the menu becomes *Download*, *Skip*, *Copy path*, Radix moves focus to the first
+    item (`web/node_modules/@radix-ui/react-roving-focus/dist/index.mjs:102-109`), and
+    Enter queued a download. Ruling (q)'s order protected only the forward flip.
+  - *Now:* ruling (v): when a lesson starts or stops downloading while its ⋯ menu is
+    open, the menu closes, so nothing can be clicked or chosen on a menu whose items just
+    changed. That covers the pointer and the keyboard, in both directions: the start,
+    and an attempt that fails or ends. Built by the web half of round 5h.
+  - *Evidence:* the web half's round-5h commit and test (named in D113's round-5h line
+    once both halves are merged).
 - **D78 · A Skip was undone by a queued or running download.** This branch
   (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* Skip only set the lesson's status, so its queued job was claimed and downloaded
