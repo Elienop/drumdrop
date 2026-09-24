@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -219,12 +220,28 @@ func testPlacePending(t *testing.T, downloads, root, lessonDir string, self data
 }
 
 // stubRename makes every rename of the moves call f with the two full paths
-// instead, for the rest of the test (f may call os.Rename to let one through).
+// instead, for the rest of the test (f may call renameNoReplace to let one
+// through). Like renameAt, it never replaces: a rename onto an entry already
+// there fails with fs.ErrExist before f is called (round-5 fix code I2), so a
+// stubbed test can not pass on an overwrite production refuses.
 func stubRename(t *testing.T, f func(oldpath, newpath string) error) {
 	t.Helper()
 	orig := renameAt
 	renameAt = func(from *os.Root, src string, to *os.Root, dst string) error {
-		return f(filepath.Join(from.Name(), src), filepath.Join(to.Name(), dst))
+		oldpath, newpath := filepath.Join(from.Name(), src), filepath.Join(to.Name(), dst)
+		if _, err := os.Lstat(newpath); err == nil {
+			return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EEXIST}
+		}
+		return f(oldpath, newpath)
 	}
 	t.Cleanup(func() { renameAt = orig })
+}
+
+// renameNoReplace is os.Rename refusing, as renameAt does, to replace an
+// entry already at newpath (fs.ErrExist): the pass-through for stubRename.
+func renameNoReplace(oldpath, newpath string) error {
+	if _, err := os.Lstat(newpath); err == nil {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EEXIST}
+	}
+	return os.Rename(oldpath, newpath)
 }

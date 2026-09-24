@@ -24,7 +24,7 @@ func refuseRenames(t *testing.T, refuse func(oldpath, newpath string) bool) {
 		if refuse(oldpath, newpath) {
 			return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
 		}
-		return os.Rename(oldpath, newpath)
+		return renameNoReplace(oldpath, newpath)
 	})
 }
 

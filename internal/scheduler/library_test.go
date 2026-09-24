@@ -554,7 +554,7 @@ func forceCopyFallbackInto(t *testing.T, root string) {
 		if library.Inside(root, newpath) && !library.Inside(root, oldpath) {
 			return errInjectedRename
 		}
-		return os.Rename(oldpath, newpath)
+		return renameNoReplace(oldpath, newpath)
 	})
 }
 
@@ -750,7 +750,7 @@ func TestMoveToLibraryPlexTVUndoRenamesBack(t *testing.T) {
 		if strings.Contains(oldpath, "[Original]") {
 			return errInjectedRename
 		}
-		return os.Rename(oldpath, newpath)
+		return renameNoReplace(oldpath, newpath)
 	})
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4"))
 

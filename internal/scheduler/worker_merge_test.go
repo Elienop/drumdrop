@@ -313,7 +313,7 @@ func TestPlacementThatFailsAfterAMergeTakesItBack(t *testing.T) {
 				if filepath.Ext(newpath) == ".nfo" {
 					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
 				}
-				return os.Rename(oldpath, newpath)
+				return renameNoReplace(oldpath, newpath)
 			})
 
 			var err error

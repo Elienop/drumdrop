@@ -134,7 +134,7 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 		if strings.HasPrefix(newpath, lessonDir) || strings.Contains(oldpath, "[Original]") {
 			return errInjectedRename // the undo's rename back, and [Original] (then copied)
 		}
-		return os.Rename(oldpath, newpath)
+		return renameNoReplace(oldpath, newpath)
 	})
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4")) // so its copy fails
 
