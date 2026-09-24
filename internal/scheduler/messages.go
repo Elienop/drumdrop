@@ -10,7 +10,7 @@ const (
 	// msgNotResolved is a lesson Musora answered with no match (locked for
 	// the owner's account, or removed): the lesson is skipped. It is stored on
 	// the lesson and on its job alike (SkipDownload), so it names no button.
-	msgNotResolved = "Skipped: Musora didn't return this lesson. It may be locked for your account, or removed."
+	msgNotResolved = "Musora didn't return this lesson. It may be locked for your account, or removed."
 	// msgStopped is a download a Skip, a delete or a follow removal stopped.
 	msgStopped = "Stopped: the lesson was skipped or deleted, or its follow was removed."
 	// msgRequeued is a download whose job was queued again elsewhere.

@@ -79,16 +79,16 @@ const (
 // Lesson download and un-skip (POST /api/lessons/{id}/download, …/unskip).
 const (
 	msgDownloadGone    = "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to download."
-	msgDownloadJobGone = "The download was queued, then removed meanwhile by a Skip or delete elsewhere, so it won't run."
+	msgDownloadJobGone = "It won't download: a Skip or delete elsewhere took it off the queue right after it was queued."
 	msgUnskipGone      = "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to un-skip."
 )
 
 // Job cancel and retry (POST /api/jobs/{id}/cancel, …/retry).
 const (
-	msgCancelGone   = "This job is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to cancel."
-	msgRetryGone    = "This job is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to retry."
-	msgJobNotActive = "This job has already ended, so there's nothing to cancel."
-	msgJobNotRetry  = "Only a failed or canceled job can be retried, and this one isn't."
+	msgCancelGone   = "This download is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to cancel."
+	msgRetryGone    = "This download is no longer in DrumDrop: it was removed meanwhile, elsewhere. There's nothing left to retry."
+	msgJobNotActive = "This download has already ended, so there's nothing to cancel."
+	msgJobNotRetry  = "Only a failed or canceled download can be retried, and this one isn't."
 )
 
 // Lesson delete (DELETE /api/lessons/{id}).
@@ -132,9 +132,9 @@ const (
 	msgPreviewNothing     = "Enter a URL or id, or an instructor's name, slug or link, then Preview again."
 	msgBadKind            = "Choose Node or Instructor, then try again."
 	msgSlugRequired       = "Enter the instructor's name, slug or link, then Preview again."
-	msgBadSlug            = "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a link to their coach page. Then Preview again."
-	msgBadBrand           = "That brand can't be looked up: enter drumeo, pianote, guitareo, singeo or playbass. Or leave Brand empty for a pasted coach link's brand, or drumeo without one. Then Preview again."
-	msgBrandMismatch      = "That coach page is for another brand than the one in Brand. Leave Brand empty to use the link's, or change it to match, then Preview again."
+	msgBadSlug            = "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or their coach page's link, then Preview again. A lesson or course link goes under Node."
+	msgBadBrand           = "That brand can't be looked up. Enter drumeo, pianote, guitareo, singeo or playbass, or leave Brand empty: a coach link then sets it, and drumeo is used otherwise. Then Preview again."
+	msgBrandMismatch      = "That coach page is for a different brand from the one in Brand. Leave Brand empty to use the link's, or change it to match, then Preview again."
 	msgNoInstructor       = "Musora has no instructor by that name, slug or link. Check its spelling, then Preview again."
 	msgPreviewUnreachable = "Nothing could be looked up: Musora couldn't be reached, or its answer couldn't be read. Wait a moment, then Preview again."
 	msgAddUnreachable     = "The follow wasn't added: Musora couldn't be reached, or its answer couldn't be read. Wait a moment, then Add again."
@@ -146,6 +146,6 @@ const (
 const (
 	msgLoginMissing     = "Enter your Musora email and password, then Connect again."
 	msgLoginRejected    = "Musora didn't accept that email and password. Check them, then Connect again."
-	msgLoginUnreachable = "You're not connected: Musora couldn't be reached, or its answer couldn't be read. Wait a moment, then Connect again."
+	msgLoginUnreachable = "The login didn't go through, and nothing changed: Musora couldn't be reached, or its answer couldn't be read. Wait a moment, then Connect again."
 	msgLoginNotSaved    = "Musora accepted the login, but DrumDrop couldn't save the session. Check the server log, fix the problem, then Connect again."
 )
