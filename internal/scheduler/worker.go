@@ -170,12 +170,12 @@ func (w *Worker) progressCallback(job database.Job, lesson *musora.Lesson, attem
 }
 
 // waitBackoff waits the given retry delay but stays responsive to cancellation:
-// it returns false (do not retry) the moment ctx is cancelled, leaving the job
-// to be re-queued and retried next cycle. A real Worker waits on time.After(d)
-// vs ctx.Done(); a Worker with an injected sleeper (tests) calls that sleeper so
-// the recorded backoff schedule is still observable, then re-checks ctx so a
-// cancelled context still aborts retries. Returns true when the wait completed
-// normally and the next attempt should proceed.
+// it returns false (do not retry) the moment ctx, the job's, is cancelled (a
+// Cancel, or a shutdown; the caller tells the two apart). A real Worker waits
+// on time.After(d) vs ctx.Done(); a Worker with an injected sleeper (tests)
+// calls that sleeper so the recorded backoff schedule is still observable, then
+// re-checks ctx so a cancelled context still aborts retries. Returns true when
+// the wait completed normally and the next attempt should proceed.
 func (w *Worker) waitBackoff(ctx context.Context, d time.Duration) bool {
 	if w.sleep == nil {
 		w.sleep = time.Sleep
@@ -395,9 +395,15 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			}
 			// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
 			// last entry for any further retries. See the doc comment: Backoff[i]
-			// is the delay before attempt i+2. A cancellation mid-backoff aborts
-			// the retry early, leaving the job to be re-queued next cycle.
-			if !w.waitBackoff(ctx, w.backoff(attempt-2)) {
+			// is the delay before attempt i+2. The wait is on the job's context,
+			// so a Cancel lands at once, not when the backoff ends (it is
+			// recorded, with no retry). A shutdown mid-backoff leaves the job
+			// running, to be requeued at the next start; its end was already
+			// reported with the failed attempt.
+			if !w.waitBackoff(jobCtx, w.backoff(attempt-2)) {
+				if ctx.Err() == nil {
+					w.finishCanceled(ctx, job, lesson)
+				}
 				return
 			}
 		}
