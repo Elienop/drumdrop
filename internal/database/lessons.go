@@ -105,22 +105,35 @@ func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
 }
 
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
-// railcontent_id. On conflict it updates only title, parent, and updated_at, and
-// only when one of the stored fields changes (owner ruling 2026-09-24 (r)): a
-// sync that finds the lesson as it was writes nothing, so its updated_at, and so
-// its place in the Lessons page's All tab (ListLessons), stay as they were. It
-// deliberately does NOT touch status, download metadata, or follow_id. This is
-// half of the dedup mechanism: a re-sync that re-discovers an already-downloaded
-// lesson must never downgrade it back to pending and trigger a redundant
-// re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
-// attributed to the follow that first discovered it even if a later follow also
-// covers it. New rows take the table default status='pending'.
+// railcontent_id. On conflict it updates only title, parent, position and
+// updated_at, and only when one of the stored fields changes (owner ruling
+// 2026-09-24 (r)): a sync that finds the lesson as it was writes nothing, so its
+// updated_at, and so its place in the Lessons page's All tab (ListLessons), stay
+// as they were. That holds for a lesson two follows list too (a course follow
+// and an instructor follow, say), since each field a conflict writes has one
+// writer per sync (below). It deliberately does NOT touch status, download
+// metadata, or follow_id. This is half of the dedup mechanism: a re-sync that
+// re-discovers an already-downloaded lesson must never downgrade it back to
+// pending and trigger a redundant re-download. Leaving follow_id untouched is
+// first-follow-wins: the lesson stays attributed to the follow that first
+// discovered it even if a later follow also covers it. New rows take the table
+// default status='pending'.
+//
+// parent is written only by the follow the lesson is attributed to (its stored
+// follow_id, NULL matching NULL), like follow_id and position: the planner
+// gives each follow's lessons that follow's own node id, or NULL for an
+// instructor, so two follows would otherwise write two values every sync and
+// each would count as a change. A change the attributed follow brings is still
+// written and stamped. A lesson whose follow was removed (follow_id set NULL)
+// keeps its last parent, as it keeps its follow_id: another follow listing it
+// writes neither.
 //
 // position is the lesson's sequence within its follow (the "NN - " folder
 // prefix). On conflict it is first-write-wins via COALESCE(lessons.position,
 // excluded.position): a lesson shared by two follows keeps the first number, and
-// a prior NULL is filled in by a later numbered upsert. (title stays
-// last-write-wins.)
+// a prior NULL is filled in by a later numbered upsert. title stays
+// last-write-wins: each follow's expansion reads the lesson document's own
+// title field, so two follows write the same one.
 func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
@@ -128,11 +141,14 @@ func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title strin
 			 VALUES(?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
-			     parent_railcontent_id = excluded.parent_railcontent_id,
+			     parent_railcontent_id = CASE WHEN lessons.follow_id IS excluded.follow_id
+			                                  THEN excluded.parent_railcontent_id
+			                                  ELSE lessons.parent_railcontent_id END,
 			     position              = COALESCE(lessons.position, excluded.position),
 			     updated_at            = CURRENT_TIMESTAMP
 			 WHERE lessons.title IS NOT excluded.title
-			    OR lessons.parent_railcontent_id IS NOT excluded.parent_railcontent_id
+			    OR (lessons.follow_id IS excluded.follow_id
+			        AND lessons.parent_railcontent_id IS NOT excluded.parent_railcontent_id)
 			    OR (lessons.position IS NULL AND excluded.position IS NOT NULL)`,
 			railcontentID, title, parent, brand, position, followID,
 		)
@@ -251,10 +267,12 @@ const defaultLessonListLimit = 100
 
 // ListLessons returns a page of lessons ordered by updated_at DESC then
 // railcontent_id (most recently changed first, stable within the same
-// timestamp): a lesson moves up when it is first seen, when its status
-// changes, and when a sync changes its title, parent or position, never for a
-// sync that finds it as it was (UpsertLesson). A limit <= 0 falls back to defaultLessonListLimit; offset pages
-// through the result.
+// timestamp): a lesson moves up when it is first seen, when a download or
+// API write sets its status (some of those stamp even when nothing changed:
+// BACKLOG D130), and when a sync changes its title, parent or position; never
+// for a sync that finds it as it was, even when two follows list it
+// (UpsertLesson). A limit <= 0 falls back to defaultLessonListLimit; offset
+// pages through the result.
 func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, error) {
 	if limit <= 0 {
 		limit = defaultLessonListLimit

@@ -99,7 +99,9 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		}
 
 		// A node follow links its lessons to itself via railcontent_id; an
-		// instructor follow has no node parent, so parent stays NULL.
+		// instructor follow has no node parent, so parent stays NULL. The
+		// store writes it only for a lesson this follow is attributed to
+		// (UpsertLesson), so a lesson two follows list keeps one parent.
 		var parent sql.NullInt64
 		if f.Kind == "node" && f.RailcontentID.Valid {
 			parent = f.RailcontentID

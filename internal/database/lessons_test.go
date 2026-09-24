@@ -98,7 +98,8 @@ func TestUpsertLessonNullFollowID(t *testing.T) {
 
 // TestUpsertLessonPreservesFollowID is the first-follow-wins invariant: a lesson
 // discovered under one follow keeps that follow_id even when a later sync
-// re-upserts it under a different follow. (Title and parent are still refreshed.)
+// re-upserts it under a different follow. (Title is still refreshed; parent is
+// the attributed follow's to write: TestUpsertLessonStampsUpdatedAtOnlyOnAChange.)
 func TestUpsertLessonPreservesFollowID(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -226,48 +227,75 @@ func TestUpsertLessonFillsNullPosition(t *testing.T) {
 // (r): a sync stamps a lesson's updated_at only when one of the fields the
 // upsert stores changes (title, parent, a position filled in), never when it
 // finds the lesson as it was, or differs only in what a conflict leaves alone
-// (brand, follow, a position already set). The stamp is set to a fixed past
-// time first, so CURRENT_TIMESTAMP's one-second grain can't hide a write.
+// (brand, follow, a position already set). Parent is the attributed follow's
+// to write (code round 5f-5g L1): a sync from another follow that lists the
+// lesson leaves it, and stamps nothing for it, as does one after the lesson's
+// follow was removed; a change from the attributed follow is written and
+// stamped. The stamp is set to a fixed past time first, so CURRENT_TIMESTAMP's
+// one-second grain can't hide a write.
 func TestUpsertLessonStampsUpdatedAtOnlyOnAChange(t *testing.T) {
 	const past = "2026-01-01 00:00:00"
 	num := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
 	type upsert struct {
-		title         string
-		parent        sql.NullInt64
-		brand         string
-		position, flw sql.NullInt64
-		wantTitle     string
-		wantPos       sql.NullInt64
-		wantParent    sql.NullInt64
-		stamped       bool
+		title      string
+		parent     sql.NullInt64
+		brand      string
+		position   sql.NullInt64
+		wantTitle  string
+		wantPos    sql.NullInt64
+		wantParent sql.NullInt64
+		stamped    bool
 	}
+	// Who the sync comes from, against the follow the lesson was stored with.
+	const (
+		noFollow = ""        // no follow, before and now
+		same     = "same"    // the follow the lesson is attributed to
+		other    = "other"   // another follow that lists it too
+		removed  = "removed" // another follow, after the lesson's own was removed
+	)
 	for _, c := range []struct {
 		name     string
 		position sql.NullInt64 // the stored position before the sync
+		from     string
 		sync     upsert
 	}{
-		{"nothing changed", num(5), upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
-		{"only a brand, follow or position a conflict leaves alone", num(5), upsert{title: "Lesson", parent: num(7), brand: "pianote", position: num(9), flw: num(1), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
-		{"the title changed", num(5), upsert{title: "New Title", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
-		{"the parent changed", num(5), upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
-		{"the parent cleared", num(5), upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
-		{"a missing position filled in", sql.NullInt64{}, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"nothing changed", num(5), noFollow, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"only a brand, follow or position a conflict leaves alone", num(5), other, upsert{title: "Lesson", parent: num(7), brand: "pianote", position: num(9), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"the title changed", num(5), noFollow, upsert{title: "New Title", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"the parent changed", num(5), noFollow, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
+		{"the parent cleared", num(5), noFollow, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
+		{"a missing position filled in", sql.NullInt64{}, noFollow, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"the attributed follow's parent changed", num(5), same, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
+		{"the attributed follow's parent cleared", num(5), same, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
+		{"another follow's parent", num(5), other, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"another follow's NULL parent (an instructor)", num(5), other, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"another follow's title change", num(5), other, upsert{title: "New Title", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"another follow's parent, the lesson's follow removed", num(5), removed, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newTestStore(t)
 			ctx := context.Background()
-			flw := sql.NullInt64{}
-			if c.sync.flw.Valid {
+			flw, syncFlw := sql.NullInt64{}, sql.NullInt64{}
+			if c.from != noFollow {
 				flw = num(seedFollowForLesson(t, s))
-				c.sync.flw = num(seedFollowForLesson(t, s))
+				syncFlw = flw
+				if c.from != same {
+					syncFlw = num(seedFollowForLesson(t, s))
+				}
 			}
 			if err := s.UpsertLesson(ctx, 1, "Lesson", num(7), "drumeo", c.position, flw); err != nil {
 				t.Fatalf("first UpsertLesson: %v", err)
 			}
+			if c.from == removed {
+				if _, err := s.rawDB().Exec(`DELETE FROM follows WHERE id = ?`, flw.Int64); err != nil {
+					t.Fatalf("remove the follow: %v", err)
+				}
+				flw = sql.NullInt64{} // ON DELETE SET NULL
+			}
 			if _, err := s.rawDB().Exec(`UPDATE lessons SET updated_at = ? WHERE railcontent_id = 1`, past); err != nil {
 				t.Fatalf("set updated_at: %v", err)
 			}
-			if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, c.sync.flw); err != nil {
+			if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, syncFlw); err != nil {
 				t.Fatalf("second UpsertLesson: %v", err)
 			}
 			got, err := s.GetLesson(ctx, 1)
