@@ -226,10 +226,11 @@ var errKeptInLibrary = errors.New("not placed: the placement in the library fail
 //     entries, what the plex-tv move learned it owns there, is nil: once
 //     output_dir names the downloads folder, no lesson claims them.
 //
-// A row whose folder is in the downloads folder's course folder, beside
-// fallback, when the downloads folder sits inside the library, is not in the
-// library (inLibrary), so it falls back: the fallback's previous folder is in
-// downloads, as with a downloads folder beside the library. A row that
+// A row whose lesson folder is in the downloads folder's course folder,
+// beside fallback, when the downloads folder sits inside the library, is not
+// in the library (inLibrary), so it falls back: the fallback's previous
+// folder is in downloads, as with a downloads folder beside the library. A
+// season folder there is the library's (the fallback never writes one). A row that
 // records fallback itself falls back too: the library is the downloads
 // folder (or holds it under another spelling), and the lesson was kept in
 // downloads before. That placement is the lesson's own folder
@@ -268,23 +269,38 @@ func recordsFolder(l database.Lesson, dir string) bool {
 	return filepath.Clean(l.OutputDir.String) == filepath.Clean(dir) || sameDir(l.OutputDir.String, dir)
 }
 
-// inLibrary reports whether the lesson's row records its folder inside the
-// library lib, the root that holds it as previousFolder decides it (the
-// longest one), with the downloads folder downloads: a tie (the library is
-// the downloads folder) counts as the library. When the downloads folder sits
-// inside the library, a folder in it counts as the downloads folder's only
-// when it is in the course folder the downloads fallback goes into (beside
-// fallback: an earlier refused move kept the lesson there, under this title
-// or an older one). The spelling alone can't tell more: a library folder of
-// a course named like the downloads folder is inside it too (and an
-// instructor follow nests one level deeper), so any other folder counts as
-// the library's, and a refusal keeps it.
+// inLibrary reports whether keptInLibrary treats the folder the lesson's row
+// records (output_dir) as the library's. It reads the spelling only (N3 in
+// BACKLOG D58: a library folder spelled another way is not seen), and the
+// rule is:
+//   - a folder outside the library lib is not the library's;
+//   - a folder inside it is, when the downloads folder downloads is beside
+//     the library, is the library (a tie), or holds it;
+//   - when the downloads folder sits inside the library, a folder inside it
+//     is the library's too, except a lesson folder in the course folder the
+//     downloads fallback goes into (beside fallback: an earlier refused move
+//     kept the lesson there, under this title or an older one).
+//
+// This is not previousFolder's rule, which files a folder under the longest
+// root holding it: with the downloads folder inside the library, a folder
+// in downloads outside the fallback's course folder is the downloads
+// folder's to previousFolder but the library's here, so a refusal keeps it.
+// The spelling can't tell who placed such a folder: a library folder of a
+// course, or of an instructor, named like the downloads folder is inside it
+// too, and so is any folder the library placed there before its root moved
+// up. The exception rests on what the fallback writes: only "NN - Title"
+// lesson folders, which SeasonNumber never reads as a season folder, so a
+// season folder in the fallback's course folder was placed by the library
+// (it stays the library's). A lesson folder there is still counted as the
+// downloads folder's even when the library placed it (an instructor named
+// like the downloads folder, or a root moved up): BACKLOG D128.
 func inLibrary(prev database.Lesson, lib, downloads, fallback string) bool {
 	if !prev.OutputDir.Valid || prev.OutputDir.String == "" || !library.Inside(lib, prev.OutputDir.String) {
 		return false
 	}
 	nested := library.Inside(lib, downloads) && !library.Inside(downloads, lib)
-	return !nested || filepath.Dir(filepath.Clean(prev.OutputDir.String)) != filepath.Dir(filepath.Clean(fallback))
+	return !nested || library.IsSeasonDir(prev.OutputDir.String) ||
+		filepath.Dir(filepath.Clean(prev.OutputDir.String)) != filepath.Dir(filepath.Clean(fallback))
 }
 
 // keptVideo is the first, in name order, of the entries a plex-tv placement
