@@ -223,8 +223,17 @@ var errKeptInLibrary = errors.New("not placed: the placement in the library fail
 //     layout placed before a layout switch;
 //   - the row records a season folder in the library and no record of its
 //     entries (a legacy row: it owns them only through output_dir), and
-//     entries, what the plex-tv move learned it owns there, is nil: once
-//     output_dir names the downloads folder, no lesson claims them.
+//     entries, what the plex-tv move learned it owns there, is nil or empty:
+//     it learned none of them. Once output_dir names the downloads folder, no
+//     lesson claims them. Empty counts as well as nil: the move reads a
+//     legacy row's season folder under the library configured now
+//     (library.Claims.Plan), so after the library setting moved it can look
+//     in a folder that is not the recorded one and learn a known-empty
+//     answer ("[]") while the files are still where the row says (security
+//     round 5h F1). The trade: a legacy row whose episode files are all
+//     really gone (deleted by hand) is refused too, while its library
+//     placement keeps failing; its video is missing, so it ends failed and
+//     syncs retry it, instead of falling back to downloads.
 //
 // A row whose lesson folder is in the downloads folder's course folder,
 // beside fallback, when the downloads folder sits inside the library, is not
@@ -249,7 +258,7 @@ func keptInLibrary(prev database.Lesson, lib, downloads string, entries []string
 	if !library.IsSeasonDir(prev.OutputDir.String) {
 		return true
 	}
-	return entries == nil && !prev.LibraryEntries.Valid
+	return len(entries) == 0 && !prev.LibraryEntries.Valid
 }
 
 // recordsFolder reports whether row l records dir as its folder

@@ -146,6 +146,46 @@ func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName(t *testing.T) {
 	}
 }
 
+// libMovedUpBeside: the downloads folder beside the library, where the
+// library setting moved up a level (from <lib>/library to <lib>) with its
+// files left where they were.
+const libMovedUpBeside = "the library moved up, the downloads folder beside it"
+
+// TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere is
+// TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName's moved-up case
+// with the other name shape: a plain lesson video, named exactly as the row
+// derives it, which the move CAN name (security round 5h F1, M2 and N1). The
+// move reads the legacy row's season folder under the library configured now,
+// finds nothing there, and learns an empty record ("[]"), not "unknown"
+// (nil). The fallback must still be refused: the files are where the row
+// says, and once output_dir names the downloads folder nothing claims them.
+// It holds with the downloads folder inside the library (the library moved
+// up from it) and beside it (the library moved up from a folder of its own).
+func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere(t *testing.T) {
+	names := []string{"Beginner Course - s01e05 - Lesson A.mp4", "Beginner Course - s01e05 - Lesson A.nfo", "Beginner Course - s01e05 - Lesson A.en.vtt"}
+	for _, where := range []string{dlMovedUp, libMovedUpBeside} {
+		t.Run(where, func(t *testing.T) {
+			w, store, _, lib, season := plexWorker(t)
+			rowSeason := filepath.Join(lib, "library", "Beginner Course", "Season 01")
+			if where == dlMovedUp {
+				placeDownloads(t, w, lib, where)
+				rowSeason = movedUpSeason(w, where, season)
+			}
+			seedSeason(t, rowSeason, names...)
+			prev := legacyRow(100, "Lesson A", 5, rowSeason, names[0])
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
+			refuseFromJobInto(t, w, season)
+
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertContent(t, rowSeason, names...)
+			assertKeptInLibrary(t, w, store)
+		})
+	}
+}
+
 // movedUpSeason is the season folder a test's row records: season (where
 // the plex-tv move goes), or, where is dlMovedUp, the one the library placed
 // before its root moved up, now in the downloads fallback's course folder.
