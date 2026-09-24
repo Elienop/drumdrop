@@ -15,24 +15,17 @@ import (
 // ConfirmDownload, FinishDownload, FailDownload, SkipDownload, CancelDownload)
 // when the job or its lesson no longer exists: a delete or a skip removed them
 // while the download was running. Nothing was written, and nothing of that
-// download may be recorded. Whether what it wrote must be removed is what the
-// stopper wanted (abandoned_jobs): the error also matches ErrDiscardDownload
-// when it must go, and ErrLessonDeleted as well when the lesson's own files are
-// being deleted.
+// download may be recorded: what it wrote is in its private folder, which goes
+// whatever the stopper wanted. The error also matches ErrLessonDeleted when the
+// stopper (abandoned_jobs) is deleting the lesson's own files.
 var ErrDownloadAbandoned = errors.New("download abandoned: its job or lesson was removed")
 
-// ErrDiscardDownload is joined to ErrDownloadAbandoned when the stopper wants
-// what the download wrote removed: a lesson delete, a follow removed with its
-// files, or a skip. Without it the stopper keeps files (a follow removed
-// without its files), or its intent is unknown, and the worker removes nothing
-// the download wrote.
-var ErrDiscardDownload = errors.New("what the download wrote is to be removed")
-
-// ErrLessonDeleted is joined to ErrDownloadAbandoned and ErrDiscardDownload when
-// the stopper is a delete of the lesson's own files (a lesson delete, or a
-// follow removed with its files): the lesson's own record protects nothing the
-// download wrote, since the delete is removing it too. Without it (a skip) the
-// lesson's record still stands, and what it names stays.
+// ErrLessonDeleted is joined to ErrDownloadAbandoned when the stopper is a
+// delete of the lesson's own files (a lesson delete, or a follow removed with
+// its files): a placement that is undone then does not put back the lesson's
+// own earlier files it set aside, since the delete removes them. Without it (a
+// skip, a follow removed keeping its files, or an unknown intent) the undo puts
+// everything back.
 var ErrLessonDeleted = errors.New("the lesson's own files are being deleted")
 
 // The intents a stopper records for a job it removed (abandoned_jobs.intent).
@@ -176,9 +169,9 @@ func (s *Store) withLiveJob(ctx context.Context, jobID int64, id int, statuses [
 }
 
 // abandonedAnswer is the error for a job a stopper removed: ErrDownloadAbandoned,
-// joined with ErrDiscardDownload when the stopper recorded that what the
-// download wrote goes, and with ErrLessonDeleted too when the lesson's own
-// files are being deleted. The row must name the same job AND lesson. An
+// joined with ErrLessonDeleted when the stopper recorded that the lesson's own
+// files are being deleted (a skip and a keep act alike, so their intents need
+// no error of their own). The row must name the same job AND lesson. An
 // unknown or unreadable intent keeps the files: nothing is removed without
 // proof the stopper wanted it.
 func abandonedAnswer(ctx context.Context, tx *sql.Tx, jobID int64, id int) error {
@@ -192,9 +185,7 @@ func abandonedAnswer(ctx context.Context, tx *sql.Tx, jobID int64, id int) error
 	case err != nil:
 		return fmt.Errorf("job %d, lesson %d: %w (what the stopper wanted could not be read, so its files are kept: %v)", jobID, id, ErrDownloadAbandoned, err)
 	case intent == intentDelete:
-		return fmt.Errorf("job %d, lesson %d: %w: %w: %w", jobID, id, ErrDownloadAbandoned, ErrDiscardDownload, ErrLessonDeleted)
-	case intent == intentDiscard:
-		return fmt.Errorf("job %d, lesson %d: %w: %w", jobID, id, ErrDownloadAbandoned, ErrDiscardDownload)
+		return fmt.Errorf("job %d, lesson %d: %w: %w", jobID, id, ErrDownloadAbandoned, ErrLessonDeleted)
 	}
 	return fmt.Errorf("job %d, lesson %d: %w", jobID, id, ErrDownloadAbandoned)
 }

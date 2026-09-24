@@ -54,10 +54,9 @@ type fakeWorkerStore struct {
 	getFollowErr error
 	// gone marks jobs a delete that removes the lesson's files removed: every
 	// guarded write for them returns database.ErrDownloadAbandoned joined with
-	// database.ErrDiscardDownload and database.ErrLessonDeleted, and records
-	// nothing. skipped marks jobs a Skip removed (ErrDownloadAbandoned with
-	// ErrDiscardDownload). kept marks jobs a delete that keeps the files
-	// removed (ErrDownloadAbandoned alone).
+	// database.ErrLessonDeleted, and records nothing. skipped marks jobs a Skip
+	// removed, and kept jobs a delete that keeps the files removed: both
+	// ErrDownloadAbandoned alone, as the store answers both.
 	gone    map[int64]bool
 	skipped map[int64]bool
 	kept    map[int64]bool
@@ -173,10 +172,8 @@ func (s *fakeWorkerStore) markJobFailedAs(id int64, errMsg string) {
 func (s *fakeWorkerStore) abandoned(jobID int64) error {
 	switch {
 	case s.gone[jobID]:
-		return fmt.Errorf("job %d: %w: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrDiscardDownload, database.ErrLessonDeleted)
-	case s.skipped[jobID]:
-		return fmt.Errorf("job %d: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrDiscardDownload)
-	case s.kept[jobID]:
+		return fmt.Errorf("job %d: %w: %w", jobID, database.ErrDownloadAbandoned, database.ErrLessonDeleted)
+	case s.skipped[jobID], s.kept[jobID]:
 		return fmt.Errorf("job %d: %w", jobID, database.ErrDownloadAbandoned)
 	}
 	return nil

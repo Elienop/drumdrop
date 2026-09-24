@@ -64,8 +64,8 @@ func TestSkipLessonSticks(t *testing.T) {
 			t.Errorf("intent = %q, want %q", got, intentDiscard)
 		}
 		err = s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
-		if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) || errors.Is(err, ErrLessonDeleted) {
-			t.Fatalf("FinishDownload after Skip = %v, want abandoned + discard, not a delete", err)
+		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+			t.Fatalf("FinishDownload after Skip = %v, want abandoned, not a delete", err)
 		}
 		if l := mustLesson(t, s, 1); l.Status != StatusSkipped || l.OutputDir.Valid {
 			t.Errorf("the skipped lesson was recorded: %+v", l)
@@ -141,17 +141,16 @@ func TestAbandonedJobsAreBounded(t *testing.T) {
 	t.Run("consumed on read", func(t *testing.T) {
 		s := newTestStore(t)
 		running := claimed(t, s, 1, sql.NullInt64{})
-		if _, err := s.SkipLesson(ctx, 1, ""); err != nil {
-			t.Fatalf("SkipLesson: %v", err)
-		}
-		if err := s.CancelDownload(ctx, running, 1); !errors.Is(err, ErrDiscardDownload) {
-			t.Fatalf("first read = %v, want the discard", err)
+		mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
+		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 1, 'delete')`, running)
+		if err := s.CancelDownload(ctx, running, 1); !errors.Is(err, ErrLessonDeleted) {
+			t.Fatalf("first read = %v, want the delete", err)
 		}
 		if got := abandonedIntent(t, s, running); got != "" {
 			t.Errorf("the row survived its read: %q", got)
 		}
 		err := s.CancelDownload(ctx, running, 1)
-		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrDiscardDownload) {
+		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
 			t.Errorf("second read = %v, want abandoned, keeping the files", err)
 		}
 	})
@@ -193,9 +192,9 @@ func TestAbandonedJobsAreBounded(t *testing.T) {
 		mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
 		// A row left for the same job id but another lesson (a job id reused
 		// after a table rebuild) must not answer for this job.
-		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 9, 'discard')`, running)
+		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 9, 'delete')`, running)
 		err := s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
-		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrDiscardDownload) {
+		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
 			t.Errorf("FinishDownload = %v, want abandoned, keeping the files", err)
 		}
 	})

@@ -225,7 +225,7 @@ func guardedWrites(ctx context.Context) map[string]func(s *Store, jobID int64, i
 // write lands nothing, and says so with ErrDownloadAbandoned, once a delete has
 // removed the job (or the lesson row), so a download that started before a
 // delete can never bring the row back; and that it carries what the delete
-// wanted: ErrDiscardDownload only when the delete removes the lesson's files.
+// wanted: ErrLessonDeleted only when the delete removes the lesson's files.
 func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 	ctx := context.Background()
 	for name, write := range guardedWrites(ctx) {
@@ -239,8 +239,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 				t.Fatalf("TombstoneLesson: %v", err)
 			}
 			err := write(s, jobID, 5)
-			if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) || !errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrDiscardDownload and ErrLessonDeleted", name, err)
+			if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
 			}
 			l := mustLesson(t, s, 5)
 			if l.Status != StatusSkipped || l.Error.String != "deleted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
@@ -258,8 +258,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 			if _, err := s.RemoveFilelessFollowCascade(ctx, f); err != nil {
 				t.Fatalf("RemoveFilelessFollowCascade: %v", err)
 			}
-			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrDiscardDownload) || !errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrDiscardDownload and ErrLessonDeleted", name, err)
+			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
 			}
 		})
 		t.Run(name+"/follow removed keeping its files", func(t *testing.T) {
@@ -269,8 +269,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 			if _, err := s.RemoveFollowCascade(ctx, f); err != nil {
 				t.Fatalf("RemoveFollowCascade: %v", err)
 			}
-			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrDiscardDownload) {
-				t.Fatalf("%s after a keep-files removal = %v, want ErrDownloadAbandoned without ErrDiscardDownload", name, err)
+			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s after a keep-files removal = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
 			}
 		})
 		t.Run(name+"/row deleted, intent unknown", func(t *testing.T) {
@@ -279,8 +279,8 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 			if _, err := s.rawDB().Exec(`DELETE FROM lessons WHERE railcontent_id = 6`); err != nil {
 				t.Fatalf("delete row: %v", err)
 			}
-			if err := write(s, jobID, 6); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrDiscardDownload) {
-				t.Fatalf("%s with no lesson row = %v, want ErrDownloadAbandoned without ErrDiscardDownload", name, err)
+			if err := write(s, jobID, 6); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+				t.Fatalf("%s with no lesson row = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
 			}
 		})
 	}

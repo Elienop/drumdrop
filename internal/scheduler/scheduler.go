@@ -63,7 +63,7 @@ type Store interface {
 	MarkJobRunning(ctx context.Context, id int64) error
 	// The worker's writes about a job land only while the job and its lesson
 	// still exist (database.ErrDownloadAbandoned otherwise, joined with
-	// database.ErrDiscardDownload when the delete removes the lesson's files),
+	// database.ErrLessonDeleted when the delete removes the lesson's files),
 	// so nothing a download does can land after a delete removed them; and a
 	// download only starts or goes on while its job is running
 	// (database.ErrDownloadCanceled otherwise).

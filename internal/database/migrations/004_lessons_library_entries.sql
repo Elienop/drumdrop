@@ -19,12 +19,15 @@ ALTER TABLE lessons ADD COLUMN library_entries TEXT;
 ALTER TABLE lessons ADD COLUMN deleting_until DATETIME;
 
 -- What a stopper wanted for each job it removed while a worker may still hold
--- it (running, or canceled after it started, its worker not yet finished):
---   keep    - a follow removed without its files: nothing is removed;
---   discard - a lesson skipped: what that download wrote goes, except what any
---             lesson row records (the skipped lesson's own earlier files stay);
---   delete  - the lesson's files are deleted: what that download wrote goes,
---             except what ANOTHER lesson row records.
+-- it (running, or canceled after it started, its worker not yet finished). A
+-- download writes only into its job's private folder, which goes whole
+-- whatever the intent, and a placement it was making is undone, every entry it
+-- set aside put back; so keep and discard act alike:
+--   keep    - a follow removed without its files;
+--   discard - a lesson skipped;
+--   delete  - the lesson's files are deleted: as the others, except that the
+--             lesson's own earlier files a placement set aside are not put
+--             back, since the delete removes them.
 -- The worker reads its row when its next write finds the job gone, and the row
 -- is removed then; a row nobody reads is removed after 7 days (see
 -- removeActiveJobsTx). A row answers only for its own job AND lesson. Job ids
