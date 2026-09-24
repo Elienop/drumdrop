@@ -56,13 +56,11 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 // send on the kick channel, so a request never waits on it. A full buffer
 // means a cycle is already pending, and it covers this request too, so
 // presses close together share one cycle. With no daemon attached (a nil
-// Kick: server tests, and the CLI, which serves nothing) it does nothing.
-// While syncs are paused the daemon drops a kick it receives (Daemon.Run), so
-// what a press queued waits for Resume, which kicks again.
+// Kick: server tests, and the CLI, which serves nothing) it does nothing: a
+// send on a nil channel is never ready, so the default case runs. While syncs
+// are paused the daemon drops a kick it receives (Daemon.Run), so what a
+// press queued waits for Resume, which kicks again.
 func (s *Server) kick() {
-	if s.deps.Kick == nil {
-		return
-	}
 	select {
 	case s.deps.Kick <- struct{}{}:
 	default:
