@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -191,5 +192,32 @@ func TestCopyKeepsAFolderPlantedAtTheDestination(t *testing.T) {
 			}
 			assertSeeded(t, scratch, "resources/")
 		})
+	}
+}
+
+// TestStubRenameNeverReplaces pins the test helper to renameAt's contract
+// (round-5 fix code I2): a stubbed rename onto an existing entry fails with
+// fs.ErrExist, even when the stub would let it through, and the entry there
+// is untouched.
+func TestStubRenameNeverReplaces(t *testing.T) {
+	tmp := t.TempDir()
+	writeTree(t, tmp, map[string]string{"a/x": "moving", "b/x": "there"})
+	stubRename(t, os.Rename)
+	from, err := os.OpenRoot(filepath.Join(tmp, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer from.Close()
+	to, err := os.OpenRoot(filepath.Join(tmp, "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer to.Close()
+	if err := renameAt(from, "x", to, "x"); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("rename onto an existing entry = %v, want fs.ErrExist", err)
+	}
+	assertTree(t, tmp, map[string]string{"a/x": "moving", "b/x": "there"})
+	if err := renameNoReplace(filepath.Join(tmp, "a", "x"), filepath.Join(tmp, "b", "x")); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("renameNoReplace onto an existing entry = %v, want fs.ErrExist", err)
 	}
 }
