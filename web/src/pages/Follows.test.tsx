@@ -629,6 +629,32 @@ function renderAdd() {
   return user
 }
 
+// Owner's ruling 2026-09-24, (s): the dialog says that adding starts the
+// lessons downloading, and it says it truly. Adding kicks a sync, but a
+// running one finishes first, and while syncing is paused the daemon drops
+// the kick: nothing starts until Resume.
+it.each([
+  [
+    false,
+    "Preview a node or instructor, then add it to your follows. Its lessons start downloading right away, or after the sync that's running.",
+  ],
+  [
+    true,
+    "Preview a node or instructor, then add it to your follows. Syncing is paused: its lessons start downloading when you Resume.",
+  ],
+])("the Add follow dialog says when the lessons start downloading (paused: %s)", async (paused, text) => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/summary`, () =>
+      HttpResponse.json({ follows: 0, lessons: {}, jobs: {}, paused }),
+    ),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await waitFor(() => expect(dialog).toHaveAccessibleDescription(text))
+})
+
 const previewOf = ({ request }: { request: Request }) => {
   const id = new URL(request.url).searchParams.get("id")
   return HttpResponse.json({ root_id: Number(id), title: `Node ${id}`, lesson_count: 9, kind: "node" })
@@ -1336,7 +1362,8 @@ it.each([
 
   await waitFor(() => expect(within(dialog).getByRole("alert")).toHaveTextContent(COACH))
   expect(sent).toEqual([link])
-  expect(within(dialog).queryByText(/lessons/)).not.toBeInTheDocument()
+  // No preview is shown (its region is always there, empty without one).
+  expect(within(dialog).getByRole("status")).toBeEmptyDOMElement()
   expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })
 

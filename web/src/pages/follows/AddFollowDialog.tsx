@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
 import { brandName, countOf } from "@/lib/format"
@@ -81,6 +81,10 @@ export function AddFollowDialog({
   returnFocus: () => FocusTarget[]
 }) {
   const qc = useQueryClient()
+  // The daemon's pause flag, from the top bar's query and read as it reads
+  // it. Only while open, so opening the dialog re-reads a stale flag.
+  const summary = useQuery({ queryKey: qk.summary, queryFn: api.summary, enabled: open })
+  const paused = summary.data?.paused ?? false
   const [kind, setKind] = React.useState<Kind>("node")
   const [id, setId] = React.useState("")
   const [slug, setSlug] = React.useState("")
@@ -200,8 +204,16 @@ export function AddFollowDialog({
       >
         <DialogHeader>
           <DialogTitle className="leading-snug">Add follow</DialogTitle>
+          {/* What adding does next (owner's ruling 2026-09-24, (s)), true in
+              every state. Adding asks the daemon for a sync now, but one
+              already running finishes first, and while syncing is paused
+              the daemon drops the request: nothing starts until Resume,
+              which asks again (internal/scheduler/daemon.go, Run). */}
           <DialogDescription>
-            Preview a node or instructor, then add it to your follows.
+            Preview a node or instructor, then add it to your follows.{" "}
+            {paused
+              ? "Syncing is paused: its lessons start downloading when you Resume."
+              : "Its lessons start downloading right away, or after the sync that's running."}
           </DialogDescription>
         </DialogHeader>
 
