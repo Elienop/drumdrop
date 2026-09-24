@@ -166,33 +166,35 @@ export function Follows() {
                     <TableCell className="text-muted-foreground">
                       {formatRelativeTime(f.last_synced_at)}
                     </TableCell>
-                    <TableCell className="text-right whitespace-nowrap">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Edit ${f.title}`}
-                        data-follow-edit={f.id}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openRowDialog(setEditing, f)
-                        }}
-                      >
-                        <Pencil />
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Remove ${f.title}`}
-                        data-follow-remove={f.id}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openRowDialog(setRemoving, f)
-                        }}
-                      >
-                        <Trash2 />
-                        Remove
-                      </Button>
+                    <TableCell>
+                      <div className="flex justify-end gap-3">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`Edit ${f.title}`}
+                          data-follow-edit={f.id}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openRowDialog(setEditing, f)
+                          }}
+                        >
+                          <Pencil />
+                          Edit
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`Remove ${f.title}`}
+                          data-follow-remove={f.id}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openRowDialog(setRemoving, f)
+                          }}
+                        >
+                          <Trash2 />
+                          Remove
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

@@ -228,7 +228,7 @@ function JobRow({
         <JobError error={job.error} />
       </TableCell>
       <TableCell className="text-right">
-        <div className="flex justify-end gap-2">
+        <div className="flex justify-end gap-3">
           <Button
             variant="outline"
             size="sm"

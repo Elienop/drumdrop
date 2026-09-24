@@ -168,7 +168,7 @@ function TokenCard() {
               onChange={(e) => setValue(e.target.value)}
             />
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <Button onClick={save} disabled={value.trim() === ""}>
               Save
             </Button>

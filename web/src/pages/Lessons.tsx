@@ -502,7 +502,7 @@ export function Lessons() {
           )}
 
           {tab === "all" && follow == null && (
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center justify-end gap-3">
               <Button
                 variant="outline"
                 size="sm"
