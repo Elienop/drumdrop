@@ -36,7 +36,8 @@ its own code: D120's unplugged-drive sentence was wrong, and D107 and D114–D11
 the round-5d reviews for round-5c findings. The round-5f pass (same day and branch) added
 D126–D128 and corrected D58, D101, D113, D120, D121 and D125 against its own code, and
 the round-5e security seat's probes. The round-5g pass (same day and branch) added
-D129–D131 and extended D101 and D113 against its own code and a Chromium probe._
+D129–D131 (D131 settled the same day by the refined ruling (t)) and extended D101 and
+D113 against its own code and a Chromium probe._
 
 ## Next up
 
@@ -1202,25 +1203,6 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `grep -n 'unskip.mutate\|download.mutate' web/src/pages/Lessons.tsx` ·
     `grep -n 'func (s \*Server) handleDownloadLesson\|func (s \*Server) handleUnskipLesson' internal/server/lessons.go`
 
-- **D131 · At 1024px the Lessons table still scrolls sideways.**
-  - *Context:* ruling (t) hides Brand and Quality below 1280px so that at 1024px the
-    table fits, nothing cut and no sideways scroll, with the note's 28rem minimum and
-    Title, Status, Size, Updated and ⋯ shown. Measured in Chromium after the change,
-    with short titles only and the page's 15px scrollbar counted: those five columns
-    need 772px (Title 464, the note's 448 plus padding; Status 105; Size 77; Updated
-    74; ⋯ 52), and a 1024px window leaves the table 687px. It scrolls sideways by 85px:
-    *Updated* is cut and ⋯ is out of view until you scroll (70px over without a
-    scrollbar gutter). The table stops scrolling from a 1109px window; before (t) it
-    needed 1243px. No note is cut at any width measured (1440, 1280, 1279, 1024, 900).
-  - *The question:* what gives way at 1024px. Measured there with short titles: hiding
-    Size as well leaves 8px over, Updated as well 11px over, both fits; a 22rem note
-    clamped to three lines fits, and every note on the page (the longest sentence the
-    server writes among them) fits in three lines; 16px card padding instead of 24px
-    doesn't fit (772px in 703px). A sidebar that collapses would free its 224px (not
-    measured).
-  - *Evidence:* `grep -n 'WIDE_ONLY' web/src/pages/Lessons.tsx` · `grep -n 'min-w-md' web/src/pages/Lessons.tsx`
-    · `grep -n 'w-56' web/src/components/app-shell/Sidebar.tsx`
-
 - **D96 · A lesson Musora returns with no video is recorded downloaded. Is that right?**
   - *Context:* `DownloadLesson` downloads a video only when the lesson has an HLS manifest,
     or a soundslice slug (a song). A lesson with neither gets its resources, poster and
@@ -1670,8 +1652,11 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       that still stamp without a change. (s) The Add follow dialog
       says that adding starts the lessons downloading right away (round-5d UI review,
       Info 2). (t) Below 1280px the Lessons table hides its Brand and Quality columns,
-      header and cells, and a row note keeps its 28rem, so that at 1024px the table
-      fits with nothing cut and no sideways scroll; it doesn't fit yet (D131). (u) A
+      header and cells, and a row note keeps 22rem and wraps to three lines (refined
+      the same day, after 28rem measured 85px too wide); from 1280px the note keeps
+      28rem and two lines, and the table is as it was. So at 1024px, with short titles,
+      the table fits with no note cut and no sideways scroll; a long title still scrolls
+      it (D131 has the measurements). (u) A
       pointer resting on a skipped lesson's *Download* that clicks just as the download
       starts presses *Cancel download*: recorded, not fixed (D129).
     - Corrected lines: `daemon --once` stops its download on `Ctrl-C` or SIGTERM (D95
@@ -1729,8 +1714,9 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       didn't stop React reusing the highlighted *Download* node as *Cancel download*.
       UI Low D is fixed by the note's 28rem minimum width, so a page of short titles no
       longer cuts it (`dbe6ace`), and then by (t): below 1280px the table hides Brand
-      and Quality (header and cells) to make room for that width; at 1024px the table
-      still scrolls sideways (D131). Round-5d Info 2 is fixed by the Add
+      and Quality (header and cells), and the note keeps 22rem on three lines instead,
+      so the table fits a 1024px window (`7a387e3` and the refinement after it; D131).
+      Round-5d Info 2 is fixed by the Add
       follow line (`2566e5f`), whose wording goes beyond (s) to stay true in every
       state: "Its lessons start downloading right away, or after the sync that's
       running.", and while syncing is paused, "Syncing is paused: its lessons start
@@ -1738,7 +1724,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       whose download starts still changes (its status), so it still moves to the top of
       All then; whether the page still jumps at that moment is for the browser pass. D125
       takes the security seat's empty-folder residual; D101 takes UI Low B; D126–D128 are
-      recorded, and D129–D131 after the web half.
+      recorded, and D129–D131 after the web half (D131 since settled).
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -1748,11 +1734,39 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'start downloading|starts downloading highlights|keeps its width|hides Brand and Quality'`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
-    the round-5d reviews; D126–D128, from the round-5e reviews; D129–D131, from the
+    the round-5d reviews; D126–D128, from the round-5e reviews; D129 and D130, from the
     round-5f web half and its rulings;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
+- **D131 · At 1024px the Lessons table scrolled sideways.** This branch
+  (`fix-library-delete-and-move`), PR number to follow. Settled by ruling (t), refined
+  by the owner on 2026-09-24.
+  - *Was:* ruling (t) hides Brand and Quality below 1280px so that at 1024px the table
+    fits, nothing cut and no sideways scroll, with Title and note, Status, Size, Updated
+    and ⋯ shown. With the note's 28rem minimum it didn't. Measured in Chromium, short
+    titles only, the page's 15px scrollbar counted: those five columns needed 772px
+    (Title 464, the note's 448 plus padding; Status 105; Size 77; Updated 74; ⋯ 52),
+    and a 1024px window leaves the table 687px. It scrolled sideways by 85px: *Updated*
+    was cut and ⋯ was out of view until you scrolled (70px over without a scrollbar
+    gutter). It stopped scrolling from a 1109px window; before (t), from 1243px. The
+    options measured at 1024px: hiding Size as well left 8px over, Updated as well 11px
+    over, both fit; a 22rem note on three lines fit; 16px card padding instead of 24px
+    didn't (772px in 703px); a collapsing sidebar wasn't measured.
+  - *Now:* the owner chose the 22rem note. Below 1280px a row note keeps 22rem and
+    wraps to three lines; from 1280px it keeps 28rem and two lines. Measured the same
+    way at 1440, 1280, 1279, 1100, 1024 and 900px with short, mixed and one long title:
+    at 1440 and 1280 every header's position and width, and the first rows' heights,
+    match the build before (7a387e3, itself identical there to dbe6ace). With short
+    titles the table fits from a 1013px window: at 1024px the note is 363px wide, on
+    two or three lines, and the table takes its 687px exactly, every ⋯ in view. At
+    900px it scrolls sideways by 113px, the note at its 352px minimum. No note is
+    clamped at any width measured; the longest sentence the server writes takes three
+    lines at 352px. One long title (91 characters) still scrolls the table, as before:
+    935px of table at 1100, 1024 and 900px, 1070px in 943px at 1280px; it fits at
+    1279px, where Brand and Quality go, and at 1440px.
+  - *Evidence:* `grep -n 'WIDE_ONLY\|min-w-88' web/src/pages/Lessons.tsx` ·
+    `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'keeps its width|hides Brand and Quality'`
 - **D78 · A Skip was undone by a queued or running download.** This branch
   (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* Skip only set the lesson's status, so its queued job was claimed and downloaded
