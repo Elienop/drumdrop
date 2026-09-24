@@ -224,6 +224,14 @@ func TestRecordedFilesPresent(t *testing.T) {
 	seedSeason(t, season, "Show - s01e01 - A.mp4", "Show - s01e01 - A.nfo")
 	folder := filepath.Join(tmp, "dl", "Show", "01 - A")
 	writeTree(t, folder, map[string]string{"01 - A.nfo": "nfo"})
+	// A resources folder is recorded as one entry; a dangling symlink sits at
+	// a recorded name (security round 5d I2).
+	if err := os.Mkdir(filepath.Join(season, "Show - s01e01 - A resources"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(tmp, "nothing"), filepath.Join(season, "Show - s01e01 - A-poster.jpg")); err != nil {
+		t.Fatal(err)
+	}
 	str := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
 	entries := func(names ...string) sql.NullString { return database.EncodeLibraryEntries(recordOf(season, names...)) }
 
@@ -239,6 +247,8 @@ func TestRecordedFilesPresent(t *testing.T) {
 		{"the video decides, not the entries", database.Lesson{OutputDir: str(season), VideoPath: str(filepath.Join(season, "gone.mp4")), LibraryEntries: entries("Show - s01e01 - A.nfo")}, lib, false},
 		{"every entry, no video", database.Lesson{OutputDir: str(season), VideoPath: str(""), LibraryEntries: entries("Show - s01e01 - A.mp4", "Show - s01e01 - A.nfo")}, lib, true},
 		{"an entry gone", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A.en.vtt")}, lib, false},
+		{"a recorded folder entry", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A resources")}, lib, true},
+		{"an entry a dangling symlink", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo", "Show - s01e01 - A-poster.jpg")}, lib, false},
 		{"entries with no library folder", database.Lesson{OutputDir: str(season), LibraryEntries: entries("Show - s01e01 - A.nfo")}, "", false},
 		{"a damaged record", database.Lesson{OutputDir: str(season), LibraryEntries: str("not json")}, lib, false},
 		{"its folder, no video", database.Lesson{OutputDir: str(folder)}, lib, true},

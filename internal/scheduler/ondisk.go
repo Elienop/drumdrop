@@ -37,7 +37,12 @@ func (w *Worker) filesOnDisk(ctx context.Context, id int) bool {
 //     the lesson a failure;
 //   - otherwise (no video: resources only, or a video-less song) every entry
 //     its library record names, under the library folder; a record with no
-//     library folder configured can not be found;
+//     library folder configured can not be found. An entry counts when it is
+//     a regular file or a folder, read through a symlink as the video is: a
+//     placement puts only those two there, and a recorded "<base> resources"
+//     is a folder. The record names entries, not their kinds, so a folder at
+//     a file's name counts too: telling them apart would mean guessing from
+//     the name, which the record exists to avoid (owner ruling #66);
 //   - otherwise its folder (output_dir): a default-layout lesson's own
 //     folder, or a legacy plex-tv row's season folder.
 //
@@ -58,7 +63,8 @@ func (w *Worker) recordedFilesPresent(l database.Lesson) bool {
 			return false
 		}
 		for _, e := range entries {
-			if _, err := os.Lstat(library.Resolve(w.Cfg.LibraryDir, e)); err != nil {
+			info, err := os.Stat(library.Resolve(w.Cfg.LibraryDir, e))
+			if err != nil || (!info.Mode().IsRegular() && !info.IsDir()) {
 				return false
 			}
 		}
