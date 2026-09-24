@@ -98,9 +98,14 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 // A placement in the library that is refused (another lesson owns the
 // destination, say) or fails is undone, and the lesson is placed in the
 // downloads folder instead, as drumdrop always kept a lesson it could not
-// move. A move error is logged, never fatal; an error returned means the
-// download could not be placed anywhere, and nothing outside its private
-// folder was changed.
+// move. That fallback still writes to the library when the lesson's row
+// records a previous folder there: it sets that folder aside in
+// <library>/.drumdrop-in-progress, to replace it. So a library drumdrop can't
+// write to (read-only, say) fails the fallback too, and every attempt with it
+// (security I1); so can a previous folder on another filesystem from that
+// area. The earlier library copy is then left as it was. A move error is
+// logged, never fatal; an error returned means the download could not be
+// placed anywhere, and nothing outside its private folder was changed.
 func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, index int, outDir string, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
 	id := job.RailcontentID
 	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(outDir, index, lesson.Title))

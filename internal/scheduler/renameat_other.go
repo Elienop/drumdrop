@@ -12,6 +12,11 @@ import (
 // (Windows). The move checked both folders through os.Root first, but a folder
 // swapped for a symlink or junction between that check and this rename is
 // followed, and an entry already at dst is replaced. The README says so.
+//
+// That is worse for a set-aside (asideArea) than for a placement: a lesson
+// folder swapped for a junction there moves an entry OUTSIDE the library into
+// the set-aside area, and once the download is recorded the commit deletes
+// that area, so the outside entry is deleted (security L2, BACKLOG D72).
 func renameat(from *os.Root, src string, to *os.Root, dst string) error {
 	return os.Rename(filepath.Join(from.Name(), src), filepath.Join(to.Name(), dst))
 }
