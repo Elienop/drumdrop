@@ -223,12 +223,12 @@ func TestWorkerStoppedReDownloadKeepsTheEarlierDownload(t *testing.T) {
 }
 
 // TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack (D79) proves a
-// Skip, a delete (either intent) or a record that fails, landing once the
-// finished download is being placed, leaves nothing of the download and puts
-// back every entry the placement set aside: the lesson's earlier download (in
-// plex-tv under an older title, so its names differ from the placed ones),
-// or, where no row records the lesson folder, an entry at a placed name no
-// lesson records. The one exception is a delete of the lesson's files: the
+// Skip, a delete (either intent), a record that fails, or one refused because
+// another process requeued the job, landing once the finished download is
+// being placed, leaves nothing of the download and puts back every entry the
+// placement set aside: the lesson's earlier download (in plex-tv under an
+// older title, so its names differ from the placed ones), or, where no row
+// records the lesson folder, an entry at a placed name no lesson records. The one exception is a delete of the lesson's files: the
 // lesson's own earlier entries the placement set aside are what it deletes,
 // so they are not put back (the rest still is). A subfolder the placement
 // merged into (the default layout's resources/, where the download's new.pdf
@@ -240,7 +240,7 @@ func TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T) {
 				continue
 			}
 			for _, recorded := range []bool{true, false} {
-				for _, stop := range []string{"skip", "keep", "delete", "unrecorded"} {
+				for _, stop := range []string{"skip", "keep", "delete", "unrecorded", "requeued"} {
 					t.Run(fmt.Sprintf("%s/layout=%s/recorded=%v/%s", setup, layout, recorded, stop), func(t *testing.T) {
 						w, store, _ := setupWorker(t, setup, layout)
 						w.Cfg.MaxAttempts = 1
@@ -261,6 +261,10 @@ func TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T) {
 								store.gone[1] = true
 							case "unrecorded":
 								store.finishErr = errors.New("disk I/O error")
+							case "requeued":
+								// Another process requeued the job: it runs again, and
+								// this placement must not stand.
+								store.finishErr = fmt.Errorf("job 1 is queued: %w", database.ErrDownloadCanceled)
 							}
 						}
 						if _, err := w.RunOnce(context.Background(), 0); err != nil {
