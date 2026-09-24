@@ -136,9 +136,11 @@ func TestDownloadOneShotInterruptedAfterDownloadIsNotPlaced(t *testing.T) {
 }
 
 // A finished download replaces the entries at the names it produced (the
-// video, the nfo, the resources folder) and keeps every other entry of the
-// lesson's folder: the owner's own file, a subtitle and a play-along folder
-// this download did not produce.
+// video, the nfo) and keeps every other entry of the lesson's folder: the
+// owner's own file, a subtitle and a play-along folder this download did not
+// produce. The resources folder it produced again is merged into the one
+// there (owner ruling 2026-09-24): its new.pdf is added, and the earlier
+// old.pdf, which this download did not produce, stays.
 func TestDownloadOneShotReplacesOnlyItsOwnNames(t *testing.T) {
 	root := t.TempDir()
 	dir := seedOneShot(t, root)
@@ -151,11 +153,11 @@ func TestDownloadOneShotReplacesOnlyItsOwnNames(t *testing.T) {
 	assertFile(t, filepath.Join(dir, "05 - Lesson A.mp4"), "new mp4")
 	assertFile(t, filepath.Join(dir, "05 - Lesson A.nfo"), "new nfo")
 	assertFile(t, filepath.Join(dir, "resources", "new.pdf"), "new pdf")
-	assertExist(t, false, filepath.Join(dir, "resources", "old.pdf"))
+	assertFile(t, filepath.Join(dir, "resources", "old.pdf"), "old pdf")
 	assertFile(t, filepath.Join(dir, "my practice notes"), "mine")
 	assertFile(t, filepath.Join(dir, "05 - Lesson A.srt"), "old subs")
 	assertFile(t, filepath.Join(dir, "play-along", "old.mp3"), "old mp3")
-	want := paths(dir, "05 - Lesson A.mp4", "05 - Lesson A.nfo", "resources")
+	want := paths(dir, "05 - Lesson A.mp4", "05 - Lesson A.nfo")
 	if !slices.Equal(sorted(replaced), sorted(want)) {
 		t.Errorf("replaced = %q, want %q", replaced, want)
 	}

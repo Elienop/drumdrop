@@ -291,13 +291,15 @@ func TestPlexTVMoveRefusesAnEntryAnotherLessonOwns(t *testing.T) {
 // TestPlexTVMoveReplacesAnEntryNoLessonClaims proves an entry at one of the
 // episode's own names that no lesson records (left by a follow deleted with its
 // files kept) is replaced, and said so (the commit returns it, not the
-// lesson's own, for the worker's log), instead of blocking the move forever or
-// being merged into.
+// lesson's own, for the worker's log), instead of blocking the move forever. A
+// folder there at the name of a folder the move places is merged, by the same
+// rule (owner ruling 2026-09-24): only its file at a name placed is replaced.
 func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
 	seedSeason(t, season, episodeBase+".nfo", episodeBase+" resources/")
+	writeTree(t, filepath.Join(season, episodeBase+" resources"), map[string]string{"song.pdf": "old song"})
 
 	c, err := library.NewClaims(lib, nil)
 	if err != nil {
@@ -323,11 +325,13 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 		}
 		got = append(got, e.path)
 	}
-	if want := paths(season, episodeBase+" resources", episodeBase+".nfo"); !reflect.DeepEqual(sorted(got), sorted(want)) {
+	if want := paths(season, filepath.Join(episodeBase+" resources", "song.pdf"), episodeBase+".nfo"); !reflect.DeepEqual(sorted(got), sorted(want)) {
 		t.Errorf("replaced %q, want %q", got, want)
 	}
-	assertExist(t, false, filepath.Join(season, episodeBase+" resources", "f.pdf"))
-	assertExist(t, true, filepath.Join(season, episodeBase+" resources", "song.pdf"))
+	assertTree(t, filepath.Join(season, episodeBase+" resources"), map[string]string{
+		"f.pdf":    episodeBase + " resources",
+		"song.pdf": filepath.Join("resources", "song.pdf"),
+	})
 	if got, _ := os.ReadFile(filepath.Join(season, episodeBase+".nfo")); !strings.Contains(string(got), "05 - Even Flow.nfo") {
 		t.Errorf("nfo = %q, want the new download's", got)
 	}
@@ -340,8 +344,10 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 func TestPlexTVMoveStopsWhenThePreviousDownloadCannotBeCleared(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
-	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
-	stale := episodeBase + " resources"
+	lessonDir, _, season := seedSongScratch(t, tmp)
+	// Under an older title: at one of this episode's names, a folder of the
+	// lesson's own would be merged, not set aside.
+	stale := "Songs - s01e05 - Old Title resources"
 	seedSeason(t, season, stale+"/", "Songs - s01e06 - Six.mp4")
 	makeUndeletable(t, filepath.Join(season, stale))
 
@@ -354,7 +360,7 @@ func TestPlexTVMoveStopsWhenThePreviousDownloadCannotBeCleared(t *testing.T) {
 		t.Errorf("result %+v, want nothing placed and the stale entry still owned", res)
 	}
 	assertScratchWhole(t, lessonDir)
-	assertNoEpisodeIn(t, season, "Songs - s01e05 - Even Flow resources", "Songs - s01e06 - Six.mp4")
+	assertNoEpisodeIn(t, season, stale, "Songs - s01e06 - Six.mp4")
 }
 
 // TestMoveToLibraryPlexTVFolderCopyFailsPartWayIsRemoved covers the folder

@@ -107,8 +107,11 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 //  2. It sets the lesson's previous download aside (its recorded entries, or
 //     a legacy row's name-matched ones that no other lesson claims), even
 //     under an old title, so a re-download replaces instead of merging.
-//  3. It sets aside an existing entry at one of its names that no lesson
-//     claims (a leftover drumdrop no longer tracks) (owner ruling #66).
+//  3. It sets aside an existing entry at one of its names, the lesson's own
+//     or one no lesson claims (a leftover drumdrop no longer tracks) (owner
+//     ruling #66), except a real folder at the name of a folder it places:
+//     the two are merged, entry by entry, by the same rule (clearNames), so
+//     what that folder holds at other names stays (owner ruling 2026-09-24).
 //  4. It places each entry (rename, or copy across filesystems), and flushes
 //     copies to disk.
 //
@@ -168,19 +171,32 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	}
 
 	aside := newAsideArea(lib.jobID)
+	var merged []placedLevel
 	fail := func(err error, stuck []string) (plexMoveResult, error) {
+		_, uerr := undoLevels(merged)
 		seasonRoot.Close()
 		_, rerr := aside.restore(false)
 		ferr := aside.finish(rerr != nil)
 		res := refused
 		res.kept = append(append([]string(nil), refused.kept...), stuck...)
 		res.known = refused.known || len(stuck) > 0
-		return res, errors.Join(append([]error{err, rerr, ferr}, notes...)...)
+		return res, errors.Join(append([]error{err, uerr, rerr, ferr}, notes...)...)
 	}
 
 	// 2. The previous download is set aside first, so an undone move puts it
-	// back as it was.
+	// back as it was. An entry of it at one of this episode's names is left to
+	// step 3, which merges a real folder there with the folder placed at its
+	// name, so what it holds that the download does not replace stays.
+	placing := make(map[string]bool, len(plan.steps))
+	for _, st := range plan.steps {
+		placing[st.dst] = true
+	}
+	ours := make(map[string]bool, len(previous.Remove))
 	for _, p := range previous.Remove {
+		ours[p] = true
+		if placing[p] {
+			continue
+		}
 		if err := aside.setAsidePath(libraryDir, p, true); err != nil {
 			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
 		}
@@ -194,16 +210,12 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		}
 	}
 
-	// 3. A leftover no lesson claims at one of this episode's names (step 1
-	// refused every claimed one).
-	for _, st := range plan.steps {
-		name := filepath.Base(st.dst)
-		if _, err := seasonRoot.Lstat(name); err != nil {
-			continue
-		}
-		if err := aside.setAside(libraryDir, seasonRoot, name, false); err != nil {
-			return fail(fmt.Errorf("an entry no lesson records is in the way at %q: %w", st.dst, err), nil)
-		}
+	// 3. What is at one of this episode's names, the lesson's own or a
+	// leftover no lesson claims (step 1 refused every claimed one), is set
+	// aside, except a real folder at a folder's name: the two are merged.
+	steps, err := clearNames(libraryDir, seasonRoot, src.dir, plan.steps, func(dst string) bool { return ours[dst] }, aside, &merged)
+	if err != nil {
+		return fail(fmt.Errorf("an entry at one of this episode's names could not be set aside or merged: %w", err), nil)
 	}
 
 	if lib.episodeNFO != nil {
@@ -213,7 +225,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	}
 
 	// 4. Place every entry, or none.
-	placed, stuck, err := placeSteps(seasonRoot, src.dir, plan.steps)
+	placed, stuck, err := placeSteps(seasonRoot, src.dir, steps)
 	if err != nil {
 		return fail(err, stuck)
 	}
@@ -222,7 +234,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	for _, st := range plan.steps {
 		res.placed = append(res.placed, st.dst)
 	}
-	res.pending = &placement{dir: seasonDir, placed: res.placed, dest: seasonRoot, src: src.dir, steps: placed, aside: aside}
+	res.pending = &placement{dir: seasonDir, placed: res.placed, dest: seasonRoot, src: src.dir, steps: placed, merged: merged, aside: aside}
 	return res, errors.Join(notes...)
 }
 

@@ -29,6 +29,9 @@ type placement struct {
 	dest   *os.Root
 	src    *os.Root
 	steps  []placedStep
+	// merged are the subfolders placed entry by entry into a folder already
+	// at their name (mergeFolder), in the order they were placed.
+	merged []placedLevel
 	aside  *asideArea
 	// created is the lesson folder the placement made, if it made one.
 	created *createdDir
@@ -40,6 +43,7 @@ func (p *placement) commit() (replaced []asideEntry, err error) {
 	replaced = append(replaced, p.aside.entries...)
 	err = p.aside.finish(false)
 	p.dest.Close()
+	closeLevels(p.merged)
 	p.created.keep()
 	return replaced, err
 }
@@ -52,11 +56,105 @@ func (p *placement) commit() (replaced []asideEntry, err error) {
 // put back.
 func (p *placement) undo(dropOwn bool) (stuck []string, err error) {
 	stuck, uerr := undoSteps(p.dest, p.src, p.steps)
+	mstuck, merr := undoLevels(p.merged)
 	p.dest.Close()
 	p.created.remove()
 	kept, rerr := p.aside.restore(dropOwn)
 	ferr := p.aside.finish(len(kept) > 0)
-	return append(stuck, kept...), errors.Join(uerr, rerr, ferr)
+	return append(append(stuck, mstuck...), kept...), errors.Join(uerr, merr, rerr, ferr)
+}
+
+// placedLevel is a subfolder of the download placed entry by entry into a
+// real folder already at its name (mergeFolder): its entries of src placed in
+// dest. It holds both folders open.
+type placedLevel struct {
+	dest, src *os.Root
+	steps     []placedStep
+}
+
+// undoLevels takes every merged level's placed entries back, newest level
+// first (undoSteps), and releases the levels. It returns what could not be
+// taken back.
+func undoLevels(levels []placedLevel) (stuck []string, err error) {
+	var errs []error
+	for i := len(levels) - 1; i >= 0; i-- {
+		s, uerr := undoSteps(levels[i].dest, levels[i].src, levels[i].steps)
+		stuck = append(stuck, s...)
+		errs = append(errs, uerr)
+	}
+	closeLevels(levels)
+	return stuck, errors.Join(errs...)
+}
+
+// closeLevels releases every merged level's folders.
+func closeLevels(levels []placedLevel) {
+	for _, l := range levels {
+		l.dest.Close()
+		l.src.Close()
+	}
+}
+
+// clearNames readies dest for steps, entries of src: an entry already at a
+// step's name is set aside under root (the lesson's own when own says so for
+// that destination), as it is replaced (owner ruling #66). A real folder
+// where a folder is placed is not: the two are merged (mergeFolder), the same
+// rule one level down, so what that folder holds at other names stays (owner
+// ruling 2026-09-24). It returns the steps still to place in dest; each merged
+// one is placed already, and appended to levels.
+func clearNames(root string, dest, src *os.Root, steps []plexMoveStep, own func(dst string) bool, aside *asideArea, levels *[]placedLevel) ([]plexMoveStep, error) {
+	var rest []plexMoveStep
+	for _, st := range steps {
+		name := filepath.Base(st.dst)
+		info, lerr := dest.Lstat(name)
+		switch {
+		case lerr != nil:
+		case st.dir && info.IsDir():
+			if err := mergeFolder(root, dest, src, st, own(st.dst), aside, levels); err != nil {
+				return nil, err
+			}
+			continue
+		default:
+			if err := aside.setAside(root, dest, name, own(st.dst)); err != nil {
+				return nil, err
+			}
+		}
+		rest = append(rest, st)
+	}
+	return rest, nil
+}
+
+// mergeFolder places the folder st of src into the real folder already at its
+// destination in dest, entry by entry: clearNames, then placeSteps, in the
+// two folders held open. On success the level is appended to levels (a
+// commit or an undo releases it); on a failure what it placed is taken back.
+func mergeFolder(root string, dest, src *os.Root, st plexMoveStep, own bool, aside *asideArea, levels *[]placedLevel) error {
+	d, err := openRealDir(dest, filepath.Base(st.dst))
+	if err != nil {
+		return err
+	}
+	s, err := openRealDir(src, st.name)
+	if err != nil {
+		d.Close()
+		return err
+	}
+	steps, err := lessonSteps(s, d.Name())
+	if err == nil {
+		steps, err = clearNames(root, d, s, steps, func(string) bool { return own }, aside, levels)
+	}
+	var placed []placedStep
+	if err == nil {
+		var stuck []string
+		if placed, stuck, err = placeSteps(d, s, steps); err != nil {
+			err = errors.Join(err, stuckErr(stuck))
+		}
+	}
+	if err != nil {
+		d.Close()
+		s.Close()
+		return err
+	}
+	*levels = append(*levels, placedLevel{dest: d, src: s, steps: placed})
+	return nil
 }
 
 // createdDir is a folder a placement made (the lesson's folder), in its
@@ -142,12 +240,15 @@ func lessonSteps(src *os.Root, dstDir string) ([]plexMoveStep, error) {
 // What is already in the lesson's folder stays, except an entry at one of the
 // names being placed: that is the lesson's own earlier file (the folder is
 // the lesson's by record) or one no lesson records, and it is replaced (owner
-// ruling #66). A folder another lesson records anything in refuses the whole
-// placement. The lesson's previous folder, when its row records another one
-// (the title changed, the library was added, or the download was kept in
-// downloads when a move was refused), is replaced too, unless another lesson
-// records something in it. A replaced entry is only set aside (asideArea)
-// until the placement is committed.
+// ruling #66). A real folder at the name of a folder being placed (resources/,
+// say) is not replaced whole: the two are merged by the same rule, at every
+// depth, so a file in it that the download did not produce again stays (owner
+// ruling 2026-09-24; see clearNames). A folder another lesson records
+// anything in refuses the whole placement. The lesson's previous folder, when
+// its row records another one (the title changed, the library was added, or
+// the download was kept in downloads when a move was refused), is replaced
+// whole, unless another lesson records something in it. A replaced entry is
+// only set aside (asideArea) until the placement is committed.
 //
 // Everything goes through folders held open (os.Root) and renameAt, which
 // never replaces; a copy happens only across filesystems (EXDEV). It writes
@@ -178,8 +279,12 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 	var (
 		dest    *os.Root
 		created *createdDir
+		merged  []placedLevel
 	)
 	fail := func(err error) (*placement, error) {
+		if _, uerr := undoLevels(merged); uerr != nil {
+			err = errors.Join(err, uerr)
+		}
 		if dest != nil {
 			dest.Close()
 		}
@@ -226,13 +331,9 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 	if err != nil {
 		return fail(err)
 	}
-	for _, st := range steps {
-		if _, lerr := dest.Lstat(st.name); lerr != nil {
-			continue
-		}
-		if err := aside.setAside(root, dest, st.name, own); err != nil {
-			return fail(err)
-		}
+	steps, err = clearNames(root, dest, src.dir, steps, func(string) bool { return own }, aside, &merged)
+	if err != nil {
+		return fail(err)
 	}
 	placed, stuck, err := placeSteps(dest, src.dir, steps)
 	if err != nil {
@@ -249,7 +350,7 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 			return fail(errors.Join(fmt.Errorf("flush %q after the copy: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
 		}
 	}
-	p := &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, aside: aside, created: created}
+	p := &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, merged: merged, aside: aside, created: created}
 	for _, st := range placed {
 		p.placed = append(p.placed, st.dst)
 	}

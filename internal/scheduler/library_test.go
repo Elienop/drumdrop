@@ -543,13 +543,15 @@ func forceCopyFallback(t *testing.T) {
 	stubRename(t, func(oldpath, newpath string) error { return errInjectedRename })
 }
 
-// forceCopyFallbackInto makes every rename into root fail, as across two
-// filesystems, and lets every other rename through: a library on another
-// filesystem than the downloads folder, where the private folders are.
+// forceCopyFallbackInto makes every rename into root from outside it fail,
+// as across two filesystems, and lets every other rename through: a library
+// on another filesystem than the downloads folder, where the private folders
+// are. A rename within root (setting an entry aside in root's private folder,
+// or putting it back) stays on one filesystem, so it goes through.
 func forceCopyFallbackInto(t *testing.T, root string) {
 	t.Helper()
 	stubRename(t, func(oldpath, newpath string) error {
-		if library.Inside(root, newpath) {
+		if library.Inside(root, newpath) && !library.Inside(root, oldpath) {
 			return errInjectedRename
 		}
 		return os.Rename(oldpath, newpath)
