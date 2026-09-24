@@ -585,6 +585,25 @@ describe("a click in a follow's actions never opens its lessons", () => {
     expect(await screen.findByText("At /lessons?follow=1")).toBeInTheDocument()
   })
 
+  // UI review round 5d, Low 2: where a click does nothing, the cursor must not
+  // promise one. The row's hand cursor is inherited, so the actions cell
+  // resets it; the other cells keep the hand, and the buttons set no cursor of
+  // their own (they keep the browser's). jsdom loads no CSS, so this pins the
+  // classes; the Orca pass checks the rendered cursor.
+  it("the actions cell drops the row's hand cursor; the other cells keep it", async () => {
+    renderRoutes()
+    const cell = (await edit()).closest("td")!
+    const row = cell.closest("tr")!
+    expect(row).toHaveClass("cursor-pointer")
+    expect(cell).toHaveClass("cursor-default")
+    for (const other of within(row).getAllByRole("cell")) {
+      if (other !== cell) expect(other.className).not.toMatch(/\bcursor-/)
+    }
+    for (const name of ["Edit Stick Control", "Remove Stick Control"]) {
+      expect(screen.getByRole("button", { name }).className).not.toMatch(/\bcursor-/)
+    }
+  })
+
   it.each([
     ["Edit", "Edit Stick Control", "dialog"],
     ["Remove", "Remove Stick Control", "alertdialog"],

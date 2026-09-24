@@ -169,8 +169,11 @@ export function Follows() {
                     {/* The whole actions cell stops the row's click, not only
                         the buttons: the 12px between Edit and Remove, and the
                         cell's padding around them, are a slightly missed
-                        press, and must not open the follow's lessons. */}
-                    <TableCell onClick={(e) => e.stopPropagation()}>
+                        press, and must not open the follow's lessons.
+                        cursor-default: the row's hand cursor would otherwise
+                        show there, where a click does nothing. The buttons
+                        keep their own cursor. */}
+                    <TableCell className="cursor-default" onClick={(e) => e.stopPropagation()}>
                       <div className="flex justify-end gap-3">
                         <Button
                           variant="ghost"
