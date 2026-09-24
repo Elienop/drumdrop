@@ -301,9 +301,12 @@ export function AddFollowDialog({
                   ends the count line, as the count is of that brand's
                   lessons: a pianote link with Brand empty reads "… lessons on
                   Pianote".
-                  The {" "} between the parts is for the live region: a
-                  screen reader joins its text, and without them it reads
-                  "Falk@jared-falk40". Blank text between flex items is not
+                  The {" "} between the parts: without them the region's
+                  textContent runs them together ("Falk@jared-falk40").
+                  Chrome's accessibility tree keeps each flex item's text
+                  apart either way (checked, round 5b); the spaces stay for
+                  other browsers and screen readers, which may read the
+                  joined text. Blank text between flex items is not
                   rendered, so nothing moves on screen. */}
               <div className="flex flex-wrap items-baseline gap-x-2">
                 <span className="font-medium">{shown.data.title}</span>{" "}

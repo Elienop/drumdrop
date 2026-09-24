@@ -1066,8 +1066,9 @@ it("the preview lands in a status region that is always there, so a screen reade
 
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
   await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "Jared Falk{Enter}")
-  // Read as a screen reader joins it: with a space between the parts, not
-  // "Falk@jared-falk40".
+  // textContent keeps a space between the parts, not "Falk@jared-falk40".
+  // Chrome's accessibility tree keeps them apart even without the spaces;
+  // they are for other browsers, which may read the joined text.
   await waitFor(() =>
     expect(status).toHaveTextContent(/^Jared Falk @jared-falk 40 lessons on Drumeo$/),
   )
