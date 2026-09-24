@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,6 +284,55 @@ func TestWorkerStopDuringAMergePutsTheSubfolderBack(t *testing.T) {
 					assertExist(t, false, filepath.Join(root, privateRootName, replacedFolderName(1)))
 				}
 			})
+		})
+	}
+}
+
+// TestPlacementThatFailsAfterAMergeTakesItBack (owner ruling 2026-09-24)
+// proves a placement that fails after it merged a subfolder (here the nfo's
+// rename is refused, and resources/ sorts after it but is merged first, while
+// the names are cleared) takes the merged entries back into the downloaded
+// folder and puts the replaced ones back, in both layouts: the subfolder holds
+// exactly its earlier files, and the download is whole in its folder.
+func TestPlacementThatFailsAfterAMergeTakesItBack(t *testing.T) {
+	for _, layout := range []string{"", LayoutPlexTV} {
+		t.Run("layout="+layout, func(t *testing.T) {
+			tmp := t.TempDir()
+			dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+			scratch := filepath.Join(dl, "Course", "05 - Five")
+			download := map[string]string{"05 - Five.mp4": "new mp4", "05 - Five.nfo": "new nfo", "resources/a.pdf": "new a", "resources/deep/x.pdf": "new x"}
+			writeTree(t, scratch, download)
+			var sub string
+			if layout == LayoutPlexTV {
+				sub = filepath.Join(lib, "Show", "Season 01", "Show - s01e05 - Five resources")
+			} else {
+				sub = filepath.Join(lib, "Course", "05 - Five", "resources")
+			}
+			writeTree(t, sub, earlierResources)
+			stubRename(t, func(oldpath, newpath string) error {
+				if filepath.Ext(newpath) == ".nfo" {
+					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
+				}
+				return os.Rename(oldpath, newpath)
+			})
+
+			var err error
+			if layout == LayoutPlexTV {
+				var res plexMoveResult
+				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
+				if res.seasonDir != "" {
+					t.Errorf("move placed the lesson in %q, want a failure", res.seasonDir)
+				}
+			} else {
+				_, err = testPlace(t, dl, lib, scratch, database.Lesson{})
+			}
+			if err == nil {
+				t.Fatal("the placement succeeded, want the refused rename's failure")
+			}
+			assertTree(t, sub, earlierResources)
+			assertTree(t, scratch, download)
+			assertExist(t, false, filepath.Join(lib, privateRootName, replacedFolderName(7)), filepath.Join(lib, privateRootName, replacedFolderName(0)))
 		})
 	}
 }
