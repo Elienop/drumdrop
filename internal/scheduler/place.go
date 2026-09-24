@@ -309,12 +309,15 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 		return nil, errors.Join(err, aside.finish(false))
 	}
 	var kept []keptFolder
-	if prev, ok := previousFolder(self, dstDir, claims, roots); ok {
-		tree, err := readDownloadTree(src.dir)
-		if err != nil {
-			return fail(err)
+	if prev, why, ok := previousFolder(self, dstDir, claims, roots); ok {
+		if why == "" {
+			tree, err := readDownloadTree(src.dir)
+			if err != nil {
+				return fail(err)
+			}
+			why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false)
 		}
-		if why := tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false); why != "" {
+		if why != "" {
 			kept = append(kept, keptFolder{path: prev.path, why: why})
 		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
 			return fail(fmt.Errorf("refusing to place the lesson: %w", err))
@@ -386,19 +389,22 @@ type heldPath struct{ root, path string }
 
 // previousFolder is the lesson's previous folder in the default layout, which
 // a placement at dstDir replaces if the download brings back everything in it
-// (previousStays): the folder its row records, when that is
-// a lesson folder (not a season folder), not dstDir, not holding or held by
-// dstDir, inside one of roots, and holding nothing another lesson records.
-func previousFolder(self database.Lesson, dstDir string, claims *library.Claims, roots []string) (heldPath, bool) {
+// (previousStays): the folder its row records, when that is a lesson folder
+// (not a season folder), not dstDir, and not holding or held by dstDir; ok is
+// false when there is none. It is never touched, and why says so (the caller
+// reports it like any previous folder that stays), when another lesson
+// records something in it, or when it is inside none of roots (the library or
+// the downloads folder moved, say).
+func previousFolder(self database.Lesson, dstDir string, claims *library.Claims, roots []string) (h heldPath, why string, ok bool) {
 	if !self.OutputDir.Valid || self.OutputDir.String == "" {
-		return heldPath{}, false
+		return heldPath{}, "", false
 	}
 	prev := filepath.Clean(self.OutputDir.String)
 	if !library.IsLessonFolder(prev) || library.IsSeasonDir(prev) || library.Inside(prev, dstDir) || library.Inside(dstDir, prev) || sameDir(prev, dstDir) {
-		return heldPath{}, false
+		return heldPath{}, "", false
 	}
-	if len(claims.Holds(prev, self.RailcontentID)) > 0 {
-		return heldPath{}, false
+	if ids := claims.Holds(prev, self.RailcontentID); len(ids) > 0 {
+		return heldPath{path: prev}, fmt.Sprintf("lessons %v record files in it", ids), true
 	}
 	best := ""
 	for _, r := range roots {
@@ -407,7 +413,7 @@ func previousFolder(self database.Lesson, dstDir string, claims *library.Claims,
 		}
 	}
 	if best == "" {
-		return heldPath{}, false
+		return heldPath{path: prev}, "it is inside neither the downloads folder nor the library", true
 	}
-	return heldPath{root: best, path: prev}, true
+	return heldPath{root: best, path: prev}, "", true
 }

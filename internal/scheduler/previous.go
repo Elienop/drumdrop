@@ -9,13 +9,18 @@ import (
 	"strings"
 )
 
-// The lesson's previous download at a DIFFERENT place from the new one (the
-// title changed, a library was added after it was downloaded, the layout
-// changed) is removed only when the new download brings back every file in it,
-// at the corresponding path in the new lesson folder. Otherwise it stays where
-// it is, untouched and no longer recorded, and the log names it and says why
-// (owner ruling 2026-09-24 (e)). A file the owner added there, or a resource
-// the re-download failed to fetch again, is never lost to a rename.
+// A FOLDER of the lesson's previous download at a DIFFERENT place from the new
+// one (the title changed, a library was added after it was downloaded, the
+// layout changed) is removed only when the new download brings back every file
+// in it, at the corresponding path in the new lesson folder. Otherwise it stays
+// where it is, untouched and no longer recorded, and the log names it and says
+// why (owner ruling 2026-09-24 (e)). So a file the owner added in such a
+// folder, or a resource the re-download failed to fetch again, is never lost
+// to a rename. The rule is for folders: a plex-tv lesson's recorded FILES at an
+// old title's names (its video, nfo, captions, poster) are its own by record
+// and still go (ruling #66), whether or not the re-download brought each back.
+// Recorded entries at the current episode base that the re-download did not
+// bring back stay, and stay recorded (owner ruling 2026-09-24 (j)).
 
 // keptFolder is a previous folder of the lesson a placement left where it
 // was: why says what the new download did not bring back.

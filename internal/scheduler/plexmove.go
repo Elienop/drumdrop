@@ -236,8 +236,11 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	// A previous download in the default layout (a lesson folder its row
 	// records, such as one kept in downloads when a move was refused) goes by
 	// the same rule: only if the download brings back every file in it.
-	if prev, ok := previousFolder(lib.self, seasonDir, c, lib.roots); ok {
-		if why := tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false); why != "" {
+	if prev, why, ok := previousFolder(lib.self, seasonDir, c, lib.roots); ok {
+		if why == "" {
+			why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false)
+		}
+		if why != "" {
 			kept = append(kept, keptFolder{path: prev.path, why: why})
 		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
 			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
