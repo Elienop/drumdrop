@@ -143,13 +143,13 @@ func TestAbandonedJobsAreBounded(t *testing.T) {
 		running := claimed(t, s, 1, sql.NullInt64{})
 		mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
 		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 1, 'delete')`, running)
-		if err := s.CancelDownload(ctx, running, 1); !errors.Is(err, ErrLessonDeleted) {
+		if err := s.CancelDownload(ctx, running, 1, true); !errors.Is(err, ErrLessonDeleted) {
 			t.Fatalf("first read = %v, want the delete", err)
 		}
 		if got := abandonedIntent(t, s, running); got != "" {
 			t.Errorf("the row survived its read: %q", got)
 		}
-		err := s.CancelDownload(ctx, running, 1)
+		err := s.CancelDownload(ctx, running, 1, true)
 		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
 			t.Errorf("second read = %v, want abandoned, keeping the files", err)
 		}

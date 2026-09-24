@@ -8,9 +8,13 @@ const (
 	// msgAttemptFailed is one attempt that failed (another may follow).
 	msgAttemptFailed = "This download attempt failed."
 	// msgNotResolved is a lesson Musora answered with no match (locked for
-	// the owner's account, or removed): the lesson is skipped. It is stored on
-	// the lesson and on its job alike (SkipDownload), so it names no button.
+	// the owner's account, or removed). It is stored on its job, and on the
+	// lesson when it is skipped (NotReturnedDownload), so it names no button.
 	msgNotResolved = "Musora didn't return this lesson. It may be locked for your account, or removed."
+	// msgNotReturnedKept is the note a lesson Musora answered with no match
+	// keeps when its earlier download is on disk: it stays 'downloaded' and
+	// only the job fails (owner ruling 2026-09-24 (n)).
+	msgNotReturnedKept = "Musora didn't return this lesson, so the earlier download was kept. It may be locked for your account, or removed."
 	// msgStopped is a download a Skip, a delete or a follow removal stopped.
 	msgStopped = "Stopped: the lesson was skipped or deleted, or its follow was removed."
 	// msgRequeued is a download whose job was queued again elsewhere.

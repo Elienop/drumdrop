@@ -177,15 +177,15 @@ func (s *cliStore) FinishDownload(ctx context.Context, jobID int64, id int, rec 
 	s.setJobStatus(jobID, database.JobDone)
 	return nil
 }
-func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
+func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error {
 	s.setJobStatus(jobID, database.JobFailed)
 	return nil
 }
-func (s *cliStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
+func (s *cliStore) NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error {
 	s.setJobStatus(jobID, database.JobFailed)
 	return nil
 }
-func (s *cliStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
+func (s *cliStore) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
 	if s.jobs[jobID].Status == database.JobRunning {
 		s.setJobStatus(jobID, database.JobCanceled)
 	}

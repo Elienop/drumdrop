@@ -202,7 +202,7 @@ func recordDownloaded(t *testing.T, s *Store, id int, rec DownloadRecord) {
 // a claimed job, then FailDownload.
 func recordFailed(t *testing.T, s *Store, id int, msg string) {
 	t.Helper()
-	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg, msg, msg); err != nil {
+	if err := s.FailDownload(context.Background(), claimed(t, s, id, sql.NullInt64{}), id, msg, msg, msg, true); err != nil {
 		t.Fatalf("FailDownload %d: %v", id, err)
 	}
 }
@@ -215,9 +215,9 @@ func guardedWrites(ctx context.Context) map[string]func(s *Store, jobID int64, i
 		"FinishDownload": func(s *Store, j int64, id int) error {
 			return s.FinishDownload(ctx, j, id, DownloadRecord{OutputDir: "/x", LibraryEntries: []string{"S/Season 01/y"}})
 		},
-		"FailDownload":   func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom", "kept", "boom") },
-		"SkipDownload":   func(s *Store, j int64, id int) error { return s.SkipDownload(ctx, j, id, "gated") },
-		"CancelDownload": func(s *Store, j int64, id int) error { return s.CancelDownload(ctx, j, id) },
+		"FailDownload":        func(s *Store, j int64, id int) error { return s.FailDownload(ctx, j, id, "boom", "kept", "boom", true) },
+		"NotReturnedDownload": func(s *Store, j int64, id int) error { return s.NotReturnedDownload(ctx, j, id, "gated", "kept", true) },
+		"CancelDownload":      func(s *Store, j int64, id int) error { return s.CancelDownload(ctx, j, id, true) },
 	}
 }
 
@@ -346,11 +346,23 @@ func mustLesson(t *testing.T, s *Store, id int) Lesson {
 // output_dir, or only a library record) leaves it 'downloaded' (D63; owner
 // ruling 2026-09-24 (h)): 'skipped' would hide files that are still there, and
 // the planner re-enqueues a 'failed' lesson every cycle. A failed one carries
-// the kept note; the job carries its own sentence either way.
+// the kept note; the job carries its own sentence either way. So does a
+// lesson Musora didn't return (owner ruling 2026-09-24 (n)). Each keeps it
+// only while the worker found those files on disk (onDisk, ruling (o));
+// without them the lesson ends as one with no files does, and a row with no
+// files is never kept, whatever onDisk says.
 func TestGuardedFailSkipCancelWrites(t *testing.T) {
 	ctx := context.Background()
-	fail := func(s *Store, j int64) error {
-		return s.FailDownload(ctx, j, 1, "press Download", "kept", "press Retry")
+	fail := func(onDisk bool) func(s *Store, j int64) error {
+		return func(s *Store, j int64) error {
+			return s.FailDownload(ctx, j, 1, "press Download", "kept", "press Retry", onDisk)
+		}
+	}
+	notReturned := func(onDisk bool) func(s *Store, j int64) error {
+		return func(s *Store, j int64) error { return s.NotReturnedDownload(ctx, j, 1, "gated", "gated, kept", onDisk) }
+	}
+	cancel := func(onDisk bool) func(s *Store, j int64) error {
+		return func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1, onDisk) }
 	}
 	cases := []struct {
 		name       string
@@ -361,12 +373,17 @@ func TestGuardedFailSkipCancelWrites(t *testing.T) {
 		jobStatus  string
 		jobErrText string
 	}{
-		{"fail", "", fail, StatusFailed, "press Download", JobFailed, "press Retry"},
-		{"fail with files", "folder", fail, StatusDownloaded, "kept", JobFailed, "press Retry"},
-		{"fail with a library record", "record", fail, StatusDownloaded, "kept", JobFailed, "press Retry"},
-		{"skip", "", func(s *Store, j int64) error { return s.SkipDownload(ctx, j, 1, "gated") }, StatusSkipped, "gated", JobFailed, "gated"},
-		{"cancel", "", func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusSkipped, stoppedNote, JobCanceled, ""},
-		{"cancel with files", "folder", func(s *Store, j int64) error { return s.CancelDownload(ctx, j, 1) }, StatusDownloaded, "", JobCanceled, ""},
+		{"fail", "", fail(true), StatusFailed, "press Download", JobFailed, "press Retry"},
+		{"fail with files", "folder", fail(true), StatusDownloaded, "kept", JobFailed, "press Retry"},
+		{"fail with a library record", "record", fail(true), StatusDownloaded, "kept", JobFailed, "press Retry"},
+		{"fail with files not on disk", "folder", fail(false), StatusFailed, "press Download", JobFailed, "press Retry"},
+		{"fail with a library record not on disk", "record", fail(false), StatusFailed, "press Download", JobFailed, "press Retry"},
+		{"not returned", "", notReturned(true), StatusSkipped, "gated", JobFailed, "gated"},
+		{"not returned with files", "folder", notReturned(true), StatusDownloaded, "gated, kept", JobFailed, "gated"},
+		{"not returned with files not on disk", "folder", notReturned(false), StatusSkipped, "gated", JobFailed, "gated"},
+		{"cancel", "", cancel(true), StatusSkipped, stoppedNote, JobCanceled, ""},
+		{"cancel with files", "folder", cancel(true), StatusDownloaded, "", JobCanceled, ""},
+		{"cancel with files not on disk", "folder", cancel(false), StatusSkipped, stoppedNote, JobCanceled, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -410,7 +427,7 @@ func TestAFailedReDownloadKeepsTheLessonDownloadedUntilTheNextSuccess(t *testing
 	if err := s.StartDownload(ctx, jobID, 1); err != nil {
 		t.Fatalf("StartDownload: %v", err)
 	}
-	if err := s.FailDownload(ctx, jobID, 1, "failed", "kept", "retry"); err != nil {
+	if err := s.FailDownload(ctx, jobID, 1, "failed", "kept", "retry", true); err != nil {
 		t.Fatalf("FailDownload: %v", err)
 	}
 	l := mustLesson(t, s, 1)

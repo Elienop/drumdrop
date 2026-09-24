@@ -12,7 +12,7 @@ import (
 )
 
 // ErrDownloadAbandoned is returned by the worker's guarded writes (StartDownload,
-// ConfirmDownload, FinishDownload, FailDownload, SkipDownload, CancelDownload)
+// ConfirmDownload, FinishDownload, FailDownload, NotReturnedDownload, CancelDownload)
 // when the job or its lesson no longer exists: a delete or a skip removed them
 // while the download was running. Nothing was written, and nothing of that
 // download may be recorded: what it wrote is in its private folder, which goes
@@ -272,44 +272,63 @@ func (s *Store) FinishDownload(ctx context.Context, jobID int64, id int, rec Dow
 	})
 }
 
+// keepsFilesSQL decides, inside the transaction that ends a download without
+// recording it, whether the lesson keeps reading 'downloaded': it records
+// files from an earlier download (hasFilesSQL), and its one argument, onDisk,
+// says they were on disk just before (owner ruling 2026-09-24 (o)). SQLite
+// can't see the disk, so the caller checks it first (the worker, which knows
+// the library folder); a row that records no files is never kept, whatever
+// onDisk says.
+const keepsFilesSQL = `(` + hasFilesSQL + ` AND ?)`
+
 // FailDownload records a download that failed, and its job 'failed' with
 // jobMsg unless it was canceled meanwhile, in one transaction. A lesson that
-// still records files from an earlier download (hasFilesSQL) stays
-// 'downloaded' with keptMsg as its note, as endDownloadSQL keeps one a cancel
-// stopped: its files are there, and the planner re-enqueues a 'failed' lesson
-// every cycle, which would download it again and again (owner ruling
-// 2026-09-24 (h)). Any other lesson becomes 'failed' with lessonMsg. It lands
-// only while the job and lesson still exist (ErrDownloadAbandoned otherwise).
-// The lesson's sentence and the job's are shown in different places, each
-// beside its own button: the lesson's under the lesson, whose menu offers
-// Download, and the job's in the Queue, beside Retry. So a sentence that names
-// what to press next needs one version for each.
-func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
-	return s.finishWith(ctx, jobID, id, failSQL, []any{keptMsg, lessonMsg, id}, jobMsg, JobFailed)
+// still records files from an earlier download, all of them on disk (onDisk;
+// keepsFilesSQL), stays 'downloaded' with keptMsg as its note, as
+// endDownloadSQL keeps one a cancel stopped: its files are there, and the
+// planner re-enqueues a 'failed' lesson every cycle, which would download it
+// again and again (owner ruling 2026-09-24 (h)). Any other lesson becomes
+// 'failed' with lessonMsg, one whose recorded files are missing too, so the
+// next sync downloads it again (ruling (o)). It lands only while the job and
+// lesson still exist (ErrDownloadAbandoned otherwise). The lesson's sentence
+// and the job's are shown in different places, each beside its own button:
+// the lesson's under the lesson, whose menu offers Download, and the job's in
+// the Queue, beside Retry. So a sentence that names what to press next needs
+// one version for each.
+func (s *Store) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error {
+	return s.finishWith(ctx, jobID, id, keepOrSQL(StatusFailed), []any{onDisk, onDisk, keptMsg, lessonMsg, id}, jobMsg, JobFailed)
 }
 
-// failSQL is what a failed download leaves on its lesson (FailDownload). Its
-// arguments are the kept note, the failure sentence and the lesson id.
-const failSQL = `UPDATE lessons
-	    SET status = CASE WHEN ` + hasFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + StatusFailed + `' END,
-	        error = CASE WHEN ` + hasFilesSQL + ` THEN ? ELSE ? END,
+// keepOrSQL is what a download that ended without recording anything leaves
+// on its lesson in FailDownload and NotReturnedDownload: 'downloaded' with the
+// kept note when keepsFilesSQL holds, otherwise status with the other
+// sentence. Its arguments are onDisk twice, the kept note, the other sentence
+// and the lesson id.
+func keepOrSQL(status string) string {
+	return `UPDATE lessons
+	    SET status = CASE WHEN ` + keepsFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + status + `' END,
+	        error = CASE WHEN ` + keepsFilesSQL + ` THEN ? ELSE ? END,
 	        updated_at = CURRENT_TIMESTAMP
 	  WHERE railcontent_id = ?`
-
-// SkipDownload records a lesson Musora answered with no match (gated or
-// missing): the lesson becomes 'skipped' with reason, and the job 'failed'
-// with reason unless it was canceled meanwhile, in one transaction, only while
-// both still exist (ErrDownloadAbandoned otherwise). reason is shown both
-// under the lesson and in the Queue, so it must name no button.
-func (s *Store) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
-	return s.finishWith(ctx, jobID, id,
-		`UPDATE lessons SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE railcontent_id = ?`,
-		[]any{StatusSkipped, reason, id}, reason, JobFailed)
 }
 
-// finishWith is the shared body of FailDownload and SkipDownload: lessonSQL
-// with lessonArgs updates the lesson, and the job, if still running, becomes
-// jobStatus with jobMsg.
+// NotReturnedDownload records a lesson Musora answered with no match (locked
+// for the owner's account, or removed), and its job 'failed' with reason
+// unless it was canceled meanwhile, in one transaction, only while both still
+// exist (ErrDownloadAbandoned otherwise). A lesson that still records files
+// from an earlier download, all of them on disk (onDisk; keepsFilesSQL), stays
+// 'downloaded' with keptMsg as its note, as FailDownload keeps one: its files
+// are there, and 'skipped' would hide them (owner ruling 2026-09-24 (n)). Any
+// other lesson becomes 'skipped' with reason, so syncs leave it alone. reason
+// is shown both under a skipped lesson and in the Queue, so it must name no
+// button.
+func (s *Store) NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error {
+	return s.finishWith(ctx, jobID, id, keepOrSQL(StatusSkipped), []any{onDisk, onDisk, keptMsg, reason, id}, reason, JobFailed)
+}
+
+// finishWith is the shared body of FailDownload and NotReturnedDownload:
+// lessonSQL with lessonArgs updates the lesson, and the job, if still
+// running, becomes jobStatus with jobMsg.
 func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonSQL string, lessonArgs []any, jobMsg, jobStatus string) error {
 	return s.withLiveJob(ctx, jobID, id, runningOrCanceled, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, lessonSQL, lessonArgs...); err != nil {
@@ -333,24 +352,25 @@ func (s *Store) finishWith(ctx context.Context, jobID int64, id int, lessonSQL s
 const stoppedNote = "The download stopped before it finished. Download again to get this lesson."
 
 // endDownloadSQL is what a download that ended without recording anything
-// leaves on its lesson (a cancel, a shutdown, or a delete, skip or follow
-// removal that removed its job): a lesson that still records files from an
-// earlier download reads 'downloaded' (its files are there, and a 'skipped'
-// lesson is never downloaded again), any other 'skipped' with stoppedNote.
-// Its arguments are stoppedNote and the lesson id.
+// leaves on its lesson (a cancel, or a delete, skip or follow removal that
+// removed its job): a lesson that still records files from an earlier
+// download, on disk (keepsFilesSQL), reads 'downloaded' (its files are there,
+// and a 'skipped' lesson is never downloaded again), any other 'skipped' with
+// stoppedNote. Its arguments are onDisk twice, stoppedNote and the lesson id.
 const endDownloadSQL = `UPDATE lessons
-	    SET status = CASE WHEN ` + hasFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + StatusSkipped + `' END,
-	        error = CASE WHEN ` + hasFilesSQL + ` THEN NULL ELSE ? END,
+	    SET status = CASE WHEN ` + keepsFilesSQL + ` THEN '` + StatusDownloaded + `' ELSE '` + StatusSkipped + `' END,
+	        error = CASE WHEN ` + keepsFilesSQL + ` THEN NULL ELSE ? END,
 	        updated_at = CURRENT_TIMESTAMP
 	  WHERE railcontent_id = ?`
 
 // CancelDownload records a download killed by a cancel: the lesson as
-// endDownloadSQL leaves it, and the job 'canceled' if it is still running (a
-// job the API already canceled is left as it is). It lands only while the job
-// and lesson still exist (ErrDownloadAbandoned otherwise).
-func (s *Store) CancelDownload(ctx context.Context, jobID int64, id int) error {
+// endDownloadSQL leaves it (onDisk: its recorded files were on disk just
+// before, see keepsFilesSQL), and the job 'canceled' if it is still running
+// (a job the API already canceled is left as it is). It lands only while the
+// job and lesson still exist (ErrDownloadAbandoned otherwise).
+func (s *Store) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
 	return s.withLiveJob(ctx, jobID, id, runningOrCanceled, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, endDownloadSQL, stoppedNote, id); err != nil {
+		if _, err := tx.ExecContext(ctx, endDownloadSQL, onDisk, onDisk, stoppedNote, id); err != nil {
 			return fmt.Errorf("mark lesson %d canceled: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -631,8 +651,13 @@ func removeActiveJobsTx(ctx context.Context, tx *sql.Tx, intent, where string, a
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE `+cond, args...); err != nil {
 		return nil, fmt.Errorf("delete active jobs: %w", err)
 	}
+	// No disk check here (onDisk true: the row's record decides, as before
+	// owner ruling 2026-09-24 (o)): the stopper settles the lesson itself. A
+	// skip marks it skipped in this transaction, a follow removal deletes its
+	// row, and a delete tombstones it, or records only the files it found
+	// still there (KeepLessonFiles).
 	for _, rcID := range lessons {
-		if _, err := tx.ExecContext(ctx, endDownloadSQL+` AND status = '`+StatusDownloading+`'`, stoppedNote, rcID); err != nil {
+		if _, err := tx.ExecContext(ctx, endDownloadSQL+` AND status = '`+StatusDownloading+`'`, true, true, stoppedNote, rcID); err != nil {
 			return nil, fmt.Errorf("end the download of lesson %d: %w", rcID, err)
 		}
 	}

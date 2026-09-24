@@ -156,7 +156,7 @@ func forceRunning(t *testing.T, s *Store, id int64) {
 // endJob moves job id straight to a terminal status, with error errMsg (NULL
 // for "") and finished_at stamped: a fixture for tests about jobs alone. The
 // worker ends a job only through the guarded writers (FinishDownload,
-// FailDownload, SkipDownload, CancelDownload), which need its lesson row.
+// FailDownload, NotReturnedDownload, CancelDownload), which need its lesson row.
 func endJob(t *testing.T, s *Store, id int64, status, errMsg string) {
 	t.Helper()
 	mustExec(t, s, `UPDATE jobs SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -623,7 +623,7 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	forceRunning(t, s, id)
-	if err := s.FailDownload(ctx, id, lesson, "yt-dlp exited 1", "kept", "yt-dlp exited 1"); err != nil {
+	if err := s.FailDownload(ctx, id, lesson, "yt-dlp exited 1", "kept", "yt-dlp exited 1", true); err != nil {
 		t.Fatalf("FailDownload: %v", err)
 	}
 

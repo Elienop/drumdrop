@@ -39,15 +39,19 @@ type fakeWorkerStore struct {
 	markSkipped     []int // railcontent ids marked skipped
 	markDownloadng  []int // railcontent ids marked downloading
 
-	// lessonErr is the error each FailDownload/SkipDownload stored on the
+	// lessonErr is the error each FailDownload/NotReturnedDownload stored on the
 	// lesson (the job's is in jobs[id].Error).
 	lessonErr map[int]string
 	// keptErr is the note each FailDownload passed for a lesson that still
 	// records files from an earlier download (the store then keeps it
 	// 'downloaded' with it; this fake records the call only).
 	keptErr map[int]string
+	// onDisk is what the worker's disk check answered at each FailDownload,
+	// NotReturnedDownload and CancelDownload call (the store keeps a lesson
+	// with files 'downloaded' only when it is true).
+	onDisk map[int]bool
 
-	// ctx.Err() observed at each SkipDownload/CancelDownload call, so the
+	// ctx.Err() observed at each NotReturnedDownload/CancelDownload call, so the
 	// shutdown-finalize test can assert those writes do NOT ride a cancelled ctx.
 	markSkippedCtxErr     []error
 	markFailedCtxErr      []error
@@ -101,6 +105,7 @@ func newFakeWorkerStore(jobs ...database.Job) *fakeWorkerStore {
 
 		lessonErr: map[int]string{},
 		keptErr:   map[int]string{},
+		onDisk:    map[int]bool{},
 	}
 	for _, j := range jobs {
 		s.queue = append(s.queue, j)
@@ -238,7 +243,7 @@ func (s *fakeWorkerStore) FinishDownload(ctx context.Context, jobID int64, id in
 	return nil
 }
 
-func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error {
+func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
 	}
@@ -246,17 +251,22 @@ func (s *fakeWorkerStore) FailDownload(ctx context.Context, jobID int64, id int,
 	s.markFailedCtxErr = append(s.markFailedCtxErr, ctx.Err())
 	s.lessonErr[id] = lessonMsg
 	s.keptErr[id] = keptMsg
+	s.onDisk[id] = onDisk
 	s.markJobFailedAs(jobID, jobMsg)
 	return nil
 }
 
-func (s *fakeWorkerStore) SkipDownload(ctx context.Context, jobID int64, id int, reason string) error {
+// NotReturnedDownload records the call in markSkipped (the lesson is skipped
+// unless the real store keeps it; this fake records the call only).
+func (s *fakeWorkerStore) NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
 	}
 	s.markSkipped = append(s.markSkipped, id)
 	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
 	s.lessonErr[id] = reason
+	s.keptErr[id] = keptMsg
+	s.onDisk[id] = onDisk
 	s.markJobFailedAs(jobID, reason)
 	return nil
 }
@@ -264,13 +274,14 @@ func (s *fakeWorkerStore) SkipDownload(ctx context.Context, jobID int64, id int,
 // CancelDownload mirrors the store's guarded cancel: it only transitions a
 // running job and is a benign no-op otherwise, so worker cancel-branch tests
 // see the same status semantics as production.
-func (s *fakeWorkerStore) CancelDownload(ctx context.Context, jobID int64, id int) error {
+func (s *fakeWorkerStore) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
 	if err := s.abandoned(jobID); err != nil {
 		return err
 	}
 	if s.requeued[jobID] {
 		return fmt.Errorf("job %d is queued: %w", jobID, database.ErrDownloadCanceled)
 	}
+	s.onDisk[id] = onDisk
 	s.markSkipped = append(s.markSkipped, id)
 	s.markSkippedCtxErr = append(s.markSkippedCtxErr, ctx.Err())
 	s.markJobCanceled = append(s.markJobCanceled, jobID)

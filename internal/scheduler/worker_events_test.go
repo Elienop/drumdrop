@@ -236,7 +236,7 @@ func TestWorkerRecordsSentencesNotErrors(t *testing.T) {
 // against the copy rules: at most 220 characters, no raw "could not", and a
 // "check the log" sentence in the one wording.
 func TestWorkerMessagesFitTheDialog(t *testing.T) {
-	all := []string{msgAttemptFailed, msgNotResolved, msgStopped, msgRequeued, msgShutdown, msgCanceled}
+	all := []string{msgAttemptFailed, msgNotResolved, msgNotReturnedKept, msgEarlierKept, msgStopped, msgRequeued, msgShutdown, msgCanceled}
 	for _, f := range failures {
 		all = append(all, f.lesson, f.job)
 	}
@@ -258,7 +258,8 @@ var failures = []failure{failDownload, failNotStarted, failNoFolder, failMusora}
 // lesson sentence (under the lesson, whose menu offers Download) names
 // Download and never Retry, its job sentence (in the Queue, beside Retry)
 // names Retry and never Download, and a sentence stored in both places
-// (SkipDownload's, and the one a stopped download leaves) names neither.
+// (NotReturnedDownload's, and the one a stopped download leaves) names neither;
+// a lesson's kept note, shown under the lesson, never names Retry.
 func TestWorkerSentencesNameTheButtonsWhereTheyAreShown(t *testing.T) {
 	for _, f := range failures {
 		if !strings.HasSuffix(f.lesson, "then Download again.") || strings.Contains(f.lesson, "Retry") {
@@ -270,5 +271,10 @@ func TestWorkerSentencesNameTheButtonsWhereTheyAreShown(t *testing.T) {
 	}
 	if strings.Contains(msgNotResolved, "Download") || strings.Contains(msgNotResolved, "Retry") {
 		t.Errorf("%q is stored on the lesson and on its job alike: want it to name no button", msgNotResolved)
+	}
+	for _, kept := range []string{msgEarlierKept, msgNotReturnedKept, failKeptInLibrary.kept} {
+		if strings.Contains(kept, "Retry") {
+			t.Errorf("kept note %q is shown under the lesson: want it never to name Retry", kept)
+		}
 	}
 }

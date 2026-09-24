@@ -295,18 +295,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		return
 	}
 	if lesson == nil {
-		// Musora answered with no match: locked for the owner's account, or
-		// removed. The log and the lesson say so; the lesson is skipped.
-		fmt.Fprintf(w.log(), "  ↳ skipping %d: Musora returned no lesson (locked or removed)\n", id)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "lesson_skipped",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Err:           msgNotResolved,
-			Time:          time.Now(),
-		})
-		w.logAbandoned(id, w.Store.SkipDownload(context.WithoutCancel(ctx), job.ID, id, msgNotResolved))
+		w.notReturned(ctx, job)
 		return
 	}
 
@@ -498,16 +487,17 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// Every attempt failed: record the job as failed and move on. A lesson
 	// with no files from an earlier download is failed too, and the next
 	// planner cycle re-enqueues it, giving it another chance next interval;
-	// one that still records files stays downloaded with a note, so syncs
-	// don't download it again and again, and the owner's Download retries it
-	// (owner ruling 2026-09-24 (h)). Each attempt's error was logged above;
-	// the lesson records a sentence. What the
-	// download wrote goes with its private folder; nothing outside it was
+	// one that still records files, all on disk now, stays downloaded with a
+	// note, so syncs don't download it again and again, and the owner's
+	// Download retries it (owner rulings 2026-09-24 (h) and (o)). Each
+	// attempt's error was logged above; the lesson records a sentence. What
+	// the download wrote goes with its private folder; nothing outside it was
 	// touched. WithoutCancel for parity with the cancel/resolve branches: the
 	// per-attempt ctx.Err() guard makes a cancelled ctx here practically
 	// unreachable, but keeping all terminal writes uncancellable makes
 	// "shutdown never strands a job" a single, obvious invariant.
-	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.keptNote(), final.job); {
+	onDisk := w.filesOnDisk(ctx, id)
+	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.keptNote(), final.job, onDisk); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
 		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it failed; nothing was recorded\n", id)
 	case errors.Is(ferr, database.ErrDownloadCanceled):
@@ -538,10 +528,10 @@ func (w *Worker) shuttingDown(ctx context.Context, job database.Job, lesson *mus
 // downloading anything: its reason is logged, reported as a failed attempt
 // (the job's one terminal event), and the job is marked failed with f, and
 // the lesson too (the next cycle tries again) unless it still records files
-// from an earlier download: that one stays downloaded with f's kept note
-// (database.Store.FailDownload). The event and the records carry f's
-// sentences, written for the user, not the reason. title is the lesson's, or
-// "" when it is not known.
+// from an earlier download, all on disk: that one stays downloaded with f's
+// kept note (database.Store.FailDownload). The event and the records carry
+// f's sentences, written for the user, not the reason. title is the lesson's,
+// or "" when it is not known.
 func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title string, reason error, f failure) {
 	id := job.RailcontentID
 	fmt.Fprintf(w.log(), "  ✖ %d not downloaded: %v\n", id, reason)
@@ -556,7 +546,35 @@ func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title
 		Err:           f.lesson,
 		Time:          time.Now(),
 	})
-	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.keptNote(), f.job))
+	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.keptNote(), f.job, w.filesOnDisk(ctx, id)))
+}
+
+// notReturned ends a job whose lesson Musora answered with no match (locked
+// for the owner's account, or removed), without downloading anything. A
+// lesson whose earlier download is on disk stays downloaded with
+// msgNotReturnedKept, and only its job fails (owner ruling 2026-09-24 (n)):
+// the job's end is reported as a failed attempt, and syncs leave the lesson
+// alone. Any other lesson is skipped, as it always was, and reported so. The
+// job records msgNotResolved either way, and so does the event.
+func (w *Worker) notReturned(ctx context.Context, job database.Job) {
+	id := job.RailcontentID
+	onDisk := w.filesOnDisk(ctx, id)
+	e := ProgressEvent{
+		Kind:          "lesson_skipped",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Err:           msgNotResolved,
+		Time:          time.Now(),
+	}
+	if onDisk {
+		e.Kind, e.Attempt, e.MaxAttempts = "attempt_failed", 1, w.Cfg.MaxAttempts
+		fmt.Fprintf(w.log(), "  ✖ %d not downloaded: Musora returned no lesson (locked or removed); its earlier download is kept\n", id)
+	} else {
+		fmt.Fprintf(w.log(), "  ↳ skipping %d: Musora returned no lesson (locked or removed)\n", id)
+	}
+	w.progress().Emit(e)
+	w.logAbandoned(id, w.Store.NotReturnedDownload(context.WithoutCancel(ctx), job.ID, id, msgNotResolved, msgNotReturnedKept, onDisk))
 }
 
 // ended reports the end of a job that stopped without downloading, failing or
@@ -624,7 +642,7 @@ func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *m
 		Err:           msgCanceled,
 		Time:          time.Now(),
 	})
-	switch err := w.Store.CancelDownload(context.WithoutCancel(ctx), job.ID, id); {
+	switch err := w.Store.CancelDownload(context.WithoutCancel(ctx), job.ID, id, w.filesOnDisk(ctx, id)); {
 	case errors.Is(err, database.ErrDownloadAbandoned):
 		fmt.Fprintf(w.log(), "  ⊗ %d was removed meanwhile; nothing was recorded\n", id)
 	case errors.Is(err, database.ErrDownloadCanceled):

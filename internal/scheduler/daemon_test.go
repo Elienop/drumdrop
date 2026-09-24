@@ -112,13 +112,15 @@ func (s *fakeDaemonStore) FinishDownload(ctx context.Context, jobID int64, id in
 	s.record("job-done")
 	return nil
 }
-func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, lm, km, jm string) error {
+func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, lm, km, jm string, onDisk bool) error {
 	return nil
 }
-func (s *fakeDaemonStore) SkipDownload(ctx context.Context, jobID int64, id int, r string) error {
+func (s *fakeDaemonStore) NotReturnedDownload(ctx context.Context, jobID int64, id int, r, km string, onDisk bool) error {
 	return nil
 }
-func (s *fakeDaemonStore) CancelDownload(ctx context.Context, jobID int64, id int) error { return nil }
+func (s *fakeDaemonStore) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
+	return nil
+}
 
 // --- planner-side ---
 

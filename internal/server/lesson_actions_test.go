@@ -100,7 +100,7 @@ func TestDownloadLessonAcceptsADownloadedLesson(t *testing.T) {
 		}
 		claimJob(t, store, id)
 		if fail {
-			err = store.FailDownload(ctx, id, 5003, "failed", "kept", "retry")
+			err = store.FailDownload(ctx, id, 5003, "failed", "kept", "retry", true)
 		} else {
 			err = store.FinishDownload(ctx, id, 5003, database.DownloadRecord{OutputDir: "/dl/C/01 - Lesson"})
 		}

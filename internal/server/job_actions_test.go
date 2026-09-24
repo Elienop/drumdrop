@@ -102,7 +102,7 @@ func TestRetryJobFailed(t *testing.T) {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	claimJob(t, store, id)
-	if err := store.FailDownload(ctx, id, 6003, "boom", "kept", "boom"); err != nil {
+	if err := store.FailDownload(ctx, id, 6003, "boom", "kept", "boom", true); err != nil {
 		t.Fatalf("FailDownload: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")

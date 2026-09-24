@@ -72,12 +72,14 @@ type Store interface {
 	FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error
 	// FailDownload stores lessonMsg under the lesson (whose menu offers
 	// Download), or keptMsg when the lesson still records files from an
-	// earlier download (it stays 'downloaded'), and jobMsg on the job (shown
-	// in the Queue beside Retry); SkipDownload stores reason in both, so it
-	// names no button.
-	FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string) error
-	SkipDownload(ctx context.Context, jobID int64, id int, reason string) error
-	CancelDownload(ctx context.Context, jobID int64, id int) error
+	// earlier download and onDisk says they are all on disk (it stays
+	// 'downloaded'), and jobMsg on the job (shown in the Queue beside
+	// Retry); NotReturnedDownload stores reason in both (so it names no
+	// button), or keptMsg under a lesson kept the same way.
+	// CancelDownload's onDisk decides the same.
+	FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error
+	NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error
+	CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
 }
 
