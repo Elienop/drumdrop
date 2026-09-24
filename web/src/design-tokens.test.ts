@@ -1,8 +1,14 @@
 /// <reference types="node" />
 import { readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { createElement } from "react"
 import { describe, expect, it } from "vitest"
+import { render, screen } from "@testing-library/react"
+import { MemoryRouter } from "react-router-dom"
 import { buttonVariants } from "@/components/ui/button"
+import { DialogFooter } from "@/components/ui/dialog"
+import { AlertDialogFooter } from "@/components/ui/alert-dialog"
+import { Sidebar } from "@/components/app-shell/Sidebar"
 
 // Read from disk: the test config (css: false) blanks every CSS import,
 // `?raw` included. (__dirname, not import.meta.url: under jsdom that is an
@@ -127,7 +133,7 @@ describe("focus ring everywhere", () => {
     .map((f) => ({ file: f, text: readFileSync(resolve(__dirname, f), "utf8") }))
 
   it("is ring-ring/60 in every source file that draws one", () => {
-    const users = sources.filter((s) => /ring-ring\//.test(s.text))
+    const users = sources.filter((s) => /ring-ring\b/.test(s.text))
     // Positive control: the scan reaches the primitives and the pages.
     expect(users.map((s) => s.file)).toEqual(
       expect.arrayContaining([
@@ -136,12 +142,64 @@ describe("focus ring everywhere", () => {
         expect.stringMatching(/Follows\.tsx$/),
       ]),
     )
+    // A bare ring-ring (full strength, as the shadcn Dialog's close X had)
+    // is caught too: its alpha group is then empty.
     const other = sources.flatMap((s) =>
-      [...s.text.matchAll(/ring-ring\/(\d+)/g)]
+      [...s.text.matchAll(/ring-ring(?:\/(\d+))?/g)]
         .filter((m) => m[1] !== "60")
         .map((m) => `${s.file}: ${m[0]}`),
     )
     expect(other).toEqual([])
+  })
+
+  it("shows on keyboard focus only: no ring on plain :focus, which a mouse click also sets", () => {
+    const onFocus = sources.flatMap((s) =>
+      [...s.text.matchAll(/(?<![\w-])focus:ring[\w/[\]-]*/g)].map((m) => `${s.file}: ${m[0]}`),
+    )
+    expect(onFocus).toEqual([])
+  })
+
+  it("is drawn by every sidebar link, at 3px, instead of the browser's outline", () => {
+    render(createElement(MemoryRouter, null, createElement(Sidebar)))
+    const links = screen.getAllByRole("link")
+    // Positive control: the render reached the nav.
+    expect(links.length).toBeGreaterThanOrEqual(5)
+    for (const link of links) {
+      expect(link.className.split(/\s+/), link.textContent ?? "").toEqual(
+        expect.arrayContaining([
+          "outline-none",
+          "focus-visible:ring-[3px]",
+          "focus-visible:ring-ring/60",
+        ]),
+      )
+    }
+  })
+})
+
+// Owner, 2026-09-24: 12px between a dialog footer's buttons, stacked on a
+// phone and in a row from sm up; and a red button's offset ring must clear
+// the Cancel beside it.
+describe("dialog footers", () => {
+  const px = (classes: string[], pattern: RegExp, scale: number): number => {
+    const hit = classes.map((c) => c.match(pattern)).find((m) => m !== null)
+    if (!hit) throw new Error(`no class matches ${pattern}`)
+    return Number(hit[1]) * scale
+  }
+  const RING_PX = px(destructiveClasses, /^focus-visible:ring-\[(\d+)px\]$/, 1)
+  const OFFSET_PX = px(destructiveClasses, /^focus-visible:ring-offset-(\d+)$/, 1)
+
+  it.each([
+    ["DialogFooter", DialogFooter],
+    ["AlertDialogFooter", AlertDialogFooter],
+  ])("%s puts 12px between its buttons, stacked, then in a row from sm", (_, Footer) => {
+    const { container } = render(createElement(Footer))
+    const classes = (container.firstElementChild as HTMLElement).className.split(/\s+/)
+    expect(classes.filter((c) => /^gap-/.test(c))).toEqual(["gap-3"])
+    const gap = px(classes, /^gap-(\d+)$/, 4) // Tailwind's spacing step is 4px
+    expect(gap).toBe(12)
+    // The red button's ring and its offset stay clear of the next button.
+    expect(gap).toBeGreaterThan(RING_PX + OFFSET_PX)
+    expect(classes).toEqual(expect.arrayContaining(["flex-col-reverse", "sm:flex-row"]))
   })
 })
 

@@ -2,6 +2,11 @@ import { NavLink } from "react-router-dom"
 import { LayoutDashboard, Heart, ListVideo, ListChecks, Settings } from "lucide-react"
 import { cn } from "@/lib/utils"
 
+// A nav link draws the one focus ring (decisions #68): ring-ring/60 at 3px,
+// on keyboard focus only, instead of the browser's own outline.
+const LINK =
+  "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60"
+
 const items = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/follows", label: "Follows", icon: Heart },
@@ -21,7 +26,7 @@ export function Sidebar() {
             end={end}
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium",
+                LINK,
                 isActive
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -43,7 +48,7 @@ export function Sidebar() {
             to="/settings"
             className={({ isActive }) =>
               cn(
-                "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium",
+                LINK,
                 isActive
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",

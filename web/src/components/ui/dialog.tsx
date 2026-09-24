@@ -70,7 +70,11 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
-            className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+            // LOCAL EDIT (decisions #68): the one focus ring, ring-ring/60 at
+            // 3px on focus-visible, as on every other control. Upstream's is
+            // the ring colour at full strength, 2px, with an offset, and on
+            // plain focus, so a mouse click showed it too.
+            className="absolute top-4 right-4 rounded-xs opacity-70 transition-opacity outline-none hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/60 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
           >
             <XIcon />
             <span className="sr-only">Close</span>
@@ -103,7 +107,12 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        // LOCAL EDIT (owner, 2026-09-24): 12px between the buttons (gap-3,
+        // not upstream's gap-2), stacked on a phone and in a row from sm up,
+        // as in AlertDialogFooter. A red button's focus ring reaches 5px out
+        // (a 2px offset plus the 3px ring, see button.tsx), so in gap-2 it
+        // left 3px before Cancel; in gap-3 it clears it by 7px.
+        "flex flex-col-reverse gap-3 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
