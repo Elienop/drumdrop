@@ -9,6 +9,7 @@ import { buttonVariants } from "@/components/ui/button"
 import { DialogFooter } from "@/components/ui/dialog"
 import { AlertDialogFooter } from "@/components/ui/alert-dialog"
 import { Sidebar } from "@/components/app-shell/Sidebar"
+import { Checkbox } from "@/components/ui/checkbox"
 
 // Read from disk: the test config (css: false) blanks every CSS import,
 // `?raw` included. (__dirname, not import.meta.url: under jsdom that is an
@@ -173,6 +174,59 @@ describe("focus ring everywhere", () => {
         ]),
       )
     }
+  })
+})
+
+// Owner's ruling (g), 2026-09-24: every control with a solid fill while
+// focused sets its ring 2px off the fill, over the page background, so the
+// amber ring never touches an amber (or red) fill and reads as a fatter
+// shape. Controls without a fill keep the ring flush, as before.
+describe("the ring offset on filled controls", () => {
+  const OFFSET = ["focus-visible:ring-offset-2", "focus-visible:ring-offset-background"]
+  const classesOf = (variant: Parameters<typeof buttonVariants>[0]) =>
+    buttonVariants(variant).split(/\s+/)
+
+  it.each(["default", "destructive", "secondary"] as const)(
+    "the filled %s button sets its ring 2px off the fill",
+    (variant) => {
+      expect(classesOf({ variant })).toEqual(expect.arrayContaining(OFFSET))
+    },
+  )
+
+  it.each(["outline", "ghost", "link"] as const)(
+    "the unfilled %s button keeps its ring flush",
+    (variant) => {
+      expect(classesOf({ variant }).filter((c) => /ring-offset/.test(c))).toEqual([])
+    },
+  )
+
+  it("the active sidebar link, filled amber, sets its ring off the fill; the idle links keep theirs flush", () => {
+    render(
+      createElement(MemoryRouter, { initialEntries: ["/lessons"] }, createElement(Sidebar)),
+    )
+    const active = screen.getByRole("link", { name: "Lessons" })
+    // Positive control: this is the filled one.
+    expect(active.className.split(/\s+/)).toContain("bg-primary")
+    expect(active.className.split(/\s+/)).toEqual(expect.arrayContaining(OFFSET))
+    const idle = screen.getAllByRole("link").filter((l) => l !== active)
+    expect(idle.length).toBeGreaterThanOrEqual(4)
+    for (const link of idle) {
+      expect(link.className, link.textContent ?? "").not.toMatch(/ring-offset/)
+    }
+  })
+
+  it("a checked checkbox, filled amber, sets its ring off the fill; unchecked it keeps it flush", () => {
+    render(createElement(Checkbox, { defaultChecked: true, "aria-label": "files" }))
+    const classes = screen.getByRole("checkbox", { name: "files" }).className.split(/\s+/)
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        "data-[state=checked]:bg-primary",
+        "data-[state=checked]:focus-visible:ring-offset-2",
+        "data-[state=checked]:focus-visible:ring-offset-background",
+      ]),
+    )
+    // Only while checked: no offset class without the checked condition.
+    expect(classes.filter((c) => /ring-offset/.test(c) && !c.startsWith("data-[state=checked]:"))).toEqual([])
   })
 })
 

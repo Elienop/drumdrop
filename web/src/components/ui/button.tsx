@@ -2,6 +2,7 @@ import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { Slot } from "radix-ui"
 
+import { FILLED_RING_OFFSET } from "@/lib/ring"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
@@ -13,7 +14,12 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        // LOCAL EDIT (owner's ruling 2026-09-24, (g)): every FILLED variant
+        // (default, destructive, secondary) sets its ring 2px off the fill,
+        // over the page background (FILLED_RING_OFFSET, lib/ring.ts), as the
+        // red one did first; outline, ghost and link keep the ring flush.
+        // Re-apply when updating the component from upstream.
+        default: `bg-primary text-primary-foreground hover:bg-primary/90 ${FILLED_RING_OFFSET}`,
         // LOCAL EDIT (owner's rulings 2026-09-23, decisions #68). Re-apply
         // all three when updating the component from upstream:
         // - Ring colour: upstream's red focus ring (focus-visible:ring-
@@ -28,11 +34,10 @@ const buttonVariants = cva(
         //   dark mode. It dims like the primary button's hover; white text
         //   on it is 7.7:1.
         destructive:
-          "bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:bg-destructive/60 dark:hover:bg-destructive/50",
+          `bg-destructive text-white hover:bg-destructive/90 ${FILLED_RING_OFFSET} dark:bg-destructive/60 dark:hover:bg-destructive/50`,
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
-        secondary:
-          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        secondary: `bg-secondary text-secondary-foreground hover:bg-secondary/80 ${FILLED_RING_OFFSET}`,
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
