@@ -136,13 +136,15 @@ func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	rec := onlyRecord(t, store)
-	scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-	if rec.outputDir != scratch || rec.videoPath != filepath.Join(scratch, "05 - Lesson A.mp4") {
-		t.Errorf("record = %+v, want the scratch folder", rec)
+	if len(store.markDownloaded) != 0 {
+		t.Errorf("recorded %+v, want nothing", store.markDownloaded)
 	}
-	if !reflect.DeepEqual(rec.entries, recordOf(season, mine...)) {
-		t.Errorf("entries = %v, want the previous entry still owned", rec.entries)
+	if got := store.lessonErr[100]; got != failKeptInLibrary.lesson {
+		t.Errorf("lesson error = %q, want %q", got, failKeptInLibrary.lesson)
+	}
+	assertSeeded(t, season, mine...)
+	if p := findContent(t, w.Cfg.DownloadsDir, "new mp4"); p != "" {
+		t.Errorf("the download was placed in downloads at %q", p)
 	}
 	if got, _ := os.ReadFile(filepath.Join(season, base+".mp4")); string(got) != base+".mp4" {
 		t.Errorf("the other lesson's video was overwritten: %q", got)

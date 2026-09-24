@@ -99,16 +99,14 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 //     without one. No library is a library rooted at the downloads folder.
 //
 // A placement in the library that is refused (another lesson owns the
-// destination, say) or fails is undone, and the lesson is placed in the
-// downloads folder instead, as drumdrop always kept a lesson it could not
-// move. That fallback still writes to the library when the lesson's row
-// records a previous folder there: it sets that folder aside in
-// <library>/.drumdrop-in-progress, to replace it. So a library drumdrop can't
-// write to (read-only, say) fails the fallback too, and every attempt with it
-// (security I1); so can a previous folder on another filesystem from that
-// area. The earlier library copy is then left as it was. A move error is
-// logged, never fatal; an error returned means the download could not be
-// placed anywhere, and nothing outside its private folder was changed.
+// destination, say) or fails is undone, and its error logged. A lesson whose
+// row records its folder in the library is then not placed anywhere: the
+// attempt fails (errKeptInLibrary), its library copy stays recorded and as it
+// was, and the next attempt tries the library again (owner ruling 2026-09-24
+// (f)). Any other lesson is placed in the downloads folder instead, as
+// drumdrop always kept a lesson it could not move. An error returned means
+// the download could not be placed, and nothing outside its private folder
+// was changed.
 func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, index int, outDir string, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
 	id := job.RailcontentID
 	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(outDir, index, lesson.Title))
@@ -161,12 +159,18 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			}
 			return res.pending, nil
 		}
+		if inLibrary(prev, lib) {
+			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
+		}
 	} else if lib != "" {
 		pl, err := placeFolder(lib)
 		if err == nil {
 			return pl, nil
 		}
 		fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
+		if inLibrary(prev, lib) {
+			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
+		}
 	}
 	pl, err := placeFolder(w.Cfg.DownloadsDir)
 	if err != nil {
@@ -176,6 +180,17 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		fmt.Fprintf(w.log(), "  ⚠ %d is kept in downloads at %q\n", id, pl.dir)
 	}
 	return pl, nil
+}
+
+// errKeptInLibrary is a download not placed because its placement in the
+// library failed while the lesson's row records its folder there: falling
+// back to downloads would replace that copy (owner ruling 2026-09-24 (f)).
+var errKeptInLibrary = errors.New("not placed: the placement in the library failed, and the lesson's copy there is kept")
+
+// inLibrary reports whether the lesson's row records its folder inside the
+// library lib (the season folder, in plex-tv).
+func inLibrary(prev database.Lesson, lib string) bool {
+	return prev.OutputDir.Valid && prev.OutputDir.String != "" && library.Inside(lib, prev.OutputDir.String)
 }
 
 // checkBeforeDownload is what a download needs before it starts, so a

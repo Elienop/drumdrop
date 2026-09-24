@@ -39,6 +39,13 @@ var (
 		lesson: "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Download again.",
 		job:    "Didn't start this download: the lessons' records couldn't be read. Check the server log, fix the problem, then Retry.",
 	}
+	// failKeptInLibrary is a download whose last attempt couldn't be placed in
+	// the library, where the lesson already was (errKeptInLibrary): its copy
+	// there is kept, still recorded.
+	failKeptInLibrary = failure{
+		lesson: "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Download again.",
+		job:    "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Retry.",
+	}
 	// failNoFolder is a download not started because its private folder, in
 	// the downloads folder, couldn't be made.
 	failNoFolder = failure{

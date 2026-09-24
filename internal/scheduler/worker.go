@@ -384,6 +384,9 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	defer w.dropPrivate(job.ID)
 	privateLesson := filepath.Join(private, lessonBase)
 
+	// The failure the job ends with if every attempt fails: the last
+	// attempt's.
+	final := failDownload
 	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
 		// Abort promptly on cancellation: leave the job in its current state (it
 		// is not downloaded and, after a re-mark, may be running) so the next
@@ -472,6 +475,10 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			// retried.
 			derr = rerr
 		}
+		final = failDownload
+		if errors.Is(derr, errKeptInLibrary) {
+			final = failKeptInLibrary
+		}
 
 		fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, derr)
 		w.progress().Emit(ProgressEvent{
@@ -496,7 +503,7 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	// per-attempt ctx.Err() guard makes a cancelled ctx here practically
 	// unreachable, but keeping all terminal writes uncancellable makes
 	// "shutdown never strands a job" a single, obvious invariant.
-	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, failDownload.lesson, failDownload.job); {
+	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.job); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
 		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it failed; nothing was recorded\n", id)
 	case errors.Is(ferr, database.ErrDownloadCanceled):
