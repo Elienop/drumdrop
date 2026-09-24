@@ -15,9 +15,9 @@ import { Toaster as Sonner, type ToasterProps } from "sonner"
 // the × kept top:0, its 1px border and its 50% radius, and the toast its 16px
 // padding). Tailwind's "!" suffix emits !important, which beats any normal
 // declaration. Only the properties sonner also sets need it: box-shadow (the
-// ring), top, border, border-radius and padding. Custom properties (the
-// --toast-close-button-* below, --tw-ring-color) and opacity are not
-// contested and need none.
+// ring), top, border, border-radius, padding and align-items. Custom
+// properties (the --toast-close-button-* below, --tw-ring-color), opacity
+// and the icon's margin-top are not contested and need none.
 //
 // The one focus ring (decisions #68): ring-ring/60 at 3px, on keyboard focus
 // only. A failure toast stays until closed (failureToast), so a keyboard user
@@ -41,6 +41,13 @@ const FOCUS_RING = "outline-none focus-visible:ring-[3px]! focus-visible:ring-ri
 //   the dialogs' X does.
 // - Room: a toast with a close button keeps 40px clear on the right, so a
 //   long title or sentence never runs under the ×.
+// - Icon: level with the title's FIRST line, like the ×. sonner centres the
+//   icon against the whole text (align-items: center), so beside a title that
+//   wraps, or a title and its sentence, it sat lower than the ×. The toast
+//   aligns to the top instead (items-start!, sonner sets align-items), and the
+//   16px icon drops by half of what the title's line box (1.5em, sonner's
+//   line-height) has over it: centred on that line. A one-line toast looks as
+//   before, since there the line box is the whole text.
 const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
@@ -55,7 +62,8 @@ const Toaster = ({ ...props }: ToasterProps) => {
       }}
       toastOptions={{
         classNames: {
-          toast: `${FOCUS_RING} has-[[data-close-button]]:pr-10!`,
+          toast: `${FOCUS_RING} has-[[data-close-button]]:pr-10! items-start!`,
+          icon: "mt-[calc((1.5em_-_16px)/2)]",
           closeButton: `${FOCUS_RING} top-4! rounded-xs! border-0! opacity-70 hover:opacity-100 focus-visible:opacity-100`,
         },
       }}

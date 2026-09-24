@@ -50,3 +50,14 @@ it("the close button carries the classes and variables that place it top-right w
   // The room kept clear on the right: sonner sets the toast's padding too.
   expect(toastEl.className.split(/\s+/)).toContain("has-[[data-close-button]]:pr-10!")
 })
+
+// The error icon sits level with the title's first line, like the ×, not
+// centred against a wrapped title or a title and its sentence. sonner sets
+// align-items, so the toast's items-start needs the "!"; it sets no
+// margin-top, so the icon's needs none. The browser pass checks the result.
+it("the icon is set on the title's first line: the toast aligns to the top, the icon centred on that line", async () => {
+  const { toastEl } = await stickyFailure()
+  expect(toastEl.className.split(/\s+/)).toContain("items-start!")
+  const icon = toastEl.querySelector<HTMLElement>("[data-icon]")!
+  expect(icon.className.split(/\s+/)).toContain("mt-[calc((1.5em_-_16px)/2)]")
+})
