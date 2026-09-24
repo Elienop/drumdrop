@@ -99,14 +99,18 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 //     without one. No library is a library rooted at the downloads folder.
 //
 // A placement in the library that is refused (another lesson owns the
-// destination, say) or fails is undone, and its error logged. A lesson whose
-// row records its folder in the library is then not placed anywhere: the
-// attempt fails (errKeptInLibrary), its library copy stays recorded and as it
-// was, and the next attempt tries the library again (owner ruling 2026-09-24
-// (f)). Any other lesson is placed in the downloads folder instead, as
-// drumdrop always kept a lesson it could not move. An error returned means
-// the download could not be placed, and nothing outside its private folder
-// was changed.
+// destination, say) or fails is undone, and its error logged. In the default
+// layout, a lesson whose row records its folder in the library is then not
+// placed anywhere: the attempt fails (errKeptInLibrary), its library copy
+// stays recorded and as it was, and the next attempt tries the library again
+// (owner ruling 2026-09-24 (f)), since placing it in downloads would replace
+// that folder. Any other lesson, and every plex-tv one, is placed in the
+// downloads folder instead, as drumdrop always kept a lesson it could not
+// move, and that is logged. In plex-tv this touches nothing in the library
+// (a season folder is never a previous folder to replace), and the entries
+// the lesson still owns there stay recorded (owner ruling 2026-09-24 (i)). An
+// error returned means the download could not be placed, and nothing outside
+// its private folder was changed.
 func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, index int, outDir string, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
 	id := job.RailcontentID
 	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(outDir, index, lesson.Title))
@@ -159,9 +163,6 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			}
 			return res.pending, nil
 		}
-		if inLibrary(prev, lib) {
-			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
-		}
 	} else if lib != "" {
 		pl, err := placeFolder(lib)
 		if err == nil {
@@ -183,12 +184,13 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 }
 
 // errKeptInLibrary is a download not placed because its placement in the
-// library failed while the lesson's row records its folder there: falling
-// back to downloads would replace that copy (owner ruling 2026-09-24 (f)).
+// library failed while the lesson's row records its folder there, in the
+// default layout: falling back to downloads would replace that copy (owner
+// rulings 2026-09-24 (f) and (i)).
 var errKeptInLibrary = errors.New("not placed: the placement in the library failed, and the lesson's copy there is kept")
 
 // inLibrary reports whether the lesson's row records its folder inside the
-// library lib (the season folder, in plex-tv).
+// library lib.
 func inLibrary(prev database.Lesson, lib string) bool {
 	return prev.OutputDir.Valid && prev.OutputDir.String != "" && library.Inside(lib, prev.OutputDir.String)
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,13 +118,17 @@ func TestWorkerPlexTvReDownloadReplacesByRecord(t *testing.T) {
 	}
 }
 
-// TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord proves a move refused
-// because another lesson owns one of its names, for a lesson already in the
-// library, is not placed in downloads instead (owner ruling 2026-09-24 (f)):
-// every attempt fails, nothing is recorded, so the previous library entries
-// stay the lesson's, and the job fails with failKeptInLibrary.
+// TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord proves a plex-tv move
+// refused because another lesson owns one of its names, for a lesson already
+// in the library, falls back to downloads (owner ruling 2026-09-24 (i): ruling
+// (f) is for the default layout only): the download is recorded in its
+// downloads folder, the previous library entries stay recorded as the
+// lesson's and untouched, the other lesson's file too, and the log says where
+// the lesson was kept.
 func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	w, store, _, _, season := plexWorker(t)
+	var log bytes.Buffer
+	w.Log = &log
 	base := "Beginner Course - s01e05 - Lesson A"
 	mine := []string{"Beginner Course - s01e05 - Lesson A (old).mp4"}
 	seedSeason(t, season, mine...)
@@ -136,18 +141,20 @@ func TestWorkerPlexTvRefusedMoveKeepsThePreviousRecord(t *testing.T) {
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if len(store.markDownloaded) != 0 {
-		t.Errorf("recorded %+v, want nothing", store.markDownloaded)
+	rec := onlyRecord(t, store)
+	scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	if rec.outputDir != scratch || rec.videoPath != filepath.Join(scratch, "05 - Lesson A.mp4") {
+		t.Errorf("record = %+v, want the downloads folder", rec)
 	}
-	if got := store.lessonErr[100]; got != failKeptInLibrary.lesson {
-		t.Errorf("lesson error = %q, want %q", got, failKeptInLibrary.lesson)
+	if !reflect.DeepEqual(rec.entries, recordOf(season, mine...)) {
+		t.Errorf("entries = %v, want the previous entry still recorded", rec.entries)
 	}
 	assertSeeded(t, season, mine...)
-	if p := findContent(t, w.Cfg.DownloadsDir, "new mp4"); p != "" {
-		t.Errorf("the download was placed in downloads at %q", p)
-	}
 	if got, _ := os.ReadFile(filepath.Join(season, base+".mp4")); string(got) != base+".mp4" {
 		t.Errorf("the other lesson's video was overwritten: %q", got)
+	}
+	if want := fmt.Sprintf("⚠ 100 is kept in downloads at %q", scratch); !strings.Contains(log.String(), want) {
+		t.Errorf("log %q does not say %s", log.String(), want)
 	}
 }
 
