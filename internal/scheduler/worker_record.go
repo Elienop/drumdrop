@@ -137,6 +137,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		return pl, nil
 	}
 	lib := w.Cfg.LibraryDir
+	fallback := filepath.Join(w.Cfg.DownloadsDir, rel)
 	if lib != "" && w.Cfg.Layout == LayoutPlexTV {
 		// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
 		// every entry to the episode base. output_dir = the season folder;
@@ -176,7 +177,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			}
 			return res.pending, nil
 		}
-		if keptInLibrary(prev, lib, entries) {
+		if keptInLibrary(prev, lib, entries, fallback) {
 			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
 		}
 	} else if lib != "" {
@@ -187,7 +188,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 		// The default layout learns nothing of the lesson's season-folder
 		// entries: a record it has is left as it is (rec.LibraryEntries nil).
-		if keptInLibrary(prev, lib, nil) {
+		if keptInLibrary(prev, lib, nil, fallback) {
 			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
 		}
 	}
@@ -207,35 +208,48 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 // rulings 2026-09-24 (f) and (i)).
 var errKeptInLibrary = errors.New("not placed: the placement in the library failed, and the lesson's copy there is kept")
 
-// keptInLibrary reports whether placing the lesson in the downloads folder,
-// once its placement in the library lib failed, would delete library files
-// its row prev says it owns, or stop recording them. That fallback records
-// the downloads folder as the lesson's output_dir, sets aside the lesson's
-// previous folder (previousFolder: a lesson folder, never a season folder)
-// if the download brings back every file in it, and records entries as the
-// lesson's library record (nil: the record is left as it is). So it would
-// when:
-//   - the row records the lesson's own folder in the library: the fallback
-//     replaces it, or leaves it where it is, no longer recorded (ruling
-//     (e)). This holds whatever the layout is today: a plex-tv install's row
-//     may record a folder the default layout placed before a layout switch;
+// keptInLibrary reports whether placing the lesson in its downloads folder
+// fallback, once its placement in the library lib failed, would delete
+// library files its row prev says it owns, or stop recording them. That
+// fallback records fallback as the lesson's output_dir, sets aside the
+// lesson's previous folder (previousFolder: a lesson folder, never a season
+// folder) if the download brings back every file in it, and records entries
+// as the lesson's library record (nil: the record is left as it is). So it
+// would when:
+//   - the row records the lesson's own folder in the library, and that
+//     folder is not fallback: the fallback replaces it, or leaves it where
+//     it is, no longer recorded (ruling (e)). This holds whatever the layout
+//     is today: a plex-tv install's row may record a folder the default
+//     layout placed before a layout switch;
 //   - the row records a season folder in the library and no record of its
 //     entries (a legacy row: it owns them only through output_dir), and
 //     entries, what the plex-tv move learned it owns there, is nil: once
 //     output_dir names the downloads folder, no lesson claims them.
 //
-// A season-folder row with a record, or whose entries the move learned (they
-// are recorded now), keeps them recorded, and the fallback touches nothing in
-// the library, so it falls back (ruling (i)); so does a lesson whose row
-// records nothing in the library.
-func keptInLibrary(prev database.Lesson, lib string, entries []string) bool {
-	if !inLibrary(prev, lib) {
+// A row that records fallback itself falls back: the library is the
+// downloads folder, or holds it, and the lesson was kept in downloads
+// before. That placement is the lesson's own folder (recordsFolder, as
+// placeLessonFolder decides it): it replaces only the lesson's own files at
+// the names the download brings back, as any re-download does, and the row
+// goes on recording that folder. A season-folder row with a record, or whose
+// entries the move learned (they are recorded now), keeps them recorded, and
+// the fallback touches nothing in the library, so it falls back (ruling
+// (i)); so does a lesson whose row records nothing in the library.
+func keptInLibrary(prev database.Lesson, lib string, entries []string, fallback string) bool {
+	if !inLibrary(prev, lib) || recordsFolder(prev, fallback) {
 		return false
 	}
 	if !library.IsSeasonDir(prev.OutputDir.String) {
 		return true
 	}
 	return entries == nil && !prev.LibraryEntries.Valid
+}
+
+// recordsFolder reports whether row l records dir as its folder
+// (output_dir), however each is spelled: the same path once cleaned, or the
+// same folder on disk (sameDir).
+func recordsFolder(l database.Lesson, dir string) bool {
+	return l.OutputDir.Valid && (filepath.Clean(l.OutputDir.String) == filepath.Clean(dir) || sameDir(l.OutputDir.String, dir))
 }
 
 // inLibrary reports whether the lesson's row records its folder inside the

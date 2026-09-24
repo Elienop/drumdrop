@@ -187,3 +187,103 @@ func TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T) {
 		})
 	}
 }
+
+// refuseFromJobInto refuses (a permission error) every rename from job 1's
+// private download folder into dir, as a full disk fails a copy: the
+// placement there fails and is undone. Only the download's own renames are
+// refused, so the set-aside renames and their put-back go through wherever
+// the roots are (the library may be, or hold, the downloads folder).
+func refuseFromJobInto(t *testing.T, w *Worker, dir string) {
+	t.Helper()
+	job := filepath.Join(w.Cfg.DownloadsDir, privateRootName, "job-1")
+	stubRename(t, func(oldpath, newpath string) error {
+		if filepath.Dir(newpath) == dir && library.Inside(job, oldpath) {
+			return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
+		}
+		return renameNoReplace(oldpath, newpath)
+	})
+}
+
+// TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder proves a
+// refused library placement still falls back to the downloads folder when
+// that fallback is the folder the lesson's row records (security round 5d
+// F3): the library is the downloads folder, or holds it, and an earlier
+// refused move kept the lesson in downloads. Placing it there replaces only
+// the lesson's own files at the names the download brings back, keeps the
+// rest, and the row goes on recording the same folder, so rulings (f) and (i)
+// have nothing to keep: the download is recorded, not failed.
+func TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder(t *testing.T) {
+	for _, c := range []struct {
+		name, layout string
+		nested       bool // the downloads folder is inside the library, not the library itself
+	}{
+		{"plex-tv, the library is the downloads folder", LayoutPlexTV, false},
+		{"plex-tv, the downloads folder inside the library", LayoutPlexTV, true},
+		{"default, the downloads folder inside the library", "", true},
+	} {
+		for _, how := range []string{"another lesson claims its place", "the placement fails"} {
+			t.Run(c.name+"/"+how, func(t *testing.T) {
+				w, store, dl, lib, season := plexWorker(t)
+				w.Cfg.Layout = c.layout
+				var log bytes.Buffer
+				w.Log = &log
+				w.Cfg.DownloadsDir = lib
+				if c.nested {
+					w.Cfg.DownloadsDir = filepath.Join(lib, "downloads")
+				}
+				dir := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+				writeTree(t, dir, map[string]string{"05 - Lesson A.mp4": "old mp4", "notes.txt": "owner notes"})
+				prev := database.Lesson{
+					RailcontentID: 100, Status: database.StatusDownloaded,
+					Position:  sql.NullInt64{Int64: 5, Valid: true},
+					OutputDir: sql.NullString{String: dir, Valid: true},
+					VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
+				}
+				store.lessons[100] = prev
+				store.withFiles = []database.Lesson{prev}
+				// Where the library placement goes: the season folder, or the
+				// lesson's folder in the library proper.
+				target := season
+				if c.layout == "" {
+					target = filepath.Join(lib, "Beginner Course", "05 - Lesson A")
+				}
+				switch {
+				case how == "the placement fails":
+					refuseFromJobInto(t, w, target)
+				case c.layout == LayoutPlexTV:
+					base := "Beginner Course - s01e05 - Lesson A"
+					seedSeason(t, season, base+".mp4")
+					store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
+				default:
+					writeTree(t, target, map[string]string{"05 - Lesson A.mp4": "lesson 200"})
+					store.withFiles = append(store.withFiles, database.Lesson{
+						RailcontentID: 200, Status: database.StatusDownloaded,
+						OutputDir: sql.NullString{String: target, Valid: true},
+						VideoPath: sql.NullString{String: filepath.Join(target, "05 - Lesson A.mp4"), Valid: true},
+					})
+				}
+
+				if _, err := w.RunOnce(context.Background(), 0); err != nil {
+					t.Fatalf("RunOnce: %v", err)
+				}
+				if len(dl.calls) != 1 || len(store.markFailed) != 0 {
+					t.Fatalf("downloads %d, failed %v; want one download, recorded (log %q)", len(dl.calls), store.markFailed, log.String())
+				}
+				rec := onlyRecord(t, store)
+				if rec.outputDir != dir || rec.videoPath != filepath.Join(dir, "05 - Lesson A.mp4") {
+					t.Errorf("recorded %q, video %q; want the lesson's own folder %q", rec.outputDir, rec.videoPath, dir)
+				}
+				if got, err := os.ReadFile(filepath.Join(dir, "05 - Lesson A.mp4")); err != nil || string(got) != "new mp4" {
+					t.Errorf("video = %q, %v; want the new download", got, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(dir, "notes.txt")); err != nil || string(got) != "owner notes" {
+					t.Errorf("notes.txt = %q, %v; want the owner's file kept", got, err)
+				}
+				if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", dir)) {
+					t.Errorf("log %q does not say where the lesson was kept", log.String())
+				}
+				assertNoReplacedArea(t, w)
+			})
+		}
+	}
+}

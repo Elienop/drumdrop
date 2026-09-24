@@ -286,7 +286,7 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 	if library.Inside(src.dir.Name(), dstDir) || sameDir(src.dir.Name(), dstDir) {
 		return nil, fmt.Errorf("refusing to place the lesson at %q: it is the downloaded folder itself", dstDir)
 	}
-	own := self.OutputDir.Valid && (filepath.Clean(self.OutputDir.String) == filepath.Clean(dstDir) || sameDir(self.OutputDir.String, dstDir))
+	own := recordsFolder(self, dstDir)
 
 	aside := newAsideArea(jobID)
 	var (
