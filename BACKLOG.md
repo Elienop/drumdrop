@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D135 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D138 on 2026-09-24 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -38,7 +38,7 @@ D126–D128 and corrected D58, D101, D113, D120, D121 and D125 against its own c
 the round-5e security seat's probes. The round-5g pass (same day and branch) added
 D129–D131 (D131 settled the same day by the refined ruling (t)) and extended D101 and
 D113 against its own code and a Chromium probe. The round-5h pass (same day and branch)
-added D132–D134, settled D129 by ruling (v), and corrected D58, D113, D128 and D130
+added D132–D137, settled D129 by ruling (v), and corrected D58, D113, D128 and D130
 against its own code and the round-5f/5g seats' probes._
 
 ## Next up
@@ -446,6 +446,21 @@ D53 waits on an owner decision.
     download succeeds (D120; round-5e security review, S2).
   - *Evidence:* `grep -n 'os.MkdirAll(root' internal/scheduler/library.go` ·
     `grep -n '^func OpenRoot' "$(go env GOROOT)/src/os/root.go"`
+- **D137 · A changed library setting re-points every record; not probed.**
+  - *What:* a lesson's record lists its files relative to the library
+    (`lessons.library_entries`), and every read joins them to today's library setting
+    (`library.Resolve`, `internal/library/record.go`). That is by design (ruling #66): a
+    record survives a remount or another spelling of the same folder. The case not yet
+    probed is a setting pointed at a *different* folder: what the disk check (ruling
+    (o)), a re-download and a Delete then do with records that name files under the new
+    root. Noticed by the round-5h Go fix while writing a root-move test; nothing is
+    known to be wrong.
+  - *Why:* Delete acts on the record, so it matters which root the record is read
+    against.
+  - *Fix (can wait):* probe it first: record a lesson, point the library setting at an
+    empty folder, then at a copy, and run a sync, a Download and a Delete in each.
+  - *Evidence:* `grep -n 'func Resolve' -A3 internal/library/record.go` ·
+    `grep -rn 'library.Resolve\|Resolve(root\|Resolve(c.root' internal/`
 - **D122 · A partial copy at the recorded video's name counts as on disk after a crash.**
   - *What:* across filesystems a placement sets the old video aside, then copies the new
     one straight to its final name (`copyFileInto`, `O_EXCL`). If drumdrop dies mid-copy,
@@ -1269,6 +1284,40 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     is lost: headers and cells hide together, and no cell spans columns.
   - *The question:* whether the quality needs a place below 1280px, and where.
   - *Evidence:* `grep -n 'WIDE_ONLY' web/src/pages/Lessons.tsx`
+- **D135 · An open row menu can still change or move under the reader in cases ruling
+  (v) doesn't cover.**
+  - *Context:* (v) closes a lesson's open ⋯ menu when the lesson starts or stops
+    downloading (D129). Found by the round-5h web fix, in headless Chromium against a
+    mock API (1280px, All):
+    - (a) Other changes to the lesson still change the open menu's items: another
+      client skips it (*Un-skip* appears first) or starts deleting it.
+    - (b) Before the start, the row already grows when its job is claimed (the progress
+      bar appears), and the open menu moves down 31px. In that run the resting pointer
+      ended between items, but it could land on *Skip*. The items haven't changed then,
+      so (v) doesn't close the menu.
+    - (c) If the row leaves the list while its menu is open (the Pending or Downloading
+      tab, or page 2 of All), the menu goes with it and focus drops to the page body,
+      not to a ⋯.
+    - (d) After (v) closes the menu, a click lands on whatever is underneath: a table
+      cell (harmless), or another row's ⋯, which opens that row's menu.
+  - *The question:* widen (v) to any change in a lesson's items or position, or leave
+    these as they are.
+  - *Evidence:* `grep -n 'function RowMenu' web/src/pages/Lessons.tsx` · the fixer's
+    report, `docs/superpowers/checkpoints/2026-09-23-library-fixes/round5h-fix-web.md`
+    (local only)
+- **D136 · With scroll anchoring off, a row that grows above the view moves the rows in
+  view.**
+  - *Context:* ruling (w) turned scroll anchoring off on the Lessons page
+    (`[overflow-anchor:none]` on its root, `b040729`), so a started download that moves
+    to the top of All no longer drags the reader's view (18 jumps in 15s before, 0
+    after). The cost: when content above the view grows, the browser no longer
+    compensates, so the rows in view shift down. A progress bar appearing at a claim
+    shifted them by about 62px (round-5h web fix, headless Chromium). Firefox and Safari
+    anchor differently and were not checked. The Queue page keeps anchoring: there, a
+    started job leaving the Queued tab above the view shifted the scroll by one row while
+    the same row stayed at the top, which is anchoring holding the view still.
+  - *The question:* accept the shift as (w)'s cost, or look for a way to keep both.
+  - *Evidence:* `grep -n 'overflow-anchor' web/src/pages/Lessons.tsx`
 - **D127 · A skipped lesson's menu offers *Un-skip* and *Download*, which now do almost
   the same thing.**
   - *Context:* since ruling (m) both start a sync at once. *Un-skip* sets the lesson
@@ -1802,8 +1851,9 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       so the table fits a 1024px window (`7a387e3` and the refinement after it; D131).
       Round-5d Info 2 is fixed by the Add
       follow line (`2566e5f`), whose wording goes beyond (s) to stay true in every
-      state: "Its lessons start downloading right away, or after the sync that's
-      running.", and while syncing is paused, "Syncing is paused: its lessons start
+      state. Round 5h reworded it (`909f7fb`, UI finding 5), because the first version
+      assumed a sync was running: "Its lessons start downloading right away, or after
+      any sync already running.", and while syncing is paused, "Syncing is paused: its lessons start
       downloading when you Resume." UI Low C is settled by (r) during planning: a lesson
       whose download starts still changes (its status), so it still moves to the top of
       All then; whether the page still jumps at that moment is for the browser pass (it
@@ -1837,13 +1887,17 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · round 5e: `go test -count=1 -run 'FallsBackIntoTheLessonsOwnFolder|RecordedFilesPresent|RecordsTheKeptVideo|KeepsAFolderTheDefaultLayoutPlaced|UnskipLessonRefusesWhileADeleteHoldsIt|WhileADeleteHoldsTheLesson' ./internal/scheduler/ ./internal/database/ ./internal/server/`
     and `cd web && npx vitest run src/lib/sse-reducer.test.ts src/pages/Queue.test.tsx src/pages/Follows.test.tsx src/pages/Lessons.test.tsx`
     · round 5f: `go test -count=1 -run 'IgnoresASymlinkToTheLibraryFolder|WithoutALibraryLeavesTheFolderASymlinkLedTo|OfALessonKeptInDownloads|KeepsALibraryFolderInsideTheDownloadsFolder|FallsBackIntoTheLessonsOwnFolder|KeepsALegacyEpisodeItCanNotName|StampsUpdatedAtOnlyOnAChange' ./internal/scheduler/ ./internal/database/`
-    and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'start downloading|starts downloading highlights|keeps its width|hides Brand and Quality'`
+    and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'start downloading|keeps its width|hides Brand and Quality'`
+    (round 5h replaced the (q) flip test, "…starts downloading highlights Copy path…",
+    with (v)'s tests below)
     · round 5h: `go test -count=1 -run 'KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|OfALessonKeptInDownloads|DoesNotTakeAFileForTheLessonsFolder|StampsUpdatedAtOnlyOnAChange|DoesNotRestampALessonTwoFollowsList' ./internal/scheduler/ ./internal/database/`
-    and the web half's tests for (v) and (w)
+    and `cd web && npx vitest run src/pages/Lessons.test.tsx src/pages/Follows.test.tsx -t 'under its open menu|stays closed when that attempt fails|no exit fade|stays open, its highlight|out of scroll anchoring|start downloading|reads as not paused'`
+    (web commits `3e04844`, `e4a71a2`, `909f7fb`, `b040729`, `6bb675c`)
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
     the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
-    web half and its rulings; D132–D134, from the round-5f/5g UI review;
+    web half and its rulings; D132–D134, from the round-5f/5g UI review; D135–D137,
+    from the round-5h fixes;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
@@ -1902,9 +1956,18 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Now:* ruling (v): when a lesson starts or stops downloading while its ⋯ menu is
     open, the menu closes, so nothing can be clicked or chosen on a menu whose items just
     changed. That covers the pointer and the keyboard, in both directions: the start,
-    and an attempt that fails or ends. Built by the web half of round 5h.
-  - *Evidence:* the web half's round-5h commit and test (named in D113's round-5h line
-    once both halves are merged).
+    and an attempt that fails or ends. Built by the web half of round 5h: each row's
+    menu is a small controlled `RowMenu` that remembers whether its lesson was
+    downloading when it opened, and closes in the same render that brings the new
+    items, so the changed menu is never shown open; focus goes back to ⋯, as Escape
+    sends it (`3e04844`, `e4a71a2`). That close has no exit fade (`6bb675c`): Radix
+    keeps a closing menu on screen for its fade, already showing the new items, and it
+    still takes clicks. In headless Chromium, with only the first commit, a click on
+    *Download*'s old spot during the fade still sent the cancel 3 times out of 3; with
+    the no-fade close, 0 of 5. A close the reader makes keeps its fade. Cases (v)
+    doesn't cover are D135.
+  - *Evidence:* `grep -n 'function RowMenu' web/src/pages/Lessons.tsx` ·
+    `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'under its open menu|stays closed when that attempt fails|no exit fade|stays open, its highlight'`
 - **D78 · A Skip was undone by a queued or running download.** This branch
   (`fix-library-delete-and-move`), PR number to follow.
   - *Was:* Skip only set the lesson's status, so its queued job was claimed and downloaded
