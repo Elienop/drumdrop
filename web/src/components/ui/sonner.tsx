@@ -7,13 +7,23 @@ import {
 } from "lucide-react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 
+// WHY THE "!" SUFFIXES: sonner injects its stylesheet as an UNLAYERED
+// <style> in <head> (wt() in node_modules/sonner/dist/index.mjs), while
+// Tailwind v4 puts every utility in @layer utilities. Under CSS Cascade 5 an
+// unlayered normal declaration beats a layered one WHATEVER its specificity,
+// so sonner's :where() rules still win over a plain class (seen in a browser:
+// the × kept top:0, its 1px border and its 50% radius, and the toast its 16px
+// padding). Tailwind's "!" suffix emits !important, which beats any normal
+// declaration. Only the properties sonner also sets need it: box-shadow (the
+// ring), top, border, border-radius and padding. Custom properties (the
+// --toast-close-button-* below, --tw-ring-color) and opacity are not
+// contested and need none.
+//
 // The one focus ring (decisions #68): ring-ring/60 at 3px, on keyboard focus
 // only. A failure toast stays until closed (failureToast), so a keyboard user
 // reaches it (Alt+T, then Tab) and must see where focus is. sonner's own
-// focus styles are an rgba(0,0,0,.2) shadow, invisible on this dark theme,
-// and the browser's outline on the close button; both sit in :where(), with
-// zero specificity, so these classes win.
-const FOCUS_RING = "outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60"
+// focus style is an rgba(0,0,0,.2) box-shadow, invisible on this dark theme.
+const FOCUS_RING = "outline-none focus-visible:ring-[3px]! focus-visible:ring-ring/60"
 
 // Dark-only app: there is no ThemeProvider, so the theme is hardcoded to "dark"
 // instead of reading next-themes' useTheme().
@@ -45,8 +55,8 @@ const Toaster = ({ ...props }: ToasterProps) => {
       }}
       toastOptions={{
         classNames: {
-          toast: `${FOCUS_RING} has-[[data-close-button]]:pr-10`,
-          closeButton: `${FOCUS_RING} top-4 rounded-xs border-0 opacity-70 hover:opacity-100 focus-visible:opacity-100`,
+          toast: `${FOCUS_RING} has-[[data-close-button]]:pr-10!`,
+          closeButton: `${FOCUS_RING} top-4! rounded-xs! border-0! opacity-70 hover:opacity-100 focus-visible:opacity-100`,
         },
       }}
       style={

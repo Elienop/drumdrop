@@ -4,14 +4,21 @@ import { toast } from "sonner"
 import { failureToast } from "@/lib/errors"
 import { Toaster } from "./sonner"
 
-// jsdom loads no CSS (css: false), so these pin the hooks the look is built
-// from: the classes sonner puts on the toast and its close button, and the
-// variables it positions the close button with. The browser pass checks the
-// look itself.
+// WHAT THESE DO NOT CHECK: the look. jsdom loads no CSS (css: false) and has
+// no cascade layers, so a class here can be present and still lose to
+// sonner's own unlayered stylesheet in a browser (that is how the × kept its
+// round badge while these passed, round 5). They pin only the hooks the look
+// is built from: the classes sonner puts on the toast and its close button,
+// with the "!" that lets them beat sonner's CSS (see sonner.tsx), and the
+// variables it positions the close button with. Whether the × really sits
+// level with the title, borderless, and whether the ring really shows, is for
+// the browser pass: read computed styles, not class names.
 
 afterEach(() => act(() => toast.dismiss()))
 
-const RING = ["outline-none", "focus-visible:ring-[3px]", "focus-visible:ring-ring/60"]
+// The ring's box-shadow must be !important: sonner's focus box-shadow is
+// unlayered and would win over a plain class.
+const RING = ["outline-none", "focus-visible:ring-[3px]!", "focus-visible:ring-ring/60"]
 
 async function stickyFailure() {
   render(<Toaster richColors />)
@@ -21,25 +28,25 @@ async function stickyFailure() {
   return { close, toastEl }
 }
 
-it("a focused toast and its close button show the one amber ring, on keyboard focus only", async () => {
+it("the toast and its close button carry the one focus ring's classes, !important, on keyboard focus only", async () => {
   const { close, toastEl } = await stickyFailure()
   expect(toastEl.className.split(/\s+/)).toEqual(expect.arrayContaining(RING))
   expect(close.className.split(/\s+/)).toEqual(expect.arrayContaining(RING))
   expect(`${toastEl.className} ${close.className}`).not.toMatch(/(^|\s)focus:/)
 })
 
-it("the close × sits inside the top-right corner, level with the title, as a plain button", async () => {
+it("the close button carries the classes and variables that place it top-right without the badge, !important where sonner sets the same property", async () => {
   const { close, toastEl } = await stickyFailure()
   const toaster = toastEl.closest<HTMLElement>("[data-sonner-toaster]")!
   // sonner's own position hooks: from the right edge, not the left, and not
-  // pushed half outside by a translate.
+  // pushed half outside by a translate. Custom properties, so no "!" needed.
   expect(toaster.style.getPropertyValue("--toast-close-button-start")).toBe("auto")
   expect(toaster.style.getPropertyValue("--toast-close-button-end")).toBe("0.75rem")
   expect(toaster.style.getPropertyValue("--toast-close-button-transform")).toBe("none")
-  // On the title's line (the toast's 16px padding), without the round badge.
+  // top, border and border-radius are all set by sonner too.
   expect(close.className.split(/\s+/)).toEqual(
-    expect.arrayContaining(["top-4", "border-0", "rounded-xs"]),
+    expect.arrayContaining(["top-4!", "border-0!", "rounded-xs!"]),
   )
-  // The text keeps clear of it.
-  expect(toastEl.className.split(/\s+/)).toContain("has-[[data-close-button]]:pr-10")
+  // The room kept clear on the right: sonner sets the toast's padding too.
+  expect(toastEl.className.split(/\s+/)).toContain("has-[[data-close-button]]:pr-10!")
 })
