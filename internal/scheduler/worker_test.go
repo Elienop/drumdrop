@@ -129,7 +129,7 @@ func (s *fakeWorkerStore) GetFollow(ctx context.Context, id int64) (database.Fol
 	}
 	f, ok := s.follows[id]
 	if !ok {
-		return database.Follow{}, errors.New("no such follow")
+		return database.Follow{}, fmt.Errorf("get follow %d: %w", id, sql.ErrNoRows)
 	}
 	return f, nil
 }
@@ -957,13 +957,12 @@ func TestWorkerNullFollowFallsBackToContentID(t *testing.T) {
 	}
 }
 
-func TestWorkerGetFollowErrorFallsBackToDefaults(t *testing.T) {
-	// The job references a follow, but GetFollow fails (e.g. the follow row was
-	// deleted between enqueue and claim). The worker must not abort: it logs,
-	// uses a zero follow, and folds under the lesson's parent title.
+func TestWorkerMissingFollowFallsBackToDefaults(t *testing.T) {
+	// The job references a follow whose row is gone (deleted between enqueue
+	// and claim). The worker must not abort: it logs, uses a zero follow, and
+	// folds under the lesson's parent title.
 	job := queuedJob(1, 42, 100)
-	store := newFakeWorkerStore(job)
-	store.getFollowErr = errors.New("follow gone")
+	store := newFakeWorkerStore(job) // no follow 42: GetFollow answers sql.ErrNoRows
 
 	les := lesson(100, "Resilient")
 	les.ParentContentData = []struct {

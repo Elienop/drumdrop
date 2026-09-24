@@ -108,6 +108,41 @@ func TestWorkerFailsBeforeDownloadingWhenTheLessonCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestWorkerFailsBeforeDownloadingWhenTheFollowCannotBeRead (round-5 code
+// Info) proves a follow row that can not be read (not one that is missing) is
+// never taken for "no follow": its defaults would name another folder, and
+// the placement would move the lesson's earlier download there (D66). The job
+// fails without downloading, and the earlier download stays where it is.
+func TestWorkerFailsBeforeDownloadingWhenTheFollowCannotBeRead(t *testing.T) {
+	for _, setup := range setups {
+		t.Run(setup, func(t *testing.T) {
+			w, store, _ := setupWorker(t, setup, "")
+			e := seedEarlier(t, w, store)
+			store.getFollowErr = errors.New("database is locked")
+			dl := &forceOverwriter{}
+			w.Downloader = dl
+			sink := &recordingSink{}
+			w.Progress = sink
+			var log bytes.Buffer
+			w.Log = &log
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if dl.calls != 0 || len(store.markDownloaded) != 0 || !reflect.DeepEqual(store.markFailed, []int{100}) {
+				t.Errorf("downloads %d, recorded %+v, failed %v; want no download, lesson 100 failed", dl.calls, store.markDownloaded, store.markFailed)
+			}
+			if got := store.lessonErr[100]; got != failNotStarted.lesson {
+				t.Errorf("lesson error = %q, want %q", got, failNotStarted.lesson)
+			}
+			assertSeeded(t, e.dir, e.names...)
+			if !strings.Contains(log.String(), "the follow's record could not be read") {
+				t.Errorf("log %q does not say why", log.String())
+			}
+			assertEndsOnce(t, sink, 1)
+		})
+	}
+}
+
 // failingWriter is a downloader that writes a lesson's video and a partial
 // file into its folder, then fails, as a download that dies at the end does.
 type failingWriter struct {

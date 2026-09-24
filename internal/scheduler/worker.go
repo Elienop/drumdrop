@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -278,20 +279,6 @@ func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err err
 func (w *Worker) execute(ctx context.Context, job database.Job) {
 	id := job.RailcontentID
 
-	// Load the follow for quality + folder title. A NULL/missing follow id (a
-	// job whose follow was deleted, or a manually enqueued job) falls back to a
-	// zero Follow, which outDirFor/qualityFor handle via Cfg defaults and the
-	// lesson's parent title below.
-	var follow database.Follow
-	if job.FollowID.Valid {
-		f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
-		if err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
-		} else {
-			follow = f
-		}
-	}
-
 	// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
 	// landing mid-resolve reaches either branch below with ctx already
 	// cancelled; both finalize via WithoutCancel (same reasoning as the cancel
@@ -320,6 +307,30 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		})
 		w.logAbandoned(id, w.Store.SkipDownload(context.WithoutCancel(ctx), job.ID, id, msgNotResolved))
 		return
+	}
+
+	// Load the follow for quality + folder title. A NULL follow id (a manually
+	// enqueued job), or one whose row is missing (the follow was deleted), falls
+	// back to a zero Follow, which outDirFor/qualityFor handle via Cfg defaults
+	// and the lesson's parent title. A follow that can't be read is not
+	// "missing": the job fails without downloading, and the next cycle tries
+	// again. Defaults would name another folder, and the placement would then
+	// move the lesson there (D66).
+	var follow database.Follow
+	if job.FollowID.Valid {
+		f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
+		switch {
+		case err == nil:
+			follow = f
+		case errors.Is(err, sql.ErrNoRows):
+			fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
+		default:
+			if w.shuttingDown(ctx, job, lesson) {
+				return
+			}
+			w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the follow's record could not be read: %w", err), failNotStarted)
+			return
+		}
 	}
 
 	outDir := w.outDir(follow, job, lesson)
