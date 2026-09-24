@@ -106,6 +106,14 @@ func TestWorkerFailsBeforeDownloadingWhenTheLessonCannotBeRead(t *testing.T) {
 	if !strings.Contains(log.String(), "the lesson's record could not be read") {
 		t.Errorf("log %q does not say why", log.String())
 	}
+	// Nor is it taken for "its files are on disk" (owner ruling 2026-09-24
+	// (o)): the lesson is failed as one without files is, and retried.
+	if onDisk, ok := store.onDisk[100]; !ok || onDisk {
+		t.Errorf("FailDownload's onDisk = %v (called %v), want false", onDisk, ok)
+	}
+	if !strings.Contains(log.String(), "⚠ 100: its record could not be read to check its files are on disk") {
+		t.Errorf("log %q does not say the files could not be checked", log.String())
+	}
 }
 
 // TestWorkerFailsBeforeDownloadingWhenTheFollowCannotBeRead (round-5 code
