@@ -26,6 +26,8 @@ const (
 	msgCanceled = "Stopped before it finished: the download was canceled."
 	// msgKeptInLibrary is failKeptInLibrary's sentence under the lesson.
 	msgKeptInLibrary = "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Download again."
+	// msgLeftBehind is failLeftBehind's sentence under the lesson.
+	msgLeftBehind = "Couldn't put this lesson in the library: its files are still in the old library folder. Move them to the new one, or set the library folder back, then Download again."
 )
 
 // msgEarlierKept is the note a failed download leaves on a lesson that still
@@ -70,6 +72,16 @@ var (
 		lesson: msgKeptInLibrary,
 		job:    "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Retry.",
 		kept:   msgKeptInLibrary,
+	}
+	// failLeftBehind is a download whose last attempt couldn't be placed in
+	// the library while the lesson's files are still in a folder the library
+	// setting no longer points at (errLeftBehind): they stay where they are,
+	// still recorded, and its sentence, which says the fix, is the lesson's
+	// note (owner ruling 2026-09-24 (y)).
+	failLeftBehind = failure{
+		lesson: msgLeftBehind,
+		job:    "Couldn't put this lesson in the library: its files are still in the old library folder. Move them to the new one, or set the library folder back, then Retry.",
+		kept:   msgLeftBehind,
 	}
 	// failNoFolder is a download not started because its private folder, in
 	// the downloads folder, couldn't be made.

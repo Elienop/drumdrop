@@ -104,10 +104,12 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 // then placed in the downloads folder instead, as drumdrop always kept a
 // lesson it could not move, and that is logged; unless that fallback would
 // delete library files the lesson owns, or stop recording them
-// (keptInLibrary): then it is not placed anywhere, the attempt fails
-// (errKeptInLibrary), its library copy stays recorded and as it was, and the
-// next attempt tries the library again (owner rulings 2026-09-24 (f) and
-// (i), by their reason: (f) applies where the fallback would delete). Which
+// (refuseFallback): then it is not placed anywhere, the attempt fails
+// (errKeptInLibrary, or errLeftBehind when the files stayed behind in a
+// folder the library setting no longer points at), its library copy stays
+// recorded and as it was, and the next attempt tries the library again
+// (owner rulings 2026-09-24 (f), (i) and (y), by their reason: (f) applies
+// where the fallback would delete). Which
 // lessons those are depends on what the row records, not on today's layout:
 // a row can record a folder written under the other layout. An error
 // returned means the download could not be placed, and nothing outside its
@@ -177,8 +179,8 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			}
 			return res.pending, nil
 		}
-		if keptInLibrary(prev, lib, w.Cfg.DownloadsDir, entries, fallback) {
-			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
+		if kerr := refuseFallback(claims, prev, lib, w.Cfg.DownloadsDir, entries, fallback); kerr != nil {
+			return nil, fmt.Errorf("%w: %v", kerr, err)
 		}
 	} else if lib != "" {
 		pl, err := placeFolder(lib)
@@ -188,8 +190,8 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 		// The default layout learns nothing of the lesson's season-folder
 		// entries: a record it has is left as it is (rec.LibraryEntries nil).
-		if keptInLibrary(prev, lib, w.Cfg.DownloadsDir, nil, fallback) {
-			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
+		if kerr := refuseFallback(claims, prev, lib, w.Cfg.DownloadsDir, nil, fallback); kerr != nil {
+			return nil, fmt.Errorf("%w: %v", kerr, err)
 		}
 	}
 	pl, err := placeFolder(w.Cfg.DownloadsDir)
@@ -201,6 +203,39 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 	}
 	return pl, nil
 }
+
+// refuseFallback is why a lesson whose placement in the library lib failed
+// must not fall back to its downloads folder fallback, or nil when it may:
+//   - errLeftBehind: its row records a season folder that is still there
+//     while the library setting now points at another folder
+//     (library.Claims.LeftBehind). The fallback would record the downloads
+//     folder and, for the season folder, only what the move learned under
+//     today's library (nothing, or a record naming the other folder), so the
+//     files would stay where the row says, recorded by nothing (owner ruling
+//     2026-09-24 (y); security round 5h M3 and N3). That holds wherever the
+//     recorded folder is, the downloads folder included (the library moved
+//     down from a tie with it);
+//   - errKeptInLibrary: the fallback would delete library files the row says
+//     the lesson owns, or stop recording them (keptInLibrary).
+//
+// LeftBehind is asked first, so after a library move keptInLibrary's rules
+// for season folders (an empty answer counts as none learned; a season folder
+// in the fallback's course folder is the library's) are a second line: they
+// decide only a row whose recorded folder is gone or is the one read now.
+func refuseFallback(claims *library.Claims, prev database.Lesson, lib, downloads string, entries []string, fallback string) error {
+	if dir, ok := claims.LeftBehind(prev); ok {
+		return fmt.Errorf("%w (%q)", errLeftBehind, dir)
+	}
+	if keptInLibrary(prev, lib, downloads, entries, fallback) {
+		return errKeptInLibrary
+	}
+	return nil
+}
+
+// errLeftBehind is a download not placed because its placement in the
+// library failed, and the lesson's files stayed behind in a season folder the
+// library setting no longer points at (refuseFallback).
+var errLeftBehind = errors.New("not placed: the placement in the library failed, and the lesson's files are still in a folder the library folder setting no longer points at; move them into the library folder, or set it back")
 
 // errKeptInLibrary is a download not placed because its placement in the
 // library failed, and placing it in the downloads folder instead would delete

@@ -34,6 +34,30 @@ var errRecordNotUpdated = errors.New("the lesson's record could not be updated")
 // detail is logged.
 var errNoClaims = errors.New("the other lessons' files could not be read")
 
+// errLeftBehind is the delete outcome "a lesson's files are still in a season
+// folder the library folder setting no longer points at" (leftBehind):
+// nothing was removed. Its detail is logged.
+var errLeftBehind = errors.New("a lesson's files are still in a folder the library setting no longer points at")
+
+// leftBehind reports whether any of lessons has its files left behind in a
+// season folder the library folder setting no longer points at
+// (library.Claims.LeftBehind), logging each one. A delete then removes
+// nothing (owner ruling 2026-09-24 (y)): it would read that season folder
+// under the library configured now, find nothing to remove, and report the
+// lesson deleted while its files stayed on disk, recorded by nothing. `main`
+// removed them, acting on the absolute folder; acting on it here would reach
+// outside today's roots, which library.Remove refuses by design.
+func leftBehind(c *library.Claims, lessons ...database.Lesson) bool {
+	found := false
+	for _, l := range lessons {
+		if dir, ok := c.LeftBehind(l); ok {
+			fmt.Fprintf(logOut, "drumdrop: delete lesson %d: nothing was removed: its files are still in %q, which is not where the library folder setting points now; move them into the library folder, or set it back\n", l.RailcontentID, dir)
+			found = true
+		}
+	}
+	return found
+}
+
 // roots are the folders a delete may remove files under: the downloads and
 // the library folders.
 func (s *Server) roots() []string {

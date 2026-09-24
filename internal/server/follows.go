@@ -276,7 +276,9 @@ func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 //     files could not all be removed, that lesson records only what is left,
 //     the follow and every lesson row are kept, the detail is logged, and the
 //     client gets a fixed 500: deleting the rows would leave those files
-//     tracked by nothing.
+//     tracked by nothing. If any lesson's files are still in a season folder
+//     the library folder setting no longer points at, nothing is removed and
+//     the answer is a 409 (deleteFollowFiles).
 //  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx). It
 //     refuses (409) if a lesson records files again by then (one the planner
 //     found after step 1 and downloaded meanwhile), and answers 404 if another
@@ -358,7 +360,12 @@ func (s *Server) removeFollowKeepingFiles(w http.ResponseWriter, r *http.Request
 }
 
 // deleteFollowFiles removes the files of every lesson that has any
-// (Lesson.HasFiles), and tombstones each one whose files are all gone. The
+// (Lesson.HasFiles), and tombstones each one whose files are all gone. When
+// any lesson's files are still in a season folder the library folder setting
+// no longer points at (leftBehind), it removes nothing at all and answers
+// 409: the refusal is known before the first removal, so the follow and
+// every lesson stay exactly as they were, rather than half deleted, and the
+// owner moves the files (or sets the folder back) and removes it again. The
 // lessons are as BeginFollowDelete read them, and nothing can change them
 // meanwhile: no download can record for a lesson being deleted. It writes the
 // error response and returns false when any lesson's files could not all be
@@ -367,6 +374,10 @@ func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, h
 	c, err := s.claims(ctx)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
+		return false
+	}
+	if leftBehind(c, lessons...) {
+		writeErr(w, http.StatusConflict, msgFollowLeftBehind)
 		return false
 	}
 	kept, changed := 0, 0

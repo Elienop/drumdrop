@@ -40,11 +40,19 @@ func refuseIntoSeason(t *testing.T, lib, season string) {
 // nothing in the downloads folder.
 func assertKeptInLibrary(t *testing.T, w *Worker, store *fakeWorkerStore) {
 	t.Helper()
+	assertRefusedAs(t, w, store, failKeptInLibrary)
+}
+
+// assertRefusedAs is assertKeptInLibrary for the refusal f: failKeptInLibrary,
+// or failLeftBehind (the files stayed behind in a folder the library setting
+// no longer points at).
+func assertRefusedAs(t *testing.T, w *Worker, store *fakeWorkerStore, f failure) {
+	t.Helper()
 	if len(store.markDownloaded) != 0 {
 		t.Errorf("recorded %+v, want nothing (the library copy stays recorded)", store.markDownloaded)
 	}
-	if !reflect.DeepEqual(store.markFailed, []int{100}) || store.keptErr[100] != failKeptInLibrary.kept || store.jobs[1].Error.String != failKeptInLibrary.job {
-		t.Errorf("failed %v, kept note %q, job %q; want lesson 100 ended with failKeptInLibrary", store.markFailed, store.keptErr[100], store.jobs[1].Error.String)
+	if !reflect.DeepEqual(store.markFailed, []int{100}) || store.keptErr[100] != f.kept || store.jobs[1].Error.String != f.job {
+		t.Errorf("failed %v, kept note %q, job %q; want lesson 100 ended with %q", store.markFailed, store.keptErr[100], store.jobs[1].Error.String, f.job)
 	}
 	if p := findContent(t, w.Cfg.DownloadsDir, "new mp4"); p != "" {
 		t.Errorf("the download was placed in downloads at %q", p)
@@ -120,7 +128,11 @@ func TestWorkerPlexTvRefusedMoveKeepsAFolderTheDefaultLayoutPlaced(t *testing.T)
 // placed it while it was the downloads folder, before its root moved up (the
 // library at <media>, downloads at <media>/drumeo; security round 5f-5g N1,
 // B1): the fallback never writes a season folder, so that one is the
-// library's, not a folder an earlier refused move kept in downloads.
+// library's, not a folder an earlier refused move kept in downloads. Since
+// round 5i that moved-up case is refused first because its files stayed
+// behind in a folder the library setting no longer points at
+// (failLeftBehind, owner ruling 2026-09-24 (y)); the course-folder rule
+// itself is pinned by TestKeptInLibraryDecidesByWhatTheRowRecords.
 func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName(t *testing.T) {
 	for _, where := range []string{"the downloads folder beside the library", dlIsLibrary, dlInLibrary, dlMovedUp} {
 		t.Run(where, func(t *testing.T) {
@@ -141,6 +153,10 @@ func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName(t *testing.T) {
 				t.Fatalf("RunOnce: %v", err)
 			}
 			assertContent(t, rowSeason, video, caps)
+			if where == dlMovedUp {
+				assertRefusedAs(t, w, store, failLeftBehind)
+				return
+			}
 			assertKeptInLibrary(t, w, store)
 		})
 	}
@@ -161,6 +177,10 @@ const libMovedUpBeside = "the library moved up, the downloads folder beside it"
 // says, and once output_dir names the downloads folder nothing claims them.
 // It holds with the downloads folder inside the library (the library moved
 // up from it) and beside it (the library moved up from a folder of its own).
+// Both refusals apply here: the files stayed behind in a folder the library
+// setting no longer points at, which is asked first (failLeftBehind, owner
+// ruling 2026-09-24 (y)), and keptInLibrary counts an empty answer as none
+// learned (pinned on its own by TestKeptInLibraryDecidesByWhatTheRowRecords).
 func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere(t *testing.T) {
 	names := []string{"Beginner Course - s01e05 - Lesson A.mp4", "Beginner Course - s01e05 - Lesson A.nfo", "Beginner Course - s01e05 - Lesson A.en.vtt"}
 	for _, where := range []string{dlMovedUp, libMovedUpBeside} {
@@ -181,7 +201,48 @@ func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere(t *t
 				t.Fatalf("RunOnce: %v", err)
 			}
 			assertContent(t, rowSeason, names...)
-			assertKeptInLibrary(t, w, store)
+			assertRefusedAs(t, w, store, failLeftBehind)
+		})
+	}
+}
+
+// TestKeptInLibraryDecidesByWhatTheRowRecords pins two rules of keptInLibrary
+// on their own, since a moved library is refused before it is asked
+// (refuseFallback: failLeftBehind first), so the worker tests above no longer
+// tell them apart:
+//   - a legacy season row is kept when the move learned none of its entries,
+//     nil ("unknown") or empty ("[]", read in a folder that is not the
+//     recorded one; security round 5h F1), and falls back once it learned
+//     some (they are recorded then). The trade of the empty case: a legacy
+//     row whose episode files are all really gone is refused too;
+//   - with the downloads folder inside the library, a season folder in the
+//     course folder the fallback goes into is the library's (round 5h H1),
+//     while a lesson folder there is the downloads folder's.
+func TestKeptInLibraryDecidesByWhatTheRowRecords(t *testing.T) {
+	lib := filepath.Join(t.TempDir(), "lib")
+	downloads := filepath.Join(lib, "downloads")
+	fallback := filepath.Join(downloads, "Beginner Course", "05 - Lesson A")
+	video := "Beginner Course - s01e05 - Lesson A.mp4"
+	learned := []string{"Beginner Course/Season 01/" + video}
+	for _, c := range []struct {
+		name    string
+		row     string
+		entries []string
+		want    bool
+	}{
+		{"legacy row in the library, nothing learned (nil)", filepath.Join(lib, "Beginner Course", "Season 01"), nil, true},
+		{"legacy row in the library, an empty answer", filepath.Join(lib, "Beginner Course", "Season 01"), []string{}, true},
+		{"legacy row in the library, entries learned", filepath.Join(lib, "Beginner Course", "Season 01"), learned, false},
+		{"legacy row in the fallback's course folder, an empty answer", filepath.Join(downloads, "Beginner Course", "Season 01"), []string{}, true},
+		{"legacy row in the fallback's course folder, entries learned", filepath.Join(downloads, "Beginner Course", "Season 01"), learned, false},
+		{"lesson folder in the fallback's course folder", filepath.Join(downloads, "Beginner Course", "05 - Old Title"), nil, false},
+		{"lesson folder in the library", filepath.Join(lib, "Beginner Course", "05 - Old Title"), nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prev := legacyRow(100, "Lesson A", 5, c.row, video)
+			if got := keptInLibrary(prev, lib, downloads, c.entries, fallback); got != c.want {
+				t.Errorf("keptInLibrary = %v, want %v", got, c.want)
+			}
 		})
 	}
 }
@@ -230,9 +291,12 @@ func TestWorkerPlexTvRefusedMoveOfALegacyRowRecordsWhatItOwns(t *testing.T) {
 // downloads folder, which would leave its season-folder files unclaimed. The
 // legacy row is kept too when its season folder is one the library placed
 // before its root moved up, now in the downloads fallback's course folder
-// (security round 5f-5g N1, B4). (A recorded row has no such case: its
-// entries are "<show>/Season NN/<name>" against the library root, so a root
-// move leaves them naming another folder.)
+// (security round 5f-5g N1, B4), and so is a recorded row there: its entries
+// are "<show>/Season NN/<name>" against the library root, so after the root
+// moved they name another folder, and falling back would leave the real
+// files recorded by nothing. Both moved-up rows are refused because the
+// files stayed behind in a folder the library setting no longer points at
+// (failLeftBehind, owner ruling 2026-09-24 (y)).
 func TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T) {
 	base := "Beginner Course - s01e05 - Lesson A"
 	names := []string{base + ".mp4", base + ".nfo"}
@@ -243,6 +307,7 @@ func TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T) {
 		{"the downloads folder beside the library", true},
 		{"the downloads folder beside the library", false},
 		{dlMovedUp, false},
+		{dlMovedUp, true},
 	} {
 		t.Run(fmt.Sprintf("%s/recorded=%v", c.where, c.recorded), func(t *testing.T) {
 			w, store, _, lib, season := plexWorker(t)
@@ -266,6 +331,10 @@ func TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T) {
 				t.Fatalf("RunOnce: %v", err)
 			}
 			assertContent(t, rowSeason, names...)
+			if c.where == dlMovedUp {
+				assertRefusedAs(t, w, store, failLeftBehind)
+				return
+			}
 			if !c.recorded {
 				assertKeptInLibrary(t, w, store)
 				return

@@ -212,6 +212,40 @@ func (c *Claims) seasonFolder(outputDir string) string {
 	return filepath.Join(c.root, filepath.Base(filepath.Dir(d)), filepath.Base(d))
 }
 
+// LeftBehind reports whether lesson l's files stayed behind in the season
+// folder its row records while the library folder setting now points at
+// another folder, and returns that folder. Every reader of a season-folder
+// row reads it under the library folder configured now (a record resolves
+// under it, Resolve; a legacy row is re-pointed to seasonFolder), so once the
+// setting points elsewhere with the files not moved, those readers look in a
+// folder that does not hold them: a delete finds nothing to remove and
+// reports the lesson deleted, and a fallback to downloads stops recording
+// them, while they are still on disk, recorded by nothing. Both refuse
+// instead (owner ruling 2026-09-24 (y)).
+//
+// It does when the recorded folder is still there and is not the folder it is
+// read as now, as written or under another spelling (sameFolder: a symlink, a
+// bind path). So a library moved or remounted with its files (the recorded
+// path is gone), and a setting spelled another way, are read as before. A
+// recorded folder whose existence can not be read counts as there: when
+// unsure, keep. A row that records no season folder (a lesson folder, or
+// none) is not read under the library: a lesson folder is acted on where its
+// row says. Without a library folder, seasonFolder reads a season folder
+// where it is recorded (Plan refuses it then anyway): false too.
+func (c *Claims) LeftBehind(l database.Lesson) (string, bool) {
+	if !IsSeasonDir(l.OutputDir.String) {
+		return "", false
+	}
+	recorded := absPath(l.OutputDir.String)
+	if _, err := os.Stat(recorded); errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if c.sameFolder(recorded, c.seasonFolder(l.OutputDir.String)) {
+		return "", false
+	}
+	return recorded, true
+}
+
 // legacyRow is a row without a record read under the library folder
 // configured now: its output_dir becomes seasonFolder, and a video recorded in
 // that folder moves with it.

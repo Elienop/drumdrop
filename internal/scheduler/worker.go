@@ -466,7 +466,10 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 			derr = rerr
 		}
 		final = failDownload
-		if errors.Is(derr, errKeptInLibrary) {
+		switch {
+		case errors.Is(derr, errLeftBehind):
+			final = failLeftBehind
+		case errors.Is(derr, errKeptInLibrary):
 			final = failKeptInLibrary
 		}
 

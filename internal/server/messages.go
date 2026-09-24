@@ -99,6 +99,10 @@ const (
 	msgLessonNoClaims  = "Nothing was deleted, but any download of this lesson was stopped: DrumDrop couldn't read which files other lessons use. Check the server log, fix the problem, then Delete again."
 	msgLessonChanged   = "The delete didn't finish: this lesson changed while it ran, so some of its files may be gone while it's still listed. Delete again to finish."
 	msgLessonNotSaved  = "This lesson's files were deleted as far as possible, but DrumDrop couldn't save that, so it may still list them. Check the server log, fix the problem, then Delete again."
+	// msgLessonLeftBehind: the lesson's files are still in a season folder
+	// the library folder setting no longer points at (owner ruling
+	// 2026-09-24 (y)).
+	msgLessonLeftBehind = "Nothing was deleted: this lesson's files are still in the old library folder. Move them to the new one, or set the library folder back, then Delete again. Any download of it was stopped."
 )
 
 // Lesson skip (POST /api/lessons/{id}/skip).
@@ -118,6 +122,9 @@ const (
 	msgFollowNotSaved      = "The follow's files were deleted as far as possible, but DrumDrop couldn't save that, so the follow was kept and may still list them. Check the server log, fix the problem, then Remove again."
 	msgFollowGoneLate      = "This follow was removed elsewhere while its lessons' files were being deleted. There's nothing left to remove."
 	msgFollowNotRemoved    = "The follow wasn't removed, and nothing was changed. Check the server log, fix the problem, then Remove again."
+	// msgFollowLeftBehind: see msgLessonLeftBehind; no lesson of the follow
+	// was deleted.
+	msgFollowLeftBehind = "Nothing was deleted and the follow was kept: some of its lessons' files are still in the old library folder. Move them to the new one, or set the library folder back, then Remove again. Its downloads were stopped."
 )
 
 // Follow edit (PATCH /api/follows/{id}).
