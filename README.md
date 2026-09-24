@@ -151,13 +151,21 @@ creates a missing library folder, and writes into the empty folder a drive is mo
 on, so the first retry whose download succeeds is placed on the disk underneath and
 recorded there, and syncs stop retrying. Once the drive is back, it hides that copy: the
 lesson's recorded paths read the drive's older copy again, and the retry's copy takes
-space on the other disk, out of sight under the mount point. A lesson downloaded for the
-first time while the drive is out is placed there the same way, and once the drive is
-back its recorded files aren't there. A re-download is retried every sync until the
-drive is back only while the library path answers with an error (a failing mount, say),
-so that its placement fails. A re-download that Musora doesn't return, or that you
-cancel, while the drive is out ends skipped instead, and stays skipped when the drive is
-back; *Download* or *Un-skip* brings it back (BACKLOG D120, D121).
+space on the other disk, out of sight under the mount point. In the plex-tv layout that
+retry's record lists only what it placed (say, the video and its `.nfo`), so once the
+drive is back, the drive's other files for the episode (captions, a poster) are recorded
+by no lesson, and a *Delete* leaves them. A lesson downloaded for the first time while
+the drive is out is placed there the same way, and once the drive is back its recorded
+files aren't there. While the library path answers with an error instead (a failing
+mount, say), the placement fails: in the default layout the lesson fails and every sync
+retries it until the drive is back. In the plex-tv layout the failed move of a lesson
+whose library files are recorded falls back to the downloads dir, as any refused move
+does (see [Plex library](#plex-library-single-parent-bind-mount)), so the retry is placed and recorded there, the library files
+stay recorded, and syncs stop retrying; nothing is lost. Only when the downloads dir sits
+on the same failing mount does that fail too, and syncs retry. A
+re-download that Musora doesn't return, or that you cancel, while the drive is out ends
+skipped instead, and stays skipped when the drive is back; *Download* or *Un-skip* brings
+it back (BACKLOG D120, D121).
 
 A lesson Musora doesn't return (locked for your account, or removed) is skipped, and
 syncs leave it alone until it is un-skipped. One whose earlier download is still on
@@ -305,11 +313,18 @@ recorded: the attempt fails instead. Each attempt downloads the lesson again, an
 the last one fails this way the lesson stays downloaded, if its files are on disk (see
 [Daemon](#daemon-unattended-auto-sync)), with the note "Couldn't put this lesson in the
 library, so its copy there was kept. Check the server log, fix the problem, then Download
-again." The exception is a lesson whose recorded folder is the very folder it would be
-placed in within downloads (the library is the downloads dir, or holds it, and an
-earlier refused move kept the lesson there): placing it there replaces only its own
-files at the names the download brings back, as any re-download does, so it is placed
-and recorded. Any other lesson, a plex-tv one whose library files are recorded or one with
+again." A lesson whose recorded folder is in the downloads dir isn't in the library,
+even when the downloads dir sits inside the library (an earlier refused move kept it
+there): it is placed in downloads, and its old folder, when its title has changed since,
+is handled as any previous folder is (below). When the library is the downloads dir, a
+folder in it counts as the library's. The exception is a lesson whose recorded folder
+is the very folder it would be placed in within downloads (the library is the downloads
+dir, and an earlier refused move kept the lesson there): placing it there replaces only
+its own files at the names the download brings back, as any re-download does, so it is
+placed and recorded. A symlink at that path doesn't count, even one that leads to the
+lesson's library folder: the placement would replace the symlink with a new folder and
+leave the library folder recorded by no lesson, so the attempt fails instead. Any other
+lesson, a plex-tv one whose library files are recorded or one with
 none, is placed in downloads, and the library files it already had stay recorded (see
 [Plex TV layout](#plex-tv-layout)). If the copy finished but the download's own folder
 can't be removed afterwards, the library copy is kept and recorded, and the folder left
@@ -384,8 +399,10 @@ have two spellings, which drumdrop isn't built for. The same path written the sa
 allowed. In the default layout a finished download is then placed in its lesson folder
 there, as with no library; in the plex-tv layout lessons are still filed into
 `<Show>/Season 01/` folders inside that one dir. When a move there is refused, the rule
-above says whether the lesson is placed in its lesson folder in that dir instead; one an
-earlier refused move already kept there always is.
+above says whether the lesson is placed in its lesson folder in that dir instead. One an
+earlier refused move already kept there always falls back there, but that placement can
+fail too: in the default layout it is the very placement that just failed, so it fails
+the same way.
 
 Deleting a lesson (or a follow with its files) only ever removes files inside the downloads
 and library dirs. A path that reaches outside them through a symlinked folder is refused,
