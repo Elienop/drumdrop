@@ -101,10 +101,89 @@ it("Pause keeps keyboard focus on the button while its request runs", async () =
   await waitFor(() => expect(btn).toHaveAttribute("aria-disabled", "true"))
   expect(btn).toHaveFocus()
   expect(btn).toBeEnabled()
-  expect(btn).toHaveAccessibleName("Pausing…")
   answer()
   await waitFor(() => expect(btn).not.toHaveAttribute("aria-disabled"))
   expect(btn).toHaveFocus()
+})
+
+// Owner's ruling 2026-09-24, (l): Pause stays as compact as Sync beside it.
+// jsdom cannot measure a width, so this pins what the width is made of: the
+// spinner TAKES the icon's place (one icon, a direct child of the button, so
+// Button's own icon padding and its small size's gap apply), the label stays
+// the pressed verb, and no hidden longer label is laid out to reserve room.
+it("while Pause runs, the spinner replaces the icon and the label stays 'Pause', with nothing extra laid out", async () => {
+  let paused = false
+  let answer!: () => void
+  server.use(
+    http.get(`${ORIGIN}/api/summary`, () => HttpResponse.json(summary(paused))),
+    http.post(
+      `${ORIGIN}/api/pause`,
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () => {
+            paused = true
+            resolve(HttpResponse.json({ paused: true }))
+          }
+        }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(<TopBar />)
+
+  const btn = await screen.findByRole("button", { name: "Pause" })
+  const layout = () => ({
+    icons: btn.querySelectorAll("svg").length,
+    ownIcons: btn.querySelectorAll(":scope > svg").length,
+    spinning: btn.querySelectorAll(":scope > svg.animate-spin").length,
+    stacked: btn.querySelectorAll("[data-label]").length,
+    text: btn.textContent,
+  })
+  expect(layout()).toEqual({ icons: 1, ownIcons: 1, spinning: 0, stacked: 0, text: "Pause" })
+
+  await user.click(btn)
+  await waitFor(() => expect(btn).toHaveAttribute("aria-disabled", "true"))
+  expect(layout()).toEqual({ icons: 1, ownIcons: 1, spinning: 1, stacked: 0, text: "Pause" })
+  expect(btn).toHaveAccessibleName("Pause")
+
+  answer()
+  await waitFor(() => expect(btn).toHaveAccessibleName("Resume"))
+  expect(layout()).toEqual({ icons: 1, ownIcons: 1, spinning: 0, stacked: 0, text: "Resume" })
+})
+
+// onSettled RETURNS the refetch, so the press stays pending until the new
+// flag is in. If it did not, the button would be live again for one round
+// trip, still offering "Pause" on a daemon that is already paused.
+it("after the pause is answered the button stays pending until the flag is re-read, then offers Resume", async () => {
+  let paused = false
+  let holdSummary = false
+  let releaseSummary!: () => void
+  server.use(
+    http.get(`${ORIGIN}/api/summary`, () =>
+      holdSummary
+        ? new Promise<Response>((resolve) => {
+            releaseSummary = () => resolve(HttpResponse.json(summary(paused)))
+          })
+        : HttpResponse.json(summary(paused)),
+    ),
+    http.post(`${ORIGIN}/api/pause`, () => {
+      paused = true
+      holdSummary = true
+      return HttpResponse.json({ paused: true })
+    }),
+  )
+  const user = userEvent.setup()
+  renderWithProviders(<TopBar />)
+
+  const btn = await screen.findByRole("button", { name: "Pause" })
+  await user.click(btn)
+  // The pause is answered and the re-read is on its way, held here.
+  await waitFor(() => expect(releaseSummary).toBeTypeOf("function"))
+  expect(btn).toHaveAttribute("aria-disabled", "true")
+  expect(btn).toHaveAccessibleName("Pause")
+
+  releaseSummary()
+  await waitFor(() => expect(btn).toHaveAccessibleName("Resume"))
+  expect(btn).not.toHaveAttribute("aria-disabled")
 })
 
 // After a failure the flag is re-read too, not only after a success: a
