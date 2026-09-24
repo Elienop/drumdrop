@@ -7,6 +7,15 @@ import { vi } from "vitest"
 // dialog shows while closing. holdClosingOverlays reproduces Radix's
 // condition by stubbing exactly that one property from data-state. Undo it
 // with vi.unstubAllGlobals() in an afterEach.
+//
+// One class opts a closed element out of its fade:
+// `data-[state=closed]:animate-none!`, built as `animation:none!important`
+// (RowMenu in pages/Lessons.tsx). The stub reads it live, as the browser
+// does, so Presence sees "none" only if the class is on the element when it
+// reads the animation, in the commit that closes it
+// (@radix-ui/react-presence, usePresence's layout effect). A class that
+// arrives a commit later leaves the element closing, and stuck: Presence's
+// animationend check then no longer matches.
 export function holdClosingOverlays() {
   const real = globalThis.getComputedStyle.bind(globalThis)
   vi.stubGlobal("getComputedStyle", (el: Element, pseudo?: string | null) => {
@@ -18,7 +27,9 @@ export function holdClosingOverlays() {
     return new Proxy(style, {
       get(target, prop) {
         if (prop === "animationName") {
-          return el.getAttribute("data-state") === "closed" ? "x-out" : "x-in"
+          if (el.getAttribute("data-state") !== "closed") return "x-in"
+          // `animation: none !important` on a closed element, as the built CSS has it
+          return el.classList.contains("data-[state=closed]:animate-none!") ? "none" : "x-out"
         }
         const value: unknown = Reflect.get(target, prop)
         return typeof value === "function" ? (value as () => unknown).bind(target) : value

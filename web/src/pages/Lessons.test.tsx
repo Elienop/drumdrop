@@ -1655,10 +1655,15 @@ describe("when a download starts", () => {
   // spot canceled the download it had just started (round 5h). So the close
   // a start or an end makes has no fade: the class below sets `animation:
   // none !important` on the closed menu, and Presence then removes it before
-  // a paint. jsdom has no stylesheet, so holdClosingOverlays stands in for
-  // the fade and this checks which close gets the class; the browser run
-  // checked what the class does.
-  it("a menu closed by a start leaves with no exit fade; one the user closes keeps its fade", async () => {
+  // a paint. Presence reads the animation once, in the commit that closes
+  // the menu, so the class must already be there in that commit. One that
+  // arrives later (set from an effect, say) leaves the menu stuck closing,
+  // on screen and clickable: measured in Chromium, a click on it sent a
+  // cancel (round 5h code review). jsdom has no stylesheet, so
+  // holdClosingOverlays stands in for the fade and reads the class live,
+  // as the browser does: the menu is gone at once only if the class was on
+  // it in the closing commit.
+  it("a menu closed by a start or an end is gone in the same commit, with no exit fade; one the user closes keeps its fade", async () => {
     const NO_FADE = "data-[state=closed]:animate-none!"
     holdClosingOverlays()
     try {
@@ -1682,10 +1687,10 @@ describe("when a download starts", () => {
           max_attempts: 3,
         }),
       )
-      await waitFor(() => expect(closing()).not.toBeNull())
-      expect(closing()!.className.split(/\s+/)).toContain(NO_FADE)
-      act(() => finishClosing())
-      expect(closing()).toBeNull()
+      await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("downloading"))
+      // No finishClosing(): the commit that shows "downloading" is the one
+      // that closed the menu, and the menu is already gone.
+      expect(document.querySelector('[role="menu"]')).toBeNull()
 
       // The user's own close after that keeps the fade.
       await openAt(user, "Swiss Army Triplet", "Copy path")
@@ -1694,6 +1699,24 @@ describe("when a download starts", () => {
       await waitFor(() => expect(closing()).not.toBeNull())
       expect(closing()!.className.split(/\s+/)).not.toContain(NO_FADE)
       act(() => finishClosing())
+      expect(closing()).toBeNull()
+
+      // An end closes it the same way.
+      await openAt(user, "Swiss Army Triplet", "Copy path")
+      now = { ...pending, status: "failed", error: FAILED_NOTE }
+      act(() =>
+        sendEvent({
+          kind: "attempt_failed",
+          job_id: 92,
+          railcontent_id: 290,
+          title: "Swiss Army Triplet",
+          attempt: 3,
+          max_attempts: 3,
+          error: "The download failed.",
+        }),
+      )
+      await waitFor(() => expect(rowOf("Swiss Army Triplet")).toHaveTextContent("failed"))
+      expect(document.querySelector('[role="menu"]')).toBeNull()
     } finally {
       vi.unstubAllGlobals()
     }
