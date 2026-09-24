@@ -1363,8 +1363,102 @@ describe("when a download starts", () => {
     const cancel = await screen.findByRole("menuitem", { name: "Cancel download" })
     expect(cancel).not.toHaveAttribute("aria-disabled")
     expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
-      "Cancel download",
       "Copy path",
+      "Cancel download",
     ])
   })
+
+  // Owner's ruling 2026-09-24, (q). The menu is built from the live row, so a
+  // download that starts while it is open swaps Download for Cancel download
+  // under the user. Radix then highlights the menu's first item (focus-scope
+  // refocuses the menu when the focused item is removed, and the menu focuses
+  // its first item), so that item must be harmless: Enter copies the path and
+  // never cancels (UI review round 5e, Low A). The highlighted Download must
+  // also go, not be reused as the Cancel download in its place.
+  it("an open menu whose lesson starts downloading highlights Copy path, and Enter doesn't cancel", async () => {
+    const queued: LessonDTO = { ...lessons[1], railcontent_id: 250, title: "Swiss Army Triplet" }
+    const downloading: LessonDTO = {
+      ...queued,
+      status: "downloading",
+      output_dir: "/media/drumeo/250",
+    }
+    // The running job is listed from the start, so Cancel download is enabled
+    // the moment it appears: the worst case, where the jobs refresh lands
+    // before the lessons one. A disabled Cancel would be skipped by the
+    // highlight and hide a wrong order.
+    const running: JobDTO = { ...job, id: 88, railcontent_id: 250, status: "running", attempts: 1 }
+    let started = false
+    let canceled = false
+    server.use(
+      http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json([started ? downloading : queued])),
+      http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json([running])),
+      http.post(`${ORIGIN}/api/jobs/:id/cancel`, () => {
+        canceled = true
+        return HttpResponse.json({ ...running, status: "canceled" })
+      }),
+    )
+    setToken("test-token") // the event stream opens only with a stored token
+    const user = userEvent.setup()
+    renderLessons()
+
+    // Opened from the keyboard, the menu highlights its first item: Download.
+    const trigger = await screen.findByRole("button", { name: "Actions for Swiss Army Triplet" })
+    trigger.focus()
+    await user.keyboard("{Enter}")
+    const downloadItem = await screen.findByRole("menuitem", { name: "Download" })
+    await waitFor(() => expect(downloadItem).toHaveFocus())
+    expect(downloadItem).toHaveAttribute("data-highlighted")
+
+    started = true
+    act(() =>
+      sendEvent({
+        kind: "download_started",
+        job_id: 88,
+        railcontent_id: 250,
+        title: "Swiss Army Triplet",
+        attempt: 1,
+        max_attempts: 3,
+      }),
+    )
+
+    // The same open menu now reads the downloading lesson's items, and the
+    // highlight is on Copy path.
+    await waitFor(() =>
+      expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+        "Copy path",
+        "Cancel download",
+      ]),
+    )
+    expect(screen.getByRole("menuitem", { name: "Cancel download" })).not.toHaveAttribute(
+      "aria-disabled",
+    )
+    const copy = screen.getByRole("menuitem", { name: "Copy path" })
+    await waitFor(() => expect(copy).toHaveFocus())
+
+    await user.keyboard("{Enter}")
+    expect(await screen.findByText("Path copied")).toBeInTheDocument()
+    await expect(navigator.clipboard.readText()).resolves.toBe("/media/drumeo/250")
+    expect(canceled).toBe(false)
+    expect(screen.queryByText("Download canceled")).not.toBeInTheDocument()
+  })
+})
+
+// Owner's ruling 2026-09-24, (q): while a lesson downloads, Copy path comes
+// first, Cancel download after it, and Delete stays last.
+it.each([
+  [true, ["Copy path", "Cancel download", "Delete"]],
+  [false, ["Copy path", "Cancel download"]],
+])("a downloading lesson's menu (has files: %s) reads %j", async (hasFiles, items) => {
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, () =>
+      HttpResponse.json([{ ...lessons[2], has_files: hasFiles }]),
+    ),
+    http.get(`${ORIGIN}/api/jobs`, () => HttpResponse.json([runningJob])),
+  )
+  const user = userEvent.setup()
+  renderLessons()
+
+  await user.click(await screen.findByRole("button", { name: "Actions for Paradiddle" }))
+  await screen.findByRole("menuitem", { name: "Copy path" })
+  expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual(items)
 })

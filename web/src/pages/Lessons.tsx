@@ -382,6 +382,18 @@ export function Lessons() {
                   // While a delete of it runs, no action is offered that would
                   // race it (the server may refuse them anyway).
                   const busy = lesson.deleting
+                  // The running job Cancel stops: unknown until the jobs load.
+                  const jobId = runningJobByRailcontent.get(lesson.railcontent_id)
+                  // Every menu item is keyed by its action. The items are
+                  // built from the live row, and React reuses an unkeyed
+                  // item in the same place for the next status's item: the
+                  // highlighted Download would become Cancel download, still
+                  // highlighted, when the download starts (ruling (q)).
+                  const copyItem = (
+                    <DropdownMenuItem key="copy" onSelect={() => copyPath(lesson)}>
+                      Copy path
+                    </DropdownMenuItem>
+                  )
                   return (
                     <TableRow key={lesson.railcontent_id}>
                       <TableCell className="font-medium">
@@ -435,49 +447,56 @@ export function Lessons() {
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuGroup>
-                              {busy ? null : lesson.status === "downloading" ? (
-                                (() => {
-                                  const jobId = runningJobByRailcontent.get(
-                                    lesson.railcontent_id,
-                                  )
-                                  return (
-                                    <DropdownMenuItem
-                                      disabled={jobId === undefined}
-                                      onSelect={() => {
-                                        if (jobId !== undefined) cancel.mutate({ jobId, lesson })
-                                      }}
-                                    >
-                                      Cancel download
-                                    </DropdownMenuItem>
-                                  )
-                                })()
-                              ) : lesson.status === "downloaded" && !note ? null : (
-                                // A downloaded lesson WITH a note is a failed
-                                // re-download that kept the earlier files:
-                                // syncs leave it alone, so Download is how to
-                                // try again (owner's ruling 2026-09-24, (h)).
+                              {busy ? (
+                                copyItem
+                              ) : lesson.status === "downloading" ? (
+                                // Copy path first. The menu is built from the
+                                // live row, so it changes if the download starts
+                                // while it is open: Radix then highlights the
+                                // first item, where Download was, and Enter must
+                                // land on something harmless, never on Cancel
+                                // (owner's ruling 2026-09-24, (q)).
+                                <>
+                                  {copyItem}
+                                  <DropdownMenuItem
+                                    key="cancel"
+                                    disabled={jobId === undefined}
+                                    onSelect={() => {
+                                      if (jobId !== undefined) cancel.mutate({ jobId, lesson })
+                                    }}
+                                  >
+                                    Cancel download
+                                  </DropdownMenuItem>
+                                </>
+                              ) : (
                                 <>
                                   {lesson.status === "skipped" && (
-                                    <DropdownMenuItem onSelect={() => unskip.mutate(lesson)}>
+                                    <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
                                       Un-skip
                                     </DropdownMenuItem>
                                   )}
-                                  <DropdownMenuItem onSelect={() => download.mutate(lesson)}>
-                                    Download
-                                  </DropdownMenuItem>
+                                  {/* A downloaded lesson WITH a note is a failed
+                                      re-download that kept the earlier files:
+                                      syncs leave it alone, so Download is how
+                                      to try again (owner's ruling 2026-09-24,
+                                      (h)). */}
+                                  {(lesson.status !== "downloaded" || note) && (
+                                    <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
+                                      Download
+                                    </DropdownMenuItem>
+                                  )}
                                   {(lesson.status === "pending" ||
                                     lesson.status === "failed") && (
                                     <DropdownMenuItem
+                                      key="skip"
                                       onSelect={() => openRowDialog(setSkipping, lesson)}
                                     >
                                       Skip
                                     </DropdownMenuItem>
                                   )}
+                                  {copyItem}
                                 </>
                               )}
-                              <DropdownMenuItem onSelect={() => copyPath(lesson)}>
-                                Copy path
-                              </DropdownMenuItem>
                             </DropdownMenuGroup>
                             {/* Whatever the status: a canceled or failed
                                 re-download, or a delete that stopped the job
