@@ -14,9 +14,10 @@ import (
 
 // The tests below pin owner ruling 2026-09-24 (m): pressing Download, Retry
 // or Un-skip, or adding a follow, starts a sync right away, through the kick
-// channel Sync and Resume already use; an answer that changed nothing starts
-// none. That a kick while syncs are paused is dropped (pause wins) is the
-// daemon's, pinned by TestDaemonPauseSkipsCyclesThenResumes.
+// channel Sync and Resume already use. Download starts one even when the
+// lesson is already queued; a press refused, or one that changed nothing
+// otherwise, starts none. That a kick while syncs are paused is dropped
+// (pause wins) is the daemon's, pinned by TestDaemonPauseSkipsCyclesThenResumes.
 
 // press is one request, sent to a server over a store the setup prepared.
 type press struct {

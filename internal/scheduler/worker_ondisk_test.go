@@ -71,7 +71,9 @@ func TestWorkerFailedAttemptOfALessonWhoseVideoIsGoneFailsIt(t *testing.T) {
 // TestWorkerFailedReDownloadWithTheLibraryUnpluggedFailsTheLesson proves the
 // case the owner accepted with (o): with the library drive not mounted, the
 // recorded files read as missing, so a failed re-download fails the lesson,
-// and syncs retry it until the drive is back.
+// and the next sync queues it again. (That retry doesn't wait for the drive:
+// once its download succeeds, it is placed under a library folder the
+// placement creates, or in the empty mount point: BACKLOG D120, D121.)
 func TestWorkerFailedReDownloadWithTheLibraryUnpluggedFailsTheLesson(t *testing.T) {
 	ctx := context.Background()
 	w, s, dl, f, dir := downloadedInLibrary(t)
