@@ -76,6 +76,9 @@ it("shows Resume and the paused indicator when paused", async () => {
 
 // The press keeps keyboard focus while its request runs: a disabled button
 // would drop it to <body>, and the next Tab would start from the page's top.
+// jsdom does NOT drop focus from a button that becomes disabled (a browser
+// does), so toHaveFocus alone would pass with `disabled`; toBeEnabled is the
+// assertion that catches it (checked by adding disabled={toggle.isPending}).
 it("Pause keeps keyboard focus on the button while its request runs", async () => {
   let answer!: () => void
   server.use(
