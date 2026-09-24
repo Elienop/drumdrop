@@ -168,10 +168,18 @@ export function AddFollowDialog({
   // exactly this input, else Preview. Handled per field rather than by a
   // form: with two fields (slug and brand) and no submit button, a form
   // does not submit on Enter at all.
+  //
+  // - isComposing: that Enter confirms an input method's candidate, not the
+  //   field.
+  // - repeat: a held Enter repeats. Only a fresh press counts, so holding it
+  //   can never add a follow whose preview the user has not seen yet.
+  // - pending: a press while a request runs does nothing (a second preview
+  //   of the same input would only repeat it, and Add must not start while
+  //   a preview is still on its way).
   const onFieldEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== "Enter" || e.nativeEvent.isComposing) return
     e.preventDefault()
-    if (pending) return
+    if (e.repeat || pending) return
     if (shown) runAdd()
     else if (canPreview) runPreview()
   }
@@ -243,7 +251,7 @@ export function AddFollowDialog({
                 onKeyDown={onFieldEnter}
               />
               <p id={slugHintId} className="text-sm text-muted-foreground">
-                The instructor's name, slug or link, like jared-falk.
+                For example Jared Falk, jared-falk, or a link to their coach page.
               </p>
             </div>
             <div className="flex flex-col gap-2">
@@ -278,26 +286,36 @@ export function AddFollowDialog({
           </Select>
         </div>
 
-        {shown && (
-          <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
-            {/* The slug beside the name is what will be followed, whatever
-                was typed: "Jared Falk" previews as @jared-falk. The brand
-                ends the count line, as the count is of that brand's lessons:
-                a pianote link with Brand empty reads "… lessons on Pianote". */}
-            <div className="flex flex-wrap items-baseline gap-x-2">
-              <span className="font-medium">{shown.data.title}</span>
-              {shown.data.slug && (
-                <span className="text-sm wrap-anywhere text-muted-foreground">
-                  @{shown.data.slug}
-                </span>
-              )}
+        {/* The preview is announced as it lands: a keyboard user can press
+            Enter twice (Preview, then Add) and must hear what Add will
+            follow. Radix announces nothing that changes inside a dialog, so
+            this is a live region, and like InlineError's it is ALWAYS
+            rendered, only its content changes (a region inserted together
+            with its text is missed by some screen readers). Empty, it costs
+            no space: empty:-mt-4 cancels the flex column's gap-4. */}
+        <div role="status" className="empty:-mt-4">
+          {shown && (
+            <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
+              {/* The slug beside the name is what will be followed, whatever
+                  was typed: "Jared Falk" previews as @jared-falk. The brand
+                  ends the count line, as the count is of that brand's
+                  lessons: a pianote link with Brand empty reads "… lessons on
+                  Pianote". */}
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <span className="font-medium">{shown.data.title}</span>
+                {shown.data.slug && (
+                  <span className="text-sm wrap-anywhere text-muted-foreground">
+                    @{shown.data.slug}
+                  </span>
+                )}
+              </div>
+              <span className="text-sm text-muted-foreground">
+                {countOf(shown.data.lesson_count, "lesson", "lessons")}
+                {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
+              </span>
             </div>
-            <span className="text-sm text-muted-foreground">
-              {countOf(shown.data.lesson_count, "lesson", "lessons")}
-              {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
-            </span>
-          </div>
-        )}
+          )}
+        </div>
 
         <InlineError id={errorId} error={error} stale={pending} />
 
@@ -308,8 +326,11 @@ export function AddFollowDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             <StackedLabel labels={{ cancel: "Cancel", close: "Close" }} active={adding ? "close" : "cancel"} />
           </Button>
+          {/* The fill marks the next step, and only one button has it:
+              Preview until a preview of this input is shown, then Add
+              (owner, 2026-09-24). Add is not filled while it cannot run. */}
           <PendingButton
-            variant="outline"
+            variant={shown ? "outline" : "default"}
             pending={pending && step === "preview"}
             pendingLabel="Previewing…"
             disabled={!canPreview || (pending && step !== "preview")}
@@ -322,6 +343,7 @@ export function AddFollowDialog({
           </PendingButton>
           <PendingButton
             ref={addRef}
+            variant={shown ? "default" : "outline"}
             pending={pending && step === "add"}
             pendingLabel="Adding…"
             disabled={!shown || (pending && step !== "add")}

@@ -873,6 +873,189 @@ it("Enter in a field runs the next step: Preview first, then Add once the previe
   expect(await screen.findByText("Follow added")).toBeInTheDocument()
 })
 
+// The Enter guards (AddFollowDialog's onFieldEnter), each pinned by a test
+// that fails without it.
+
+it("Enter after editing a previewed input previews the new input, and adds nothing", async () => {
+  const previews: (string | null)[] = []
+  let created: CreateFollowRequest | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, (info) => {
+      previews.push(new URL(info.request.url).searchParams.get("id"))
+      return previewOf(info)
+    }),
+    http.post(`${ORIGIN}/api/follows`, async ({ request }) => {
+      created = (await request.json()) as CreateFollowRequest
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "12345{Enter}")
+  await within(dialog).findByText("Node 12345")
+
+  // The preview on record is of 12345; the field now says 123456.
+  await user.type(input, "6{Enter}")
+  expect(await within(dialog).findByText("Node 123456")).toBeInTheDocument()
+  expect(previews).toEqual(["12345", "123456"])
+  expect(created).toBeNull()
+})
+
+it("Enter while a preview runs does nothing, even while an earlier preview of the same input is shown", async () => {
+  let held = false
+  let answer: () => void = () => {}
+  let created = false
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, async (info) => {
+      if (held) await new Promise<void>((resolve) => (answer = resolve))
+      return previewOf(info)
+    }),
+    http.post(`${ORIGIN}/api/follows`, () => {
+      created = true
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "12345{Enter}")
+  await within(dialog).findByText("Node 12345")
+
+  // Preview the same input again, and hold its answer.
+  held = true
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  await within(dialog).findByRole("button", { name: /previewing/i })
+  await user.click(input)
+  await user.keyboard("{Enter}")
+
+  // Nothing started: Add is not running, and the form is not locked.
+  expect(within(dialog).queryByRole("button", { name: /adding/i })).not.toBeInTheDocument()
+  expect(input).toBeEnabled()
+  await act(async () => answer())
+  await within(dialog).findByRole("button", { name: /^preview$/i })
+  expect(created).toBe(false)
+})
+
+it("an Enter that confirms an input method's candidate previews nothing", async () => {
+  const previews: (string | null)[] = []
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, (info) => {
+      previews.push(new URL(info.request.url).searchParams.get("id"))
+      return previewOf(info)
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "12345")
+
+  fireEvent.keyDown(input, { key: "Enter", isComposing: true })
+  expect(within(dialog).queryByRole("button", { name: /previewing/i })).not.toBeInTheDocument()
+
+  // Control: the same press outside a composition previews.
+  fireEvent.keyDown(input, { key: "Enter" })
+  expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
+  expect(previews).toEqual(["12345"])
+})
+
+it("a held Enter does not add: only a fresh press adds, once the preview is shown", async () => {
+  let created: CreateFollowRequest | null = null
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, previewOf),
+    http.post(`${ORIGIN}/api/follows`, async ({ request }) => {
+      created = (await request.json()) as CreateFollowRequest
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "12345")
+  fireEvent.keyDown(input, { key: "Enter" })
+  await within(dialog).findByText("Node 12345")
+
+  // The key is still down: its auto-repeat must not add what was just shown.
+  fireEvent.keyDown(input, { key: "Enter", repeat: true })
+  expect(within(dialog).queryByRole("button", { name: /adding/i })).not.toBeInTheDocument()
+  expect(created).toBeNull()
+
+  // A fresh press adds.
+  fireEvent.keyDown(input, { key: "Enter" })
+  await waitFor(() => expect(created).toMatchObject({ kind: "node", id: "12345" }))
+})
+
+// --- Add follow: the next step is the filled button, and the preview is heard --
+
+const variantOf = (button: HTMLElement) => button.getAttribute("data-variant")
+
+it("the one filled button is the next step: Preview until a preview is shown, then Add", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, previewOf),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  const footer = dialog.querySelector<HTMLElement>('[data-slot="dialog-footer"]')!
+  const filled = () => footer.querySelectorAll('button[data-variant="default"]')
+  const preview = within(dialog).getByRole("button", { name: /^preview$/i })
+  const add = within(dialog).getByRole("button", { name: /^add$/i })
+
+  expect(variantOf(preview)).toBe("default")
+  expect(variantOf(add)).toBe("outline")
+  expect(add).toBeDisabled()
+  expect(filled()).toHaveLength(1)
+
+  const input = within(dialog).getByLabelText(/url or id/i)
+  await user.type(input, "12345{Enter}")
+  await within(dialog).findByText("Node 12345")
+  expect(variantOf(add)).toBe("default")
+  expect(variantOf(preview)).toBe("outline")
+  expect(filled()).toHaveLength(1)
+
+  // An edit leaves the preview unshown: Preview is the next step again.
+  await user.type(input, "6")
+  expect(variantOf(preview)).toBe("default")
+  expect(variantOf(add)).toBe("outline")
+  expect(filled()).toHaveLength(1)
+})
+
+it("the preview lands in a status region that is always there, so a screen reader hears it", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () =>
+      HttpResponse.json({
+        title: "Jared Falk",
+        lesson_count: 40,
+        kind: "instructor",
+        slug: "jared-falk",
+        brand: "drumeo",
+      }),
+    ),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  // Present and empty before any preview: a region inserted together with
+  // its text is missed by some screen readers.
+  const status = within(dialog).getByRole("status")
+  expect(status).toBeEmptyDOMElement()
+
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "Jared Falk{Enter}")
+  await waitFor(() => expect(status).toHaveTextContent("Jared Falk@jared-falk40 lessons on Drumeo"))
+  expect(within(dialog).getByRole("status")).toBe(status)
+})
+
 it("Enter previews from either instructor field, where a form with two fields would not submit", async () => {
   const previews: string[] = []
   server.use(
@@ -892,7 +1075,7 @@ it("Enter previews from either instructor field, where a form with two fields wo
   expect(previews).toEqual(["?slug=jared-falk&brand=drumeo"])
 })
 
-it("the instructor field says what it takes: a name, a slug or a link, like jared-falk", async () => {
+it("the instructor field's hint gives an example of each thing it takes", async () => {
   server.use(http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])))
   const user = renderAdd()
   await user.click(await screen.findByRole("button", { name: /add follow/i }))
@@ -900,7 +1083,9 @@ it("the instructor field says what it takes: a name, a slug or a link, like jare
   await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
 
   const field = within(dialog).getByRole("textbox", { name: "Name, slug or link" })
-  expect(field).toHaveAccessibleDescription("The instructor's name, slug or link, like jared-falk.")
+  expect(field).toHaveAccessibleDescription(
+    "For example Jared Falk, jared-falk, or a link to their coach page.",
+  )
 })
 
 it("an instructor preview ends its count with the brand the follow would use", async () => {
