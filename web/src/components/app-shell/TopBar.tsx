@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Pause, Play, RefreshCw } from "lucide-react"
 import { api } from "@/lib/api"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -21,9 +22,15 @@ export function TopBar() {
   const summary = useQuery({ queryKey: qk.summary, queryFn: api.summary })
   const paused = summary.data?.paused ?? false
 
+  // `resume` is what the press asked for, fixed when it was pressed. A
+  // failure says so with the server's sentence (no daemon attached, or a
+  // server error), like every other action, and the flag is re-read after
+  // either outcome.
   const toggle = useMutation({
-    mutationFn: () => (paused ? api.resume() : api.pause()),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.summary }),
+    mutationFn: (resume: boolean) => (resume ? api.resume() : api.pause()),
+    onError: (err, resume) =>
+      failureToast(resume ? "Couldn't resume syncing" : "Couldn't pause syncing", errorMessage(err)),
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.summary }),
   })
 
   return (
@@ -32,7 +39,7 @@ export function TopBar() {
       <Button
         size="sm"
         variant="secondary"
-        onClick={() => toggle.mutate()}
+        onClick={() => toggle.mutate(paused)}
         disabled={toggle.isPending}
       >
         {paused ? <Play /> : <Pause />}
