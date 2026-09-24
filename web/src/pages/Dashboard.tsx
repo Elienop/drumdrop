@@ -5,7 +5,7 @@ import { api, ApiHttpError } from "@/lib/api"
 import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
-import { formatRelativeTime } from "@/lib/format"
+import { countOf, formatRelativeTime } from "@/lib/format"
 import type { JobStatus, LessonStatus } from "@/types"
 import { Button } from "@/components/ui/button"
 import {
@@ -73,7 +73,7 @@ export function Dashboard() {
   const dryRun = useMutation({
     mutationFn: () => api.sync(true),
     onSuccess: (result) => {
-      toast.message(`A sync would queue ${result.data.would_enqueue} lessons`)
+      toast.message(`A sync would queue ${countOf(result.data.would_enqueue ?? 0, "lesson", "lessons")}`)
     },
     onError: (err) => {
       if (is503(err)) toast.error("No planner attached")

@@ -2,7 +2,7 @@ import * as React from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api } from "@/lib/api"
-import { brandName } from "@/lib/format"
+import { brandName, countOf } from "@/lib/format"
 import { qk } from "@/lib/queryKeys"
 import { useDialogRequest } from "@/lib/dialog-request"
 import type { FocusTarget } from "@/lib/focus"
@@ -293,7 +293,7 @@ export function AddFollowDialog({
               )}
             </div>
             <span className="text-sm text-muted-foreground">
-              {shown.data.lesson_count} lessons
+              {countOf(shown.data.lesson_count, "lesson", "lessons")}
               {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
             </span>
           </div>

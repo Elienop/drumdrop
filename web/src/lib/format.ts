@@ -21,6 +21,13 @@ export function formatRelativeTime(iso: string | null | undefined, now: Date = n
   return `${days}d ago`
 }
 
+// countOf writes a count with its noun in the right number: "1 lesson",
+// "0 lessons", "12 lessons". English has one singular, 1, which is what
+// Intl.PluralRules("en") says too for a whole number.
+export function countOf(n: number, one: string, other: string): string {
+  return `${n} ${n === 1 ? one : other}`
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
   const m = Math.floor(seconds / 60)

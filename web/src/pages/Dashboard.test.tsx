@@ -65,3 +65,19 @@ it("disables the Dry-run button after a 503 probe", async () => {
     expect(screen.getByRole("button", { name: /dry-run/i })).toBeDisabled(),
   )
 })
+
+it.each([
+  [1, "A sync would queue 1 lesson"],
+  [3, "A sync would queue 3 lessons"],
+])("a dry run that would queue %i says so in the right number", async (n, sentence) => {
+  server.use(http.post(`${ORIGIN}/api/sync`, () => HttpResponse.json({ would_enqueue: n })))
+  renderWithProviders(
+    <>
+      <Dashboard />
+      <Toaster />
+    </>,
+  )
+
+  await userEvent.click(await screen.findByRole("button", { name: /dry-run/i }))
+  expect(await screen.findByText(sentence)).toBeInTheDocument()
+})

@@ -931,6 +931,28 @@ it("an instructor preview ends its count with the brand the follow would use", a
   expect(sent).toEqual([{ slug: link, brand: null }])
 })
 
+it("a preview of one lesson says 'lesson', not 'lessons'", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, () =>
+      HttpResponse.json({
+        title: "Jared Falk",
+        lesson_count: 1,
+        kind: "instructor",
+        slug: "jared-falk",
+        brand: "pianote",
+      }),
+    ),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.click(within(dialog).getByRole("tab", { name: "Instructor" }))
+  await user.type(within(dialog).getByRole("textbox", { name: "Name, slug or link" }), "jared-falk{Enter}")
+
+  expect(await within(dialog).findByText("1 lesson on Pianote")).toBeInTheDocument()
+})
+
 it("a brand without a known name previews as the server sent it", async () => {
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),

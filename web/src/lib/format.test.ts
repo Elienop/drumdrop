@@ -1,4 +1,13 @@
-import { brandName, formatBytes, formatRelativeTime, formatDuration } from "./format"
+import { brandName, countOf, formatBytes, formatRelativeTime, formatDuration } from "./format"
+
+describe("countOf", () => {
+  it("names one of a thing in the singular, and every other count in the plural", () => {
+    expect(countOf(1, "lesson", "lessons")).toBe("1 lesson")
+    expect(countOf(0, "lesson", "lessons")).toBe("0 lessons")
+    expect(countOf(2, "lesson", "lessons")).toBe("2 lessons")
+    expect(countOf(40, "lesson", "lessons")).toBe("40 lessons")
+  })
+})
 
 describe("formatBytes", () => {
   it("handles null and zero", () => {
