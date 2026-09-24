@@ -229,9 +229,10 @@ var errKeptInLibrary = errors.New("not placed: the placement in the library fail
 // A row that records fallback itself falls back: the library is the
 // downloads folder, or holds it, and the lesson was kept in downloads
 // before. That placement is the lesson's own folder (recordsFolder, as
-// placeLessonFolder decides it): it replaces only the lesson's own files at
-// the names the download brings back, as any re-download does, and the row
-// goes on recording that folder. A season-folder row with a record, or whose
+// placeLessonFolder decides it; a symlink at fallback's name that leads to
+// the library folder is not): it replaces only the lesson's own files at the
+// names the download brings back, as any re-download does, and the row goes
+// on recording that folder. A season-folder row with a record, or whose
 // entries the move learned (they are recorded now), keeps them recorded, and
 // the fallback touches nothing in the library, so it falls back (ruling
 // (i)); so does a lesson whose row records nothing in the library.
@@ -246,10 +247,20 @@ func keptInLibrary(prev database.Lesson, lib string, entries []string, fallback 
 }
 
 // recordsFolder reports whether row l records dir as its folder
-// (output_dir), however each is spelled: the same path once cleaned, or the
-// same folder on disk (sameDir).
+// (output_dir), however each is spelled (the same path once cleaned, or the
+// same folder on disk: sameDir), as a placement at dir treats it: the entry
+// at dir's own name is a real folder, or is missing. A symlink or file there
+// is not the recorded folder even when it leads to it: placeLessonFolder
+// reads that name with Lstat and replaces such an entry with a new folder,
+// so the folder the symlink led to would stay behind, recorded by no lesson.
 func recordsFolder(l database.Lesson, dir string) bool {
-	return l.OutputDir.Valid && (filepath.Clean(l.OutputDir.String) == filepath.Clean(dir) || sameDir(l.OutputDir.String, dir))
+	if !l.OutputDir.Valid {
+		return false
+	}
+	if info, err := os.Lstat(dir); err == nil && !info.IsDir() {
+		return false
+	}
+	return filepath.Clean(l.OutputDir.String) == filepath.Clean(dir) || sameDir(l.OutputDir.String, dir)
 }
 
 // inLibrary reports whether the lesson's row records its folder inside the

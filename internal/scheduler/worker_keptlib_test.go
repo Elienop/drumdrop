@@ -217,6 +217,45 @@ func refuseFromJobInto(t *testing.T, w *Worker, dir string) {
 	})
 }
 
+// Where a test's downloads folder is, against the library.
+const (
+	dlIsLibrary = "the library is the downloads folder"
+	dlInLibrary = "the downloads folder inside the library"
+	// dlLinked: the downloads folder is set as a symlink beside the library
+	// that leads to a folder inside it, and the row records the folder
+	// under that real spelling: only the identity half of recordsFolder
+	// (sameDir) says the fallback is the lesson's own folder.
+	dlLinked = "the downloads folder set through a symlink into the library"
+)
+
+// placeDownloads sets w's downloads folder where says, against the library
+// lib, and returns the folder the lesson's row records as its own: the
+// downloads fallback, spelled as it was recorded.
+func placeDownloads(t *testing.T, w *Worker, lib, where string) string {
+	t.Helper()
+	rel := filepath.Join("Beginner Course", "05 - Lesson A")
+	switch where {
+	case dlIsLibrary:
+		w.Cfg.DownloadsDir = lib
+	case dlInLibrary:
+		w.Cfg.DownloadsDir = filepath.Join(lib, "downloads")
+	case dlLinked:
+		real := filepath.Join(lib, "downloads")
+		if err := os.MkdirAll(real, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(filepath.Dir(lib), "dlink")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		w.Cfg.DownloadsDir = link
+		return filepath.Join(real, rel)
+	default:
+		t.Fatalf("unknown downloads place %q", where)
+	}
+	return filepath.Join(w.Cfg.DownloadsDir, rel)
+}
+
 // TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder proves a
 // refused library placement still falls back to the downloads folder when
 // that fallback is the folder the lesson's row records (security round 5d
@@ -224,28 +263,34 @@ func refuseFromJobInto(t *testing.T, w *Worker, dir string) {
 // refused move kept the lesson in downloads. Placing it there replaces only
 // the lesson's own files at the names the download brings back, keeps the
 // rest, and the row goes on recording the same folder, so rulings (f) and (i)
-// have nothing to keep: the download is recorded, not failed.
+// have nothing to keep: the download is recorded, not failed. That holds
+// however the folder is spelled (security round 5e S4: a downloads folder set
+// through a symlink), and when the recorded folder has been deleted since
+// (code round 5e L2: only the spelling half of recordsFolder can say so).
 func TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder(t *testing.T) {
 	for _, c := range []struct {
-		name, layout string
-		nested       bool // the downloads folder is inside the library, not the library itself
+		name, layout, where string
+		missing             bool // the recorded folder has been deleted
 	}{
-		{"plex-tv, the library is the downloads folder", LayoutPlexTV, false},
-		{"plex-tv, the downloads folder inside the library", LayoutPlexTV, true},
-		{"default, the downloads folder inside the library", "", true},
+		{"plex-tv", LayoutPlexTV, dlIsLibrary, false},
+		{"plex-tv", LayoutPlexTV, dlInLibrary, false},
+		{"default", "", dlInLibrary, false},
+		{"plex-tv", LayoutPlexTV, dlLinked, false},
+		{"default", "", dlLinked, false},
+		{"plex-tv, the recorded folder deleted", LayoutPlexTV, dlIsLibrary, true},
+		{"default, the recorded folder deleted", "", dlInLibrary, true},
 	} {
 		for _, how := range []string{"another lesson claims its place", "the placement fails"} {
-			t.Run(c.name+"/"+how, func(t *testing.T) {
+			t.Run(c.name+", "+c.where+"/"+how, func(t *testing.T) {
 				w, store, dl, lib, season := plexWorker(t)
 				w.Cfg.Layout = c.layout
 				var log bytes.Buffer
 				w.Log = &log
-				w.Cfg.DownloadsDir = lib
-				if c.nested {
-					w.Cfg.DownloadsDir = filepath.Join(lib, "downloads")
+				dir := placeDownloads(t, w, lib, c.where)
+				fallback := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+				if !c.missing {
+					writeTree(t, dir, map[string]string{"05 - Lesson A.mp4": "old mp4", "notes.txt": "owner notes"})
 				}
-				dir := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-				writeTree(t, dir, map[string]string{"05 - Lesson A.mp4": "old mp4", "notes.txt": "owner notes"})
 				prev := database.Lesson{
 					RailcontentID: 100, Status: database.StatusDownloaded,
 					Position:  sql.NullInt64{Int64: 5, Valid: true},
@@ -282,17 +327,19 @@ func TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder(t *testin
 				if len(dl.calls) != 1 || len(store.markFailed) != 0 {
 					t.Fatalf("downloads %d, failed %v; want one download, recorded (log %q)", len(dl.calls), store.markFailed, log.String())
 				}
+				// Recorded as the downloads folder spells it; on disk, the
+				// lesson's own folder (the same one: see placeDownloads).
 				rec := onlyRecord(t, store)
-				if rec.outputDir != dir || rec.videoPath != filepath.Join(dir, "05 - Lesson A.mp4") {
-					t.Errorf("recorded %q, video %q; want the lesson's own folder %q", rec.outputDir, rec.videoPath, dir)
+				if rec.outputDir != fallback || rec.videoPath != filepath.Join(fallback, "05 - Lesson A.mp4") {
+					t.Errorf("recorded %q, video %q; want the lesson's own folder %q", rec.outputDir, rec.videoPath, fallback)
 				}
 				if got, err := os.ReadFile(filepath.Join(dir, "05 - Lesson A.mp4")); err != nil || string(got) != "new mp4" {
 					t.Errorf("video = %q, %v; want the new download", got, err)
 				}
-				if got, err := os.ReadFile(filepath.Join(dir, "notes.txt")); err != nil || string(got) != "owner notes" {
+				if got, err := os.ReadFile(filepath.Join(dir, "notes.txt")); !c.missing && (err != nil || string(got) != "owner notes") {
 					t.Errorf("notes.txt = %q, %v; want the owner's file kept", got, err)
 				}
-				if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", dir)) {
+				if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", fallback)) {
 					t.Errorf("log %q does not say where the lesson was kept", log.String())
 				}
 				assertNoReplacedArea(t, w)

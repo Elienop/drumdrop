@@ -390,8 +390,11 @@ type heldPath struct{ root, path string }
 // previousFolder is the lesson's previous folder in the default layout, which
 // a placement at dstDir replaces if the download brings back everything in it
 // (previousStays): the folder its row records, when that is a lesson folder
-// (not a season folder), not dstDir, and not holding or held by dstDir; ok is
-// false when there is none. It is never touched, and why says so (the caller
+// (not a season folder), not dstDir as the placement treats it
+// (recordsFolder: a symlink at dstDir's name that leads to it does not make
+// it dstDir, since the placement replaces the symlink with a new folder), and
+// not holding or held by dstDir; ok is false when there is none. It is never
+// touched, and why says so (the caller
 // reports it like any previous folder that stays), when another lesson
 // records something in it, or when it is inside none of roots (the library or
 // the downloads folder moved, say).
@@ -400,7 +403,7 @@ func previousFolder(self database.Lesson, dstDir string, claims *library.Claims,
 		return heldPath{}, "", false
 	}
 	prev := filepath.Clean(self.OutputDir.String)
-	if !library.IsLessonFolder(prev) || library.IsSeasonDir(prev) || library.Inside(prev, dstDir) || library.Inside(dstDir, prev) || sameDir(prev, dstDir) {
+	if !library.IsLessonFolder(prev) || library.IsSeasonDir(prev) || library.Inside(prev, dstDir) || library.Inside(dstDir, prev) || recordsFolder(self, dstDir) {
 		return heldPath{}, "", false
 	}
 	if ids := claims.Holds(prev, self.RailcontentID); len(ids) > 0 {
