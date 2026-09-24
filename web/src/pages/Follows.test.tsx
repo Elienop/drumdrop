@@ -1210,7 +1210,7 @@ it("a node preview shows no slug and no brand", async () => {
 it("an instructor input nothing can normalise shows the server's sentence inline", async () => {
   // msgBadSlug, verbatim from internal/server/messages.go.
   const BAD =
-    "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or a link to their coach page. Then Preview again."
+    "That instructor can't be looked up. Enter their name or slug in unaccented letters, digits, spaces and hyphens, like Jared Falk, or their coach page's link, then Preview again. A lesson or course link goes under Node."
   server.use(
     http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
     http.get(`${ORIGIN}/api/preview`, () => HttpResponse.json({ error: BAD }, { status: 400 })),

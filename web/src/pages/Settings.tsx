@@ -63,7 +63,7 @@ function MusoraCard() {
           <div className="flex flex-col gap-1.5">
             <CardTitle>Musora connection</CardTitle>
             <CardDescription>
-              Your email and password go only to your DrumDrop server, which signs in to Musora with them and saves a copy in its config folder.
+              DrumDrop's server signs in to Musora with your email and password, and keeps a copy in its config folder. They aren't sent anywhere else.
             </CardDescription>
           </div>
           {session.isPending ? (

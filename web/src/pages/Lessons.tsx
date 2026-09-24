@@ -350,7 +350,7 @@ export function Lessons() {
               loading={lessons.isPending}
               error={lessons.error}
               onRetry={() => lessons.refetch()}
-              fallbackMessage="Couldn't load the lessons. Check that DrumDrop is running, then retry."
+              fallbackMessage="Couldn't load the lessons. Check that DrumDrop is running, then Retry."
             />
           ) : rows.length > 0 ? (
             <Table>
@@ -525,7 +525,7 @@ export function Lessons() {
           if (!open) setSkipping(null)
         }}
         title={skipping ? `Skip “${skipping.lesson.title}”?` : "Skip lesson?"}
-        description="Any queued or running download of it stops, and what that download had written is discarded. Syncs leave a skipped lesson alone until you un-skip it."
+        description="Any queued or running download of it stops, and what that download had written is discarded; its earlier files stay. Syncs leave a skipped lesson alone until you un-skip it."
         confirmLabel="Skip"
         pendingLabel="Skipping…"
         confirmVariant="default"

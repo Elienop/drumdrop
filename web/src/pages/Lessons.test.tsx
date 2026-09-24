@@ -836,8 +836,12 @@ it("a 404 on skip (the lesson was removed meanwhile) closes the dialog as done, 
     http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(gone ? [] : [lessons[1]])),
     http.post(`${ORIGIN}/api/lessons/:id/skip`, () => {
       gone = true
+      // msgSkipGone, verbatim from internal/server/messages.go.
       return HttpResponse.json(
-        { error: "This lesson isn't in DrumDrop anymore: its follow was removed meanwhile." },
+        {
+          error:
+            "This lesson is no longer in DrumDrop: its follow was removed meanwhile. There's nothing left to skip.",
+        },
         { status: 404 },
       )
     }),
@@ -854,7 +858,7 @@ it("a 404 on skip (the lesson was removed meanwhile) closes the dialog as done, 
     screen.getByText("Double Stroke Roll", { selector: "[data-description]" }),
   ).toBeInTheDocument()
   expect(screen.queryByText("Lesson skipped")).not.toBeInTheDocument()
-  expect(screen.queryByText(/isn't in DrumDrop anymore/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/no longer in DrumDrop/)).not.toBeInTheDocument()
   // The refresh after the 404 dropped the row: nothing is left to skip again.
   await waitFor(() =>
     expect(
@@ -899,11 +903,11 @@ it("Enter in the skip reason skips, and the reason's label dims with its field w
   renderLessons()
 
   const { dialog } = await openRowAction(user, "Double Stroke Roll", /^skip$/i)
-  // It says what Skip does now: the download stops and what it wrote goes.
-  // It promises nothing about earlier files: yt-dlp's --force-overwrites
-  // deletes a kept video as soon as a re-download starts (BACKLOG D66).
+  // It says what Skip does now: the download stops and what it wrote goes,
+  // while the files of earlier downloads stay (true again since D66; the
+  // README's "Skipping a lesson" paragraph says the same).
   expect(dialog).toHaveAccessibleDescription(
-    "Any queued or running download of it stops, and what that download had written is discarded. Syncs leave a skipped lesson alone until you un-skip it.",
+    "Any queued or running download of it stops, and what that download had written is discarded; its earlier files stay. Syncs leave a skipped lesson alone until you un-skip it.",
   )
   const reason = within(dialog).getByLabelText("Reason (optional)")
   await user.type(reason, "too hard{Enter}")
@@ -967,9 +971,11 @@ it("a list that fails without a server message says so in a sentence, never 'HTT
   renderLessons()
   expect(
     await screen.findByText(
-      "Couldn't load the lessons. Check that DrumDrop is running, then retry.",
+      "Couldn't load the lessons. Check that DrumDrop is running, then Retry.",
     ),
   ).toBeInTheDocument()
+  // The sentence names the button beside it.
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument()
   expect(screen.queryByText(/HTTP 502/)).not.toBeInTheDocument()
 })
 

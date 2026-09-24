@@ -117,7 +117,7 @@ export function Dashboard() {
                 loading={summary.isPending}
                 error={summary.error}
                 onRetry={() => summary.refetch()}
-                fallbackMessage="Couldn't load the summary. Check that DrumDrop is running, then retry."
+                fallbackMessage="Couldn't load the summary. Check that DrumDrop is running, then Retry."
               />
             </CardContent>
           </Card>
@@ -169,7 +169,7 @@ export function Dashboard() {
                 loading={jobs.isPending}
                 error={jobs.error}
                 onRetry={() => jobs.refetch()}
-                fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then retry."
+                fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then Retry."
               />
             ) : jobs.data.length > 0 ? (
               <Table>

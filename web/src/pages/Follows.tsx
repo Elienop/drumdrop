@@ -120,7 +120,7 @@ export function Follows() {
               loading={follows.isPending}
               error={follows.error}
               onRetry={() => follows.refetch()}
-              fallbackMessage="Couldn't load the follows. Check that DrumDrop is running, then retry."
+              fallbackMessage="Couldn't load the follows. Check that DrumDrop is running, then Retry."
             />
           ) : follows.data.length > 0 ? (
             <Table>

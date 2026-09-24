@@ -8,6 +8,19 @@ import { TokenGate } from "@/components/TokenGate"
 import { clearToken, getToken, setToken } from "@/lib/auth"
 import { Settings } from "./Settings"
 
+it("the Musora connection card says where the email and password go, and that they go nowhere else", async () => {
+  server.use(
+    http.get(`${ORIGIN}/api/session`, () => HttpResponse.json({ connected: false })),
+    http.get(`${ORIGIN}/healthz`, () => HttpResponse.json({ status: "ok", version: "v1.2.3" })),
+  )
+  renderWithProviders(<Settings />)
+  expect(
+    await screen.findByText(
+      "DrumDrop's server signs in to Musora with your email and password, and keeps a copy in its config folder. They aren't sent anywhere else.",
+    ),
+  ).toBeInTheDocument()
+})
+
 it("shows the Disconnected pill, then flips to Connected after a successful login", async () => {
   server.use(
     http.get(`${ORIGIN}/api/session`, () => HttpResponse.json({ connected: false })),

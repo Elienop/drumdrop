@@ -148,7 +148,7 @@ export function Queue() {
               loading={jobs.isPending}
               error={jobs.error}
               onRetry={() => jobs.refetch()}
-              fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then retry."
+              fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then Retry."
             />
           ) : rows.length > 0 ? (
             <TooltipProvider>
