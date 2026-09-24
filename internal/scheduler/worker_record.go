@@ -177,7 +177,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 			}
 			return res.pending, nil
 		}
-		if keptInLibrary(prev, lib, entries, fallback) {
+		if keptInLibrary(prev, lib, w.Cfg.DownloadsDir, entries, fallback) {
 			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
 		}
 	} else if lib != "" {
@@ -188,7 +188,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
 		// The default layout learns nothing of the lesson's season-folder
 		// entries: a record it has is left as it is (rec.LibraryEntries nil).
-		if keptInLibrary(prev, lib, nil, fallback) {
+		if keptInLibrary(prev, lib, w.Cfg.DownloadsDir, nil, fallback) {
 			return nil, fmt.Errorf("%w: %v", errKeptInLibrary, err)
 		}
 	}
@@ -226,18 +226,22 @@ var errKeptInLibrary = errors.New("not placed: the placement in the library fail
 //     entries, what the plex-tv move learned it owns there, is nil: once
 //     output_dir names the downloads folder, no lesson claims them.
 //
-// A row that records fallback itself falls back: the library is the
-// downloads folder, or holds it, and the lesson was kept in downloads
-// before. That placement is the lesson's own folder (recordsFolder, as
-// placeLessonFolder decides it; a symlink at fallback's name that leads to
-// the library folder is not): it replaces only the lesson's own files at the
-// names the download brings back, as any re-download does, and the row goes
-// on recording that folder. A season-folder row with a record, or whose
+// A row whose folder is in the downloads folder, when that sits inside the
+// library, is not in the library (inLibrary), so it falls back: the
+// fallback's previous folder is in downloads, as with a downloads folder
+// beside the library. A row that records fallback itself falls back too: the
+// library is the downloads folder (or holds it under another spelling), and
+// the lesson was kept in downloads before. That placement is the lesson's
+// own folder (recordsFolder, as placeLessonFolder decides it; a symlink at
+// fallback's name that leads to the library folder is not): it replaces only
+// the lesson's own files at the names the download brings back, as any
+// re-download does, and the row goes on recording that folder. A
+// season-folder row with a record, or whose
 // entries the move learned (they are recorded now), keeps them recorded, and
 // the fallback touches nothing in the library, so it falls back (ruling
 // (i)); so does a lesson whose row records nothing in the library.
-func keptInLibrary(prev database.Lesson, lib string, entries []string, fallback string) bool {
-	if !inLibrary(prev, lib) || recordsFolder(prev, fallback) {
+func keptInLibrary(prev database.Lesson, lib, downloads string, entries []string, fallback string) bool {
+	if !inLibrary(prev, lib, downloads) || recordsFolder(prev, fallback) {
 		return false
 	}
 	if !library.IsSeasonDir(prev.OutputDir.String) {
@@ -264,9 +268,16 @@ func recordsFolder(l database.Lesson, dir string) bool {
 }
 
 // inLibrary reports whether the lesson's row records its folder inside the
-// library lib.
-func inLibrary(prev database.Lesson, lib string) bool {
-	return prev.OutputDir.Valid && prev.OutputDir.String != "" && library.Inside(lib, prev.OutputDir.String)
+// library lib, decided as previousFolder decides which root holds a folder:
+// the longest root it is written inside. So a folder in a downloads folder
+// that sits inside the library is in downloads, and a tie (the library is
+// the downloads folder) counts as the library.
+func inLibrary(prev database.Lesson, lib, downloads string) bool {
+	if !prev.OutputDir.Valid || prev.OutputDir.String == "" || !library.Inside(lib, prev.OutputDir.String) {
+		return false
+	}
+	nested := library.Inside(lib, downloads) && !library.Inside(downloads, lib)
+	return !nested || !library.Inside(downloads, prev.OutputDir.String)
 }
 
 // keptVideo is the first, in name order, of the entries a plex-tv placement

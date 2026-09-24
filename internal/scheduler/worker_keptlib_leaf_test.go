@@ -127,3 +127,75 @@ func TestWorkerPlacementWithoutALibraryLeavesTheFolderASymlinkLedTo(t *testing.T
 		}
 	}
 }
+
+// TestWorkerRefusedLibraryPlacementOfALessonKeptInDownloads proves "in the
+// library" is decided by the longest root holding the recorded folder, as
+// previousFolder decides it (security round 5e S3). A lesson an earlier
+// refused move kept in the downloads folder, under a title Musora has since
+// changed, falls back to downloads when its library placement is refused
+// again, whether the downloads folder is beside the library or inside it:
+// its old folder is in downloads, not in the library, so ruling (e) decides
+// it (it goes when the download brought back every file in it). When the
+// library is the downloads folder (a tie) the folder counts as the
+// library's, and the attempt fails with that copy kept (ruling (f)).
+func TestWorkerRefusedLibraryPlacementOfALessonKeptInDownloads(t *testing.T) {
+	for _, where := range []string{"the downloads folder beside the library", dlInLibrary, dlIsLibrary} {
+		for _, owner := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/owner's file=%v", where, owner), func(t *testing.T) {
+				w, store, dl, lib, _ := plexWorker(t)
+				w.Cfg.Layout = ""
+				var log bytes.Buffer
+				w.Log = &log
+				if where != "the downloads folder beside the library" {
+					placeDownloads(t, w, lib, where)
+				}
+				old := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Old Title")
+				files := map[string]string{"05 - Old Title.mp4": "old mp4"}
+				if owner {
+					files["notes.txt"] = "owner notes"
+				}
+				writeTree(t, old, files)
+				prev := database.Lesson{
+					RailcontentID: 100, Status: database.StatusDownloaded,
+					Position:  sql.NullInt64{Int64: 5, Valid: true},
+					OutputDir: sql.NullString{String: old, Valid: true},
+					VideoPath: sql.NullString{String: filepath.Join(old, "05 - Old Title.mp4"), Valid: true},
+				}
+				store.lessons[100] = prev
+				store.withFiles = []database.Lesson{prev}
+				target := filepath.Join(lib, "Beginner Course", "05 - Lesson A")
+				writeTree(t, target, map[string]string{"05 - Lesson A.mp4": "lesson 200"})
+				store.withFiles = append(store.withFiles, database.Lesson{
+					RailcontentID: 200, Status: database.StatusDownloaded,
+					OutputDir: sql.NullString{String: target, Valid: true},
+					VideoPath: sql.NullString{String: filepath.Join(target, "05 - Lesson A.mp4"), Valid: true},
+				})
+
+				if _, err := w.RunOnce(context.Background(), 0); err != nil {
+					t.Fatalf("RunOnce: %v", err)
+				}
+				assertTree(t, target, map[string]string{"05 - Lesson A.mp4": "lesson 200"})
+				if where == dlIsLibrary {
+					assertTree(t, old, files)
+					assertKeptInLibrary(t, w, store)
+					return
+				}
+				if len(dl.calls) != 1 || len(store.markFailed) != 0 {
+					t.Fatalf("downloads %d, failed %v; want one download, recorded (log %q)", len(dl.calls), store.markFailed, log.String())
+				}
+				fallback := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+				if rec := onlyRecord(t, store); rec.outputDir != fallback {
+					t.Errorf("recorded %q, want the downloads folder %q", rec.outputDir, fallback)
+				}
+				if got, err := os.ReadFile(filepath.Join(fallback, "05 - Lesson A.mp4")); err != nil || string(got) != "new mp4" {
+					t.Errorf("video = %q, %v; want the new download", got, err)
+				}
+				if owner {
+					assertTree(t, old, files)
+				} else {
+					assertExist(t, false, old)
+				}
+			})
+		}
+	}
+}

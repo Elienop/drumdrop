@@ -113,22 +113,31 @@ func TestWorkerPlexTvRefusedMoveKeepsAFolderTheDefaultLayoutPlaced(t *testing.T)
 // output_dir) whose episode the move can not tell apart from a look-alike is
 // not moved to the downloads folder when the move fails: nothing would claim
 // its files then. The attempt fails instead, and the season folder is as it
-// was.
+// was. That holds wherever the downloads folder is: a season folder in a
+// library that is the downloads folder, or holds it, is the library's
+// (inLibrary: a tie counts as the library).
 func TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName(t *testing.T) {
-	w, store, _, lib, season := plexWorker(t)
-	video := "Beginner Course - s01e05 - Old Title [Live] [Drumless].mp4"
-	caps := "Beginner Course - s01e05 - Old Title [Live] [Drumless].en.vtt"
-	seedSeason(t, season, video, caps)
-	prev := legacyRow(100, "Lesson A", 5, season, video)
-	store.lessons[100] = prev
-	store.withFiles = []database.Lesson{prev}
-	refuseIntoSeason(t, lib, season)
+	for _, where := range []string{"the downloads folder beside the library", dlIsLibrary, dlInLibrary} {
+		t.Run(where, func(t *testing.T) {
+			w, store, _, lib, season := plexWorker(t)
+			if where != "the downloads folder beside the library" {
+				placeDownloads(t, w, lib, where)
+			}
+			video := "Beginner Course - s01e05 - Old Title [Live] [Drumless].mp4"
+			caps := "Beginner Course - s01e05 - Old Title [Live] [Drumless].en.vtt"
+			seedSeason(t, season, video, caps)
+			prev := legacyRow(100, "Lesson A", 5, season, video)
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
+			refuseFromJobInto(t, w, season)
 
-	if _, err := w.RunOnce(context.Background(), 0); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertContent(t, season, video, caps)
+			assertKeptInLibrary(t, w, store)
+		})
 	}
-	assertContent(t, season, video, caps)
-	assertKeptInLibrary(t, w, store)
 }
 
 // TestWorkerPlexTvRefusedMoveOfALegacyRowRecordsWhatItOwns proves a legacy
