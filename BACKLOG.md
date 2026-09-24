@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D121 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D126 on 2026-09-24 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -30,7 +30,10 @@ checked against the same code. The final review sharpened D7, D52 and D54 and mo
 D52 into *Next up*. The round-5 docs pass (2026-09-24, branch `fix-library-delete-and-move`)
 added D96–D113 and corrected D51, D52, D58, D66, D72, D76, D82, D85, D89, D92, D93 and D95
 against the code at `639e5d8`. The round-5d pass (same day and branch) added D114–D120 and
-corrected D63, D64, D85, D107, D108 and D113 against its own code._
+corrected D63, D64, D85, D107, D108 and D113 against its own code. The round-5e pass (same
+day and branch) added D121–D125 and corrected D52, D58, D107, D113 and D114–D120 against
+its own code: D120's unplugged-drive sentence was wrong, and D107 and D114–D118 credited
+the round-5d reviews for round-5c findings._
 
 ## Next up
 
@@ -122,13 +125,26 @@ D53 waits on an owner decision.
     when it is outside the downloads and library dirs (after a remount, say); since round 5
     the log says so. (When the other lessons' records can't be read, the lesson is not
     downloaded at all: it fails before the download, so that case is gone.)
+  - *Every way a legacy row's season files end up claimed by nobody* (round-5d security
+    review, F4; its probe re-run at round 5e): (a) plex-tv, an ambiguous episode name,
+    and the move succeeds: the record holds only what it placed, and the log says only
+    "…not known, so none were removed"; (b) a legacy row with no video owns its files
+    through its current title alone (`legacyEpisodeBases` builds the episode name from
+    it), and the planner rewrites the title every cycle (`UpsertLesson`), so a rename on
+    Musora's side un-claims them with no download at all; (c) `DRUMDROP_LIBRARY_DIR`
+    unset (the setting removed after plex-tv placed the row): `place()` never asks
+    `keptInLibrary` without a library, so a re-download is placed in downloads, records
+    that folder, and the season files are claimed by nobody, with no log line; (d) a
+    switch to the default layout, told in full as D119.
   - *Why:* Plex shows the old copy too, and no delete will ever remove it. For a lesson
     with a record, a folder left this way is the owner's ruling and is logged; the legacy
     rows leave theirs without a word.
   - *Evidence:* `grep -n 'previous download.s library files are not known' internal/scheduler/*.go`
     · `grep -n 'func previousFolder' -A21 internal/scheduler/place.go` (season folders are
     skipped; one another lesson records files in, or one outside every root, stays with a
-    reason) · `go test -count=1 -run 'PreviousFolder' ./internal/scheduler/`
+    reason) · `go test -count=1 -run 'PreviousFolder' ./internal/scheduler/` ·
+    `grep -n 'func legacyEpisodeBases' -A12 internal/library/ownership.go` (b) ·
+    `grep -n 'lib := w.Cfg.LibraryDir' -A3 internal/scheduler/worker_record.go` (c)
 - **D59 · A long title in a multibyte script can't be downloaded.**
   - *What:* `musora.Sanitize` caps a title at 150 *runes*, but file names are capped at 255
     *bytes*. The download's folder `NN - <title>` and its `<title>.mp4` hold the whole
@@ -306,8 +322,8 @@ D53 waits on an owner decision.
     (Round-5c fix report.)
   - *Why:* for the length of a download the Lessons page shows a lesson that records its
     files as pending, and its note is gone.
-    The round-5d UI review saw it from the Queue: after a *Retry* there, a lesson whose
-    earlier download is kept reads pending, with no note.
+    The round-5c UI review saw it from the Queue (Info, V1): after a *Retry* there, a
+    lesson whose earlier download is kept reads pending, with no note.
   - *Fix (can wait; a suggestion to verify):* reset only a lesson that records no files,
     with the store's own `hasFilesSQL` test, as `keepOrSQL` and `endDownloadSQL` do
     (they add the on-disk check of ruling (o), `keepsFilesSQL`).
@@ -332,7 +348,7 @@ D53 waits on an owner decision.
   - *What:* `EnqueueJob` reuses a lesson's queued or running job, but `RetryJob` requeues
     a failed or canceled job without that check. So *Download* on a lesson whose last job
     failed (a new job is queued) followed by *Retry* on the failed one in the Queue leaves
-    two queued jobs for one lesson, and both download it, one after the other (round-5d
+    two queued jobs for one lesson, and both download it, one after the other (round-5c
     security review, Low 3). Since ruling (m) each press also starts a sync at once.
   - *Why:* a wasted download; each job has its own private folder, so the two don't write
     into each other, and the second's placement replaces the first's.
@@ -346,11 +362,11 @@ D53 waits on an owner decision.
 - **D118 · With a title over about 213 bytes, ruling (j) doesn't hold.**
   - *What:* a plex-tv episode base is shortened so that every name fits in 255 bytes, by
     the longest suffix among the entries of *this* download (`fitEpisodeBase`). A long
-    title (roughly 213 bytes and up, by the round-5d code review's count) can then get a
+    title (roughly 213 bytes and up, by the round-5c code review's count) can then get a
     different base on a re-download that brings back a longer or shorter suffix, a
     resources folder say. The re-download then reads as a title change: what the lesson
     recorded at the old base that it didn't bring back goes, instead of staying as ruling
-    (j) wants (round-5d code review, Info 2).
+    (j) wants (round-5c code review, Info 2).
   - *Why:* rare (the title alone must be that long), but a caption or poster the
     re-download failed to fetch is deleted.
   - *Fix (can wait; a suggestion to verify):* shorten by the longest suffix drumdrop can
@@ -367,13 +383,89 @@ D53 waits on an owner decision.
     the season files from then on, and a delete no longer removes them; nothing is
     deleted and nothing is logged. A *refused* placement of such a row fails the attempt
     instead (D1 of round 5d, `keptInLibrary`); only the successful one loses track. Found
-    while fixing that fallback; `main` does the same.
+    while fixing that fallback; `main` does the same. It is case (d) of D58, which lists
+    the other ways a legacy row's season files end up claimed by nobody.
   - *Why:* files in the library that no lesson records, and that the UI can't delete.
   - *Fix (can wait; a suggestion to verify):* on a successful default-layout placement of
     such a row, record what the name grammar gives it (as the plex-tv move already does
     for a refused move), or leave its season files named in the log.
   - *Evidence:* `grep -n 'rec.LibraryEntries == nil' internal/database/downloads.go` ·
     `grep -n 'IsSeasonDir(prev)' internal/scheduler/place.go`
+- **D121 · A missing or unmounted library folder is written to, not refused.**
+  - *What:* every placement creates the library root if it is missing (`os.MkdirAll` in
+    `openLibraryParent`), and an empty mount point is an ordinary empty folder. So while
+    the library drive is out, a lesson's download (a new one, or a re-download ruling (o)
+    retries) is placed on the disk underneath, recorded there, and hidden by the drive
+    once it is back (D120; round-5d security review, F1).
+  - *Why:* a lesson that reads `downloaded` whose files are out of sight, space used on
+    the wrong disk, and, for a re-download, a row that reads the drive's older copy.
+  - *Fix (new mechanism; needs a first-run design):* refuse a library root that is
+    missing, or that is an empty mount point, instead of creating it. The engine already
+    refuses a missing folder: `os.OpenRoot` (`$(go env GOROOT)/src/os/root.go:82`) opens
+    an existing directory only, so dropping the `MkdirAll` is the whole guard for a missing
+    root. It can't simply be dropped: in the security seat's scratch copy that fails 37
+    scheduler tests, whose fixtures rely on the folder being made on first use, and a
+    fresh install has no library folder yet. So the folder needs creating once, at
+    startup or on the first run, and an empty mount point needs a marker file drumdrop
+    writes there and checks for (Sonarr refuses a missing root folder the same way).
+    Go's standard library has no mount-point test.
+  - *Evidence:* `grep -n 'os.MkdirAll(root' internal/scheduler/library.go` ·
+    `grep -n '^func OpenRoot' "$(go env GOROOT)/src/os/root.go"`
+- **D122 · A partial copy at the recorded video's name counts as on disk after a crash.**
+  - *What:* across filesystems a placement sets the old video aside, then copies the new
+    one straight to its final name (`copyFileInto`, `O_EXCL`). If drumdrop dies mid-copy,
+    startup keeps `replaced-<job>` and requeues the job; if that retry then fails, the
+    disk check (ruling (o)) finds a regular file at the recorded name, and the lesson
+    stays `downloaded` with the kept note, holding a partial (3 of 7 bytes in the
+    security seat's probe `TestR5dCrashMidCopyThenFailedRetry`) or zero-byte video, and
+    no sync retries it. The real earlier video is in
+    `.drumdrop-in-progress/replaced-<job>/`, which startup logs (round-5d security review,
+    F2). Not a regression: before round 5d the record decided it, with the same result.
+  - *Why:* a broken video that reads as kept. Nothing is lost, and it needs a crash and
+    then a failed retry.
+  - *Fix (new mechanism, can wait):* copy to a temporary name on the destination
+    filesystem, then rename it into place without replacing (rename is atomic,
+    `os.Rename`, `$(go env GOROOT)/src/os/file.go:437`). Prior art in the package:
+    `writeScratchNFO` and `episodeTempSuffix` (`internal/scheduler/plexmove.go`); the
+    aside area already lives on each root's own filesystem (`aside.go`).
+  - *Evidence:* `grep -n 'func copyFileInto' -A20 internal/scheduler/plexmove.go` ·
+    `grep -n 'IsRegular' internal/scheduler/ondisk.go`
+- **D123 · A flood of presses runs sync cycles back to back.**
+  - *What:* each press (ruling (m)) sends a kick (`Server.kick`, a non-blocking send on a
+    one-slot channel), and the daemon runs a full cycle per kick it receives
+    (`Daemon.Run`). The slot caps the backlog at one pending cycle, not the rate: the
+    security seat's probe `TestR5dPressFlood` (5 follows, 20 ms per request, a fake
+    expander) ran 18 cycles and 95 Musora requests in 2 s, against 0 idle (round-5d
+    security review, I1). Every cycle plans every follow, and retries every failed lesson
+    at up to 3 full downloads each, so D120's retries come per press, not per interval.
+    *Download* and *Retry* have already queued their job, yet each press still costs a
+    planning request per follow. POST `/api/sync` could already do this; with D53
+    (tokenless loopback) a cross-site `text/plain` POST to `/api/follows` now starts
+    downloading at once.
+  - *Why:* load on Musora, and repeated downloads of failing lessons, from repeated
+    presses.
+  - *Fix (new mechanism, optional):* a drain-only kick for presses that queued a job
+    themselves (`Worker.RunOnce` already drains without planning), or a minimum gap
+    between planned cycles. The daemon has no rate limit today.
+  - *Evidence:* `grep -n 'func (s \*Server) kick' -A6 internal/server/sync.go` ·
+    `grep -n 'case <-d.Kick' -A10 internal/scheduler/daemon.go` ·
+    `grep -n 's.kick()' internal/server/*.go`
+- **D125 · A legacy plex-tv row with no video counts as on disk while its season folder
+  exists.**
+  - *What:* the disk check (ruling (o)) falls back to the row's folder when it records no
+    video and no library entries. For a legacy plex-tv row (no record) that folder is the
+    season folder, which the show's other episodes share, so it proves nothing about this
+    lesson's own files: the lesson reads `downloaded` whenever any episode of the show is
+    there (round-5d code review, I2). Reach: only legacy rows with no video
+    (resources-only, or a video-less song) placed before the record existed. The comment
+    on `recordedFilesPresent` names the choice.
+  - *Why:* a lesson whose own files are gone can keep reading `downloaded`, and no sync
+    retries it.
+  - *Fix (new mechanism, can wait):* check the entries the name matcher gives the row,
+    `library.Claims.Plan` (`internal/library/ownership.go`), as a delete does. SQLite
+    can't see the disk, so nothing in the store does this.
+  - *Evidence:* `grep -n 'l.OutputDir.Valid' -A3 internal/scheduler/ondisk.go` ·
+    `grep -n 'func (c \*Claims) Plan' internal/library/ownership.go`
 - **D80 · A Skip that lands between the planner's check and its enqueue is downloaded
   anyway.**
   - *What:* the planner asks `ShouldSkipEnqueue`, then calls `EnqueueJob`, which refuses
@@ -552,7 +644,7 @@ D53 waits on an owner decision.
 - **D115 · On a 503, Run sync and Dry-run drop keyboard focus.**
   - *What:* when the server answers 503 (no daemon, or no planner), the Dashboard swaps the
     pressed button for a disabled copy wrapped in a tooltip, so focus falls to the page
-    body (round-5d UI review, Low 3).
+    body (round-5c UI review, Low 3).
   - *Why:* a keyboard user starts again from the top of the page.
   - *Fix (can wait):* keep the same button and mark it disabled with `aria-disabled`, or
     send focus to the copy.
@@ -560,7 +652,7 @@ D53 waits on an owner decision.
 - **D116 · A downloaded lesson with a note is hard to find.**
   - *What:* since rulings (h) and (n) a lesson whose re-download failed, or that Musora no
     longer returns, stays `downloaded` with a note. The Lessons page has no filter or count
-    for those, so the owner finds one only by scrolling (round-5d UI review, Info).
+    for those, so the owner finds one only by scrolling (round-5c UI review, Info, V1).
   - *Why:* a kept lesson needs the owner's *Download* to be tried again, and nothing says
     how many there are.
   - *Fix (can wait; new mechanism):* a filter or a count for downloaded lessons with a
@@ -571,12 +663,24 @@ D53 waits on an owner decision.
   - *What:* a failed re-download of a lesson whose files are on disk leaves the lesson
     `downloaded` with a note that says so (`msgEarlierKept`, `msgNotReturnedKept`), but its
     job, shown in red in the Queue, carries the plain failure sentence (`failDownload.job`,
-    or `msgNotResolved`), which reads as if the lesson were lost (round-5d UI review, Info).
+    or `msgNotResolved`), which reads as if the lesson were lost (round-5c UI review,
+    Info, V1).
   - *Why:* a red row for a lesson that is still there.
   - *Fix (can wait; a suggestion to verify):* a kept version of each job sentence, chosen
     in the same transaction (`keepOrSQL`) as the lesson's note.
   - *Evidence:* `grep -n 'job:' internal/scheduler/messages.go` ·
     `grep -n 'func keepOrSQL' -A8 internal/database/downloads.go`
+- **D124 · With syncs paused, a press still toasts "Queued" and nothing starts.**
+  - *What:* since ruling (m) a press starts a sync at once, so the owner expects the
+    download to begin. While syncs are paused the daemon drops the kick, the toast still
+    reads "Queued" with the lesson's name, and only the header's "paused" chip says why
+    nothing starts (round-5d UI review, Info 1).
+  - *Why:* the press looks like it did nothing.
+  - *Fix (new mechanism, can wait):* a toast description that reads the pause flag.
+    TopBar already reads `summary.paused`; the download response doesn't carry it.
+  - *Evidence:* `grep -n 'summary.data?.paused' web/src/components/app-shell/TopBar.tsx` ·
+    `grep -n 'toast.success("Queued"' web/src/pages/Lessons.tsx` ·
+    `grep -n 'if d.IsPaused()' internal/scheduler/daemon.go`
 - **D72 · On Windows the library move renames by path.**
   - *What:* on Linux and macOS each rename of the move acts on the folders it holds open
     (`renameat2`/`renameatx_np`), so a folder swapped for a symlink between the move's
@@ -1153,14 +1257,37 @@ lease holder token goes into the unreleased migration 004 (before this branch me
 
 ## Accepted residuals and deliberate decisions (not work)
 
-- **D120 · With the library drive unplugged, every sync retries a failed re-download
-  (owner ruling (o), 2026-09-24).** A lesson stays `downloaded` after an attempt that
-  recorded nothing only if the files it records are on disk at that moment (the recorded
-  video; without one, every entry of its plex-tv record, or else its folder; anything that
-  can't be read counts as missing). So while the library drive is not mounted, a failed
-  re-download marks the lesson failed, and every sync downloads it again until the drive
-  is back. The owner accepted that cost: *"check the disk at the end"*.
+- **D120 · With the library drive unplugged, a failed re-download is retried until one
+  succeeds, and that one lands on the disk underneath (owner ruling (o), 2026-09-24).** A
+  lesson stays `downloaded` after an attempt that recorded nothing only if the files it
+  records are on disk at that moment (the recorded video; without one, every entry of its
+  plex-tv record, a regular file or a folder, or else its folder; anything that can't be
+  read counts as missing). The owner picked *"Check the disk at the end"* accepting the
+  cost as this entry then put it: every sync retries until the drive is back. **That was
+  wrong** (round-5d security review, F1; corrected in round 5e, and the owner has not
+  seen the correction yet). What happens while the library drive is not mounted:
+  - a failed re-download marks the lesson failed, and the next sync downloads it again;
+  - the placement creates a missing library folder (`os.MkdirAll` in
+    `openLibraryParent`), or writes into the empty folder the drive is mounted on, so the
+    first retry whose download succeeds is placed on the disk underneath, recorded there,
+    and syncs stop retrying. Once the drive is back it hides that copy: the recorded paths
+    read the drive's older copy again, and the retry's copy takes space on the other disk
+    under the mount point (the seat's probe `TestR5dUnpluggedRetryWritesUnderTheMountPoint`,
+    both with the folder gone and as an empty mount point). A lesson downloaded for the
+    first time while the drive is out is placed there the same way (that predates (o));
+  - only while the library path answers with an error (EIO, a failing mount) does the
+    placement fail, so every sync retries until the drive is back, as the ruling assumed;
+  - a re-download Musora doesn't return, or one that is canceled, ends `skipped`, since
+    its files read as missing (`keepOrSQL(StatusSkipped)` in `NotReturnedDownload`,
+    `endDownloadSQL` in `CancelDownload`), and it stays skipped when the drive is back:
+    syncs never queue a skipped lesson, so *Download* or *Un-skip* is needed (round-5d
+    code review, I1). The row keeps its paths, so the Lessons page still offers both,
+    and *Delete*.
+
+  The guard that would make "retries until the drive is back" true is D121.
   *Evidence:* `grep -n 'func (w \*Worker) recordedFilesPresent' -A30 internal/scheduler/ondisk.go`
+  · `grep -n 'os.MkdirAll(root' internal/scheduler/library.go`
+  · `grep -n 'keepOrSQL(StatusSkipped)\|const endDownloadSQL' -A2 internal/database/downloads.go`
   · `go test -count=1 -run 'WithTheLibraryUnplugged' ./internal/scheduler/`
 
 - **D65 · No startup backfill of legacy library rows (decided 2026-09-23, this branch).** A
@@ -1325,7 +1452,10 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       and its library copy stays recorded and as it was. Any other lesson falls back; in
       plex-tv its recorded library entries stay recorded. (Round 5 had keyed this on
       today's layout, which let a plex-tv fallback stop recording a default-layout folder
-      or a legacy row's season files.)
+      or a legacy row's season files.) Since round 5e a lesson whose recorded folder is the
+      downloads folder it would fall back to (the library is the downloads dir, or holds
+      it) falls back: that replaces only its own files at the names the download brings
+      back (`recordsFolder`, the own-folder test `placeLessonFolder` uses).
     - (h) a failed download of a lesson that still records files leaves it `downloaded`
       with a note (`FailDownload`), and only the job fails; syncs don't retry it, and the
       Lessons page shows the note and offers *Download*. A lesson without files is still
@@ -1336,9 +1466,9 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     - (m) *Download*, *Retry* and *Un-skip*, and adding a follow, start a sync at once
       through the daemon's existing kick channel (`Server.kick`, a non-blocking send):
       a press never waits, presses during a sync share one more cycle, a missing daemon
-      makes it a no-op, and a paused daemon drops it (*Resume* kicks). A press that
-      queues nothing (Un-skip of a lesson that wasn't skipped, adding a follow that
-      exists) starts none.
+      makes it a no-op, and a paused daemon drops it (*Resume* kicks). *Download* kicks
+      even when the lesson is already queued. Un-skip of a lesson that wasn't skipped,
+      adding a follow that exists, and a refused press start none.
     - (n) a lesson Musora doesn't return (locked or removed) whose earlier download is
       on disk stays `downloaded` with its own note (`msgNotReturnedKept`); only the job
       fails, reported as a failed attempt, and syncs leave the lesson alone
@@ -1384,10 +1514,24 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       can't be listed (`listSeason`), the kept note a not-started download leaves, the
       previous-folder log under plex-tv, and (j) for a legacy row. `msgStopped` keeps its
       "Stopped:" prefix, shared with `msgRequeued` and `msgShutdown`.
+    - Round 5e's corrected lines: a refused library placement whose downloads fallback is
+      the lesson's own recorded folder falls back again (security F3, a regression from
+      5d); the disk check counts a recorded entry only as a regular file or a folder, read
+      through a symlink as the video is, so a dangling symlink at a recorded name is gone
+      (security I2); *Un-skip* answers 409 with the being-deleted sentence while a delete
+      holds the lesson, and starts no sync (`UnskipLesson`, security I5); the (n) note
+      says "The lesson may be locked…", so "It" no longer reads as the kept download (UI
+      Low 1); `plexEpisodeBase`'s comment says what reads the move's base now. New pins:
+      `keptVideo`'s filter and its order, an empty record, and a plex-tv row that records
+      a lesson folder and a season-folder record (code L1, L2). D120 is corrected (security
+      F1), and D121–D125 are recorded.
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
-  - *Left open:* D96–D112, found or recorded in round 5, and D114–D119 from round 5d;
+    · round 5e: `go test -count=1 -run 'FallsBackIntoTheLessonsOwnFolder|RecordedFilesPresent|RecordsTheKeptVideo|KeepsAFolderTheDefaultLayoutPlaced|UnskipLessonRefusesWhileADeleteHoldsIt|WhileADeleteHoldsTheLesson' ./internal/scheduler/ ./internal/database/ ./internal/server/`
+  - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
+    (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
+    the round-5d reviews;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
@@ -1605,9 +1749,12 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     that fails part-way is taken back out of the library (already-moved entries are renamed
     back into the download's private folder; a partly copied entry is removed, and only
     what is really left is reported), and the lesson is placed and recorded in downloads
-    instead (since round 5, in the default layout, only a lesson not yet in the library:
-    one already there keeps its library copy, still recorded, and the attempt fails;
-    ruling (f), D113). A finished copy whose private folder can't be removed is recorded
+    instead, unless that would delete or stop recording a library file the lesson owns
+    (since round 5d, `keptInLibrary`, in either layout: a lesson whose row records its own
+    folder in the library, or a legacy season folder whose entries the move couldn't
+    name, keeps its library copy, still recorded, and the attempt fails; since round 5e
+    one whose recorded folder is that downloads folder itself is placed there; rulings
+    (f) and (i), D113). A finished copy whose private folder can't be removed is recorded
     in the library, in both layouts; the folder is left behind and removed at the next
     `serve` or looping `daemon` start (D66). Copied files, and the folders the copy
     creates, are flushed to disk before the download's own copy is removed, and the copy
@@ -1619,7 +1766,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     Linux, `renameatx_np(RENAME_EXCL)` on macOS; a filesystem without the flag gets a retry
     without it, which replaces), so no write follows a symlink planted in the library, even
     one swapped in after the checks. A rename that refuses makes the move refuse (the
-    lesson is placed in downloads instead, with the same round-5 exception); the copy runs
+    lesson is placed in downloads instead, with the same exception); the copy runs
     only across filesystems (`EXDEV`,
     `ERROR_NOT_SAME_DEVICE` on Windows), and a copy that fails removes only what it created
     (round 4, `9928719`). On Windows the rename is still by path (D72). The download's side
@@ -1636,7 +1783,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     an old name goes only when the download brought back every file in it: rulings (j) and
     (e), D113.) Anything that can't be cleaned up is logged with its path
     (`⚠ move to library`). The move stays non-fatal, except, since round 5, for a
-    default-layout lesson already in the library (above).
+    lesson whose library copy the fallback would delete or stop recording (above).
   - *Evidence:* `go test -count=1 -run 'CopyFails|NotRemovable|UndoRenamesBack|Flushed|Aliased|SymlinkedLessonFolder|DiscardPartialCopy|CannotBeCleared|ConfigRefuses|UnderARace|NeverReplaces|PlantedSymlink|KeepAnEntryPlanted|CopyOnlyAcrossFilesystems'
     ./internal/scheduler/ ./internal/engine/` (the permission-based ones skip as root).
   - *Left open:* if the OS refuses both the move and its undo (a renamed entry can't be
