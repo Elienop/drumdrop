@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"testing"
 )
 
@@ -87,9 +88,14 @@ func TestDownloadTreeMissing(t *testing.T) {
 
 // TestPlexFolderInto proves a plex-tv folder under an old episode name
 // corresponds to the download's folder its name ends in, the longest one when
-// two do, and to none when none does.
+// two do, and to none when none does. The steps are in the order production
+// lists them (planPlexTVMove sorts by name), where the shorter match comes
+// last, so "the last match wins" fails here.
 func TestPlexFolderInto(t *testing.T) {
-	steps := []plexMoveStep{{name: "resources", dir: true}, {name: "extra resources", dir: true}, {name: "05 - X.mp4"}}
+	steps := []plexMoveStep{{name: "05 - X.mp4"}, {name: "extra resources", dir: true}, {name: "resources", dir: true}}
+	if !sort.SliceIsSorted(steps, func(i, j int) bool { return steps[i].name < steps[j].name }) {
+		t.Fatal("the steps are not in planPlexTVMove's order")
+	}
 	for name, want := range map[string]string{
 		"Show - s01e05 - Old resources":       "resources",
 		"Show - s01e05 - Old extra resources": "extra resources",

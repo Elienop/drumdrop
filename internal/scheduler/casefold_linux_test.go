@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,12 +26,23 @@ const fsCasefoldFL = 0x40000000
 // to mount a casefold tmpfs on.
 const casefoldChildEnv = "DRUMDROP_TEST_CASEFOLD_DIR"
 
+// casefoldChildTimeout bounds the child test run: a hung child panics with
+// its goroutines' stacks instead of outliving the parent.
+const casefoldChildTimeout = 2 * time.Minute
+
 // runCasefold runs the test t again in a child process, in its own user and
 // mount namespaces, where it is root: the child mounts a tmpfs with casefold
 // support and calls run with a case-insensitive folder in it. It skips where
 // that can not be had (unprivileged user namespaces refused, a kernel whose
 // tmpfs has no casefold). A test calls it first, and returns at once when it
 // reports it ran as the parent.
+//
+// The child selects exactly t (each level of its name quoted, so a name with
+// regexp characters can not select nothing), and the parent fails unless the
+// child's output reports t passed: a child that ran no test is not a pass.
+// The child is killed if the parent dies (Pdeathsig, sent when the thread
+// that started it exits, so that thread is held for the run), and it times
+// out on its own (casefoldChildTimeout). Its output is shown on failure.
 func runCasefold(t *testing.T, run func(t *testing.T, dir string)) {
 	t.Helper()
 	if mnt := os.Getenv(casefoldChildEnv); mnt != "" {
@@ -36,14 +50,17 @@ func runCasefold(t *testing.T, run func(t *testing.T, dir string)) {
 		return
 	}
 	mnt := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], "-test.run="+runPattern(t.Name()), "-test.v", "-test.count=1", "-test.timeout="+casefoldChildTimeout.String())
 	cmd.Env = append(os.Environ(), casefoldChildEnv+"="+mnt)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		Pdeathsig:   syscall.SIGKILL,
 	}
+	runtime.LockOSThread()
 	out, err := cmd.CombinedOutput()
+	runtime.UnlockOSThread()
 	var exit *exec.ExitError
 	switch {
 	case err != nil && !errors.As(err, &exit):
@@ -52,7 +69,38 @@ func runCasefold(t *testing.T, run func(t *testing.T, dir string)) {
 		t.Skipf("the child skipped:\n%s", out)
 	case err != nil:
 		t.Fatalf("the child failed: %v\n%s", err, out)
+	case !strings.Contains(string(out), "--- PASS: "+t.Name()+" ("):
+		t.Fatalf("the child did not report %s as passed:\n%s", t.Name(), out)
 	}
+}
+
+// runPattern is the -test.run pattern that selects exactly the test named
+// name ("TestX", or "TestX/sub/…" for a subtest): each level quoted and
+// anchored.
+func runPattern(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
+	}
+	return strings.Join(parts, "/")
+}
+
+// TestRunCasefoldRunsASubtestNamedWithRegexpCharacters (round-5b security I1)
+// proves the child runs a subtest whose name holds regexp characters, for
+// which a bare -test.run of the name selected nothing (and the child then
+// passed without running it). The child's body checks that the folder it is
+// given is case-insensitive.
+func TestRunCasefoldRunsASubtestNamedWithRegexpCharacters(t *testing.T) {
+	t.Run("a+b (c)", func(t *testing.T) {
+		runCasefold(t, func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "Five"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, "FIVE")); err != nil {
+				t.Errorf("the folder is not case-insensitive: %v", err)
+			}
+		})
+	})
 }
 
 // casefoldDir mounts a casefold tmpfs on mnt (in the child's own mount

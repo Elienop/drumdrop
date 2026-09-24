@@ -120,8 +120,10 @@ func TestNormalizeInstructorBrand(t *testing.T) {
 
 // TestNodeBrand proves a node follow's brand is folded as an instructor's is
 // (trimmed, ASCII letters lower-cased), defaults when empty, and still has to
-// be one of Musora's: the Kelvin sign (U+212A), which strings.ToLower folds to
-// "k", is never taken for an ASCII letter.
+// be one of Musora's (the allowlist is the guard): "drumeo" plus a Kelvin sign
+// (U+212A) is refused. No brand has a k, so that case is refused under
+// strings.ToLower too: it pins the allowlist, not lowerASCII's ASCII-only
+// fold.
 func TestNodeBrand(t *testing.T) {
 	for given, want := range map[string]string{"Pianote": "pianote", " GUITAREO ": "guitareo", "drumeo": "drumeo", "": DefaultBrand, "  ": DefaultBrand} {
 		if got, err := NodeBrand(given); err != nil || got != want {
