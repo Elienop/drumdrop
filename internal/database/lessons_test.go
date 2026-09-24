@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 )
 
@@ -392,6 +393,38 @@ func TestUnskipLessonOnlySkipped(t *testing.T) {
 	// An unknown id is also a benign no-op.
 	if err := s.UnskipLesson(ctx, 404); err != nil {
 		t.Errorf("UnskipLesson on a missing id returned %v, want nil (benign no-op)", err)
+	}
+}
+
+// TestUnskipLessonRefusesWhileADeleteHoldsIt proves Un-skip refuses, as Skip
+// does, while a delete holds the lesson: ErrLessonDeleting, and the lesson
+// stays skipped (security round 5d I5). Once the delete ends it un-skips.
+func TestUnskipLessonRefusesWhileADeleteHoldsIt(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	if _, err := s.SkipLesson(ctx, 1, "not now"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
+	}
+	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
+	}
+	if err := s.UnskipLesson(ctx, 1); !errors.Is(err, ErrLessonDeleting) {
+		t.Errorf("UnskipLesson while deleting = %v, want ErrLessonDeleting", err)
+	}
+	if got := mustLesson(t, s, 1); got.Status != StatusSkipped || got.Error.String != "not now" {
+		t.Errorf("lesson = %s %q, want it still skipped %q", got.Status, got.Error.String, "not now")
+	}
+	if err := s.EndLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("EndLessonDelete: %v", err)
+	}
+	if err := s.UnskipLesson(ctx, 1); err != nil {
+		t.Fatalf("UnskipLesson after the delete: %v", err)
+	}
+	if got := mustLesson(t, s, 1); got.Status != StatusPending {
+		t.Errorf("status = %q after the delete ended, want %q", got.Status, StatusPending)
 	}
 }
 

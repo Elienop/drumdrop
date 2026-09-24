@@ -153,11 +153,15 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 // lesson back to pending (clearing its error) and returns the updated lesson
 // with 200. It reads the lesson first so an unknown id maps cleanly to 404
 // (UnskipLesson itself tolerates a non-skipped lesson as a benign no-op rather
-// than erroring). A non-integer id is a 400. It mirrors handleSkipLesson.
+// than erroring). A non-integer id is a 400. It mirrors handleSkipLesson:
+// while a delete holds the lesson it answers 409 (msgBeingDeleted, through
+// writeStoreErr) and changes nothing, since the delete skips it again once
+// the files are gone.
 //
 // Un-skip queues no job itself: a sync's planning does, for a pending lesson
 // its follow lists. So when it reset a skipped lesson, it starts a sync now
-// rather than at the next interval (owner ruling 2026-09-24 (m)).
+// rather than at the next interval (owner ruling 2026-09-24 (m)); a refusal
+// starts none.
 func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {

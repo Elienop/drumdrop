@@ -189,9 +189,14 @@ func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 // skipped lesson back to pending and clears its error, ONLY while it is still
 // skipped. It tolerates zero rows as a benign no-op and returns nil — an already-pending/terminal lesson (or an unknown id) is left
 // untouched rather than erroring. It executes directly rather than through
-// updateStatus (which treats 0 rows as "no such lesson").
+// updateStatus (which treats 0 rows as "no such lesson"). Like SkipLesson,
+// it refuses with ErrLessonDeleting while a delete holds the lesson: the
+// delete's tombstone would skip it again once the files are gone.
 func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := lessonDeletingTx(ctx, tx, id); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE lessons
 			    SET status = ?, error = NULL, updated_at = CURRENT_TIMESTAMP

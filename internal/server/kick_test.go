@@ -157,6 +157,37 @@ func TestAPressThatQueuesNothingStartsNoSync(t *testing.T) {
 	}
 }
 
+// TestAPressWhileADeleteHoldsTheLessonStartsNoSync proves Download and
+// Un-skip answer 409 with the being-deleted sentence while a delete holds the
+// lesson, send no kick, and change nothing: Un-skip leaves the lesson skipped,
+// as Skip refuses too (security round 5d I5).
+func TestAPressWhileADeleteHoldsTheLessonStartsNoSync(t *testing.T) {
+	for _, path := range []string{"/api/lessons/8001/download", "/api/lessons/8001/unskip"} {
+		t.Run(path, func(t *testing.T) {
+			store := newTestStore(t)
+			lessonAt(t, store, 8001)
+			if _, err := store.SkipLesson(t.Context(), 8001, "not now"); err != nil {
+				t.Fatalf("SkipLesson: %v", err)
+			}
+			if _, _, err := store.BeginLessonDelete(t.Context(), 8001); err != nil {
+				t.Fatalf("BeginLessonDelete: %v", err)
+			}
+			kick := make(chan struct{}, 1)
+			srv := NewServer(store, Deps{Kick: kick}, nil, Config{}, "test")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+
+			wantError(t, rec, http.StatusConflict, msgBeingDeleted)
+			if len(kick) != 0 {
+				t.Errorf("kicks pending = %d, want 0: nothing was queued", len(kick))
+			}
+			if l := mustLesson(t, store, 8001); l.Status != database.StatusSkipped || l.Error.String != "not now" {
+				t.Errorf("lesson = %s %q, want it still skipped %q", l.Status, l.Error.String, "not now")
+			}
+		})
+	}
+}
+
 // TestAPressNeverWaitsOnTheDaemon proves a press answers when a sync is
 // already pending (the kick buffer full: it shares that sync) and when
 // nothing receives the kick at all (a daemon busy in a cycle), and with no

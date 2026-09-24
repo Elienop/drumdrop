@@ -35,8 +35,8 @@ const (
 	msgBadBody = "The request couldn't be read. Reload the page, then try again."
 	// msgBadQuality answers a quality outside the presets (validQuality).
 	msgBadQuality = "Choose one of the listed qualities: best, 2160, 1440, 1080, 720 or 480."
-	// msgBeingDeleted answers a download or retry of a lesson whose files are
-	// being deleted right now.
+	// msgBeingDeleted answers a download, retry or un-skip of a lesson whose
+	// files are being deleted right now.
 	msgBeingDeleted = "This lesson's files are being deleted right now. Try again once that's finished."
 	// msgUnauthorized answers an /api request without the API token (the
 	// auth middleware, the only 401 in the API).

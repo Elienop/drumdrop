@@ -43,7 +43,8 @@ var ErrDownloadCanceled = errors.New("download canceled")
 
 // ErrLessonDeleting is returned while a delete holds a lesson's files (see
 // DeleteLease): a job can not be enqueued or retried for it (EnqueueJob,
-// RetryJob), it can not be skipped (SkipLesson), and a second delete can not
+// RetryJob), it can not be skipped or un-skipped (SkipLesson, UnskipLesson),
+// and a second delete can not
 // start (BeginLessonDelete, BeginFollowDelete, RemoveFollowCascade). Nothing
 // was written.
 var ErrLessonDeleting = errors.New("the lesson's files are being deleted")
