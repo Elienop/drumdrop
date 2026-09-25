@@ -136,7 +136,8 @@ func Sanitize(name string) string {
 
 // PosterSuffix ends the name DownloadLesson gives a lesson's image,
 // "<base>-poster.jpg". The default layout keeps it; the plex-tv layout places
-// the image as "<episode base>.jpg" instead (the scheduler's episodeSuffix).
+// the image as "<episode base>.jpg" instead, or one per version for a song
+// (the scheduler's episodeNames).
 const PosterSuffix = "-poster.jpg"
 
 // fetchToFile downloads url to dest, a path inside the open folder root. The
@@ -451,7 +452,8 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 			if err := runYtDlp(ctx, args, o.OnProgress); err != nil {
 				return err
 			}
-		} else if slug := l.SoundsliceSlug(); slug != "" {
+		} else if l.IsSong() {
+			slug := l.SoundsliceSlug()
 			// A song has no Musora/Vimeo video of its own; its playable videos are
 			// the YouTube-backed recordings referenced inside its soundslice score.
 			// Download EACH recording (e.g. Original + Drumless) as a bracket-tagged

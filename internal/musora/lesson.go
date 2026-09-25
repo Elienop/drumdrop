@@ -209,6 +209,15 @@ func (l *Lesson) SoundsliceSlug() string {
 	return ""
 }
 
+// IsSong reports whether DownloadLesson downloads the lesson as a song: no
+// HLS video of its own, and a soundslice score whose recordings become its
+// version files ("<base> [Original].mp4", "<base> [Drumless].mp4"). It says
+// so even when a download writes no version (resources only, or a score
+// with no recording).
+func (l *Lesson) IsSong() bool {
+	return l != nil && l.Video.HLSManifestURL == "" && l.SoundsliceSlug() != ""
+}
+
 func ResolveLesson(id int, permIDs string) (*Lesson, error) {
 	tpl, err := LoadQuery("resolve_lesson")
 	if err != nil {

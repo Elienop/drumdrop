@@ -304,8 +304,8 @@ func withPoster(dl *fakeDownloader) {
 // and the episode's image, nfo and captions, are all in place before the
 // episode's video is. The show's files come from the followed node (not the
 // lesson's pack), are never recorded as the lesson's, and the episode image
-// is "<episode base>.jpg". For a song, both versions come after the one
-// image and nfo they share.
+// is "<episode base>.jpg". For a song, each version's own image and nfo,
+// "<episode base> [Label].jpg" and ".nfo", are there before either video.
 func TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo(t *testing.T) {
 	for _, song := range []bool{false, true} {
 		t.Run(fmt.Sprintf("song=%v", song), func(t *testing.T) {
@@ -320,9 +320,10 @@ func TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo(t *testing.T) {
 			stubRename(t, func(oldpath, newpath string) error {
 				if strings.HasSuffix(newpath, ".mp4") {
 					videos++
-					before := []string{filepath.Join(show, "tvshow.nfo"), filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), base + ".jpg", base + ".nfo"}
-					if !song {
-						before = append(before, base+".en.vtt")
+					before := []string{filepath.Join(show, "tvshow.nfo"), filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), base + ".jpg", base + ".nfo", base + ".en.vtt"}
+					if song {
+						before = []string{before[0], before[1], before[2],
+							base + " [Drumless].jpg", base + " [Drumless].nfo", base + " [Original].jpg", base + " [Original].nfo"}
 					}
 					for _, p := range before {
 						if _, err := os.Lstat(p); err != nil {
@@ -352,8 +353,12 @@ func TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo(t *testing.T) {
 			}
 			assertExist(t, false, base+"-poster.jpg")
 			rec := onlyRecord(t, store)
-			if !slices.Contains(rec.entries, "Beginner Course/Season 01/"+sameTitleBase+".jpg") {
-				t.Errorf("record %v does not name the episode image", rec.entries)
+			image := "Beginner Course/Season 01/" + sameTitleBase + ".jpg"
+			if song {
+				image = "Beginner Course/Season 01/" + sameTitleBase + " [Original].jpg"
+			}
+			if !slices.Contains(rec.entries, image) {
+				t.Errorf("record %v does not name the episode image %s", rec.entries, image)
 			}
 			for _, e := range rec.entries {
 				if !strings.HasPrefix(e, "Beginner Course/Season 01/") {

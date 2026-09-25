@@ -45,8 +45,10 @@ func scratchLesson(t *testing.T, tmp string, index int, title string, suffixes [
 // entries it placed (what the worker records), that it destroys none of the
 // season folder's other entries (a same-episode look-alike included, recorded
 // or not), and that a delete planned from that record removes exactly those.
-// The song's one image is "<episode base>.jpg", shared by both versions as
-// the nfo is (owner ruling #78).
+// Each version of the song gets its own image and nfo, "<episode base>
+// [Label].jpg" and ".nfo", the names Plex reads for that version's video, and
+// no "<episode base>.jpg" or ".nfo", which Plex reads for no video (owner
+// ruling #78 5).
 func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
@@ -70,13 +72,23 @@ func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	}
 	want := paths(season,
 		"Songs - s01e05 - Even Flow [Drumless].mp4", "Songs - s01e05 - Even Flow [Original].mp4",
+		"Songs - s01e05 - Even Flow [Drumless].jpg", "Songs - s01e05 - Even Flow [Original].jpg",
+		"Songs - s01e05 - Even Flow [Drumless].nfo", "Songs - s01e05 - Even Flow [Original].nfo",
 		"Songs - s01e05 - Even Flow play-along", "Songs - s01e05 - Even Flow resources",
-		"Songs - s01e05 - Even Flow sheet-music", "Songs - s01e05 - Even Flow.jpg",
-		"Songs - s01e05 - Even Flow.nfo")
+		"Songs - s01e05 - Even Flow sheet-music")
 	if !reflect.DeepEqual(sorted(res.placed), sorted(want)) || len(res.kept) != 0 {
 		t.Errorf("placed %v kept %v, want exactly %v", res.placed, res.kept, want)
 	}
 	assertExist(t, true, want...)
+	assertExist(t, false, paths(season, "Songs - s01e05 - Even Flow.jpg", "Songs - s01e05 - Even Flow.nfo")...)
+	for _, v := range []string{"Drumless", "Original"} {
+		if got := readFile(filepath.Join(season, "Songs - s01e05 - Even Flow ["+v+"].jpg")); got != "new -poster.jpg" {
+			t.Errorf("[%s].jpg = %q, want the download's image", v, got)
+		}
+		if got := readFile(filepath.Join(season, "Songs - s01e05 - Even Flow ["+v+"].nfo")); got != "new .nfo" {
+			t.Errorf("[%s].nfo = %q, want the download's nfo", v, got)
+		}
+	}
 	assertExist(t, true, paths(season, siblings...)...)
 	if res.seasonDir != season || res.videoPath != want[0] || res.episodeBase != "Songs - s01e05 - Even Flow" {
 		t.Errorf("result = %+v", res)
@@ -115,7 +127,8 @@ func TestPlexTVMoveAcceptsAnyName(t *testing.T) {
 		t.Fatalf("move = (%+v, %v), want a move", res, err)
 	}
 	base := "Drum Fills [Beginner] - s01e05 - Fill[1]"
-	want := paths(res.seasonDir, base+" [Mix [Live].mp4", base+" [Original (Live) [HD]].mp4", base+".nfo", base+" sheet music")
+	want := paths(res.seasonDir, base+" [Mix [Live].mp4", base+" [Original (Live) [HD]].mp4",
+		base+" [Mix [Live].nfo", base+" [Original (Live) [HD]].nfo", base+" sheet music")
 	if !reflect.DeepEqual(sorted(res.placed), sorted(want)) {
 		t.Errorf("placed %v, want %v", res.placed, want)
 	}
@@ -237,8 +250,8 @@ func TestPlexTVMoveReplacesThePreviousDownloadByRecord(t *testing.T) {
 	if got, _ := os.ReadFile(orig); !strings.Contains(string(got), "05 - Even Flow") {
 		t.Errorf("%s = %q, want the new download's copy", orig, got)
 	}
-	if len(res.placed) != 5 || len(res.kept) != 0 {
-		t.Errorf("placed %v kept %v, want the 5 new entries only", res.placed, res.kept)
+	if want := paths(season, songEpisodeNames(episodeBase)...); !reflect.DeepEqual(sorted(res.placed), sorted(want)) || len(res.kept) != 0 {
+		t.Errorf("placed %v kept %v, want the new entries only, %v", res.placed, res.kept, want)
 	}
 }
 
@@ -278,7 +291,7 @@ func TestPlexTVMoveRecordOutranksALegacyNameMatch(t *testing.T) {
 func TestPlexTVMoveRefusesAnEntryAnotherLessonOwns(t *testing.T) {
 	cases := map[string]func(season string) database.Lesson{
 		"record": func(season string) database.Lesson {
-			return recordedRow(2, season, "Songs - s01e05 - Even Flow.nfo")
+			return recordedRow(2, season, "Songs - s01e05 - Even Flow [Drumless].nfo")
 		},
 		"record of a missing entry": func(season string) database.Lesson {
 			return recordedRow(2, season, "Songs - s01e05 - Even Flow resources")
@@ -302,7 +315,7 @@ func checkMoveRefusesAnEntryAnotherLessonOwns(t *testing.T, otherOf func(season 
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
-	theirs := []string{episodeBase + ".nfo", episodeBase + " [Original].mp4"}
+	theirs := []string{episodeBase + " [Drumless].nfo", episodeBase + " [Original].mp4"}
 	mine := []string{"Songs - s01e05 - Mine Before.mp4"}
 	seedSeason(t, season, theirs...)
 	seedSeason(t, season, mine...)
@@ -337,7 +350,7 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
 	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
-	seedSeason(t, season, episodeBase+".nfo", episodeBase+" resources/")
+	seedSeason(t, season, episodeBase+" [Drumless].nfo", episodeBase+" resources/")
 	writeTree(t, filepath.Join(season, episodeBase+" resources"), map[string]string{"song.pdf": "old song"})
 
 	c, err := library.NewClaims(lib, nil)
@@ -364,14 +377,14 @@ func TestPlexTVMoveReplacesAnEntryNoLessonClaims(t *testing.T) {
 		}
 		got = append(got, e.path)
 	}
-	if want := paths(season, filepath.Join(episodeBase+" resources", "song.pdf"), episodeBase+".nfo"); !reflect.DeepEqual(sorted(got), sorted(want)) {
+	if want := paths(season, filepath.Join(episodeBase+" resources", "song.pdf"), episodeBase+" [Drumless].nfo"); !reflect.DeepEqual(sorted(got), sorted(want)) {
 		t.Errorf("replaced %q, want %q", got, want)
 	}
 	assertTree(t, filepath.Join(season, episodeBase+" resources"), map[string]string{
 		"f.pdf":    episodeBase + " resources",
 		"song.pdf": filepath.Join("resources", "song.pdf"),
 	})
-	if got, _ := os.ReadFile(filepath.Join(season, episodeBase+".nfo")); !strings.Contains(string(got), "05 - Even Flow.nfo") {
+	if got, _ := os.ReadFile(filepath.Join(season, episodeBase+" [Drumless].nfo")); !strings.Contains(string(got), "05 - Even Flow.nfo") {
 		t.Errorf("nfo = %q, want the new download's", got)
 	}
 }

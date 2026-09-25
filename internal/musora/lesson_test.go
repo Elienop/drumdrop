@@ -136,3 +136,26 @@ func TestLessonLengthInSecondsShapes(t *testing.T) {
 		t.Fatalf("absent LengthInSeconds = %d, want 0", res[0].LengthInSeconds)
 	}
 }
+
+// TestIsSong pins which lessons DownloadLesson downloads as a song (version
+// files): a soundslice score and no HLS video of its own; the plex-tv move
+// reads a song's recorded versions by it (owner ruling #78 5).
+func TestIsSong(t *testing.T) {
+	score := []SoundsliceRef{{Slug: ""}, {Slug: "abc"}}
+	cases := []struct {
+		name string
+		l    *Lesson
+		want bool
+	}{
+		{"score, no HLS", &Lesson{Soundslice: score}, true},
+		{"score and HLS", &Lesson{Soundslice: score, Video: Video{HLSManifestURL: "https://x/m.m3u8"}}, false},
+		{"no score", &Lesson{}, false},
+		{"empty slugs only", &Lesson{Soundslice: []SoundsliceRef{{Slug: ""}}}, false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := c.l.IsSong(); got != c.want {
+			t.Errorf("%s: IsSong = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

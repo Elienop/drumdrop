@@ -157,6 +157,7 @@ func (w *Worker) place(ctx context.Context, run *jobRun, claims *library.Claims,
 			self: prev, claims: claims, roots: w.roots(), jobID: job.ID,
 			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),
 			showFiles:  w.showFilesFor(ctx, run, show),
+			song:       lesson.IsSong(),
 		})
 		if err != nil {
 			fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)

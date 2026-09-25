@@ -724,11 +724,64 @@ const EpisodeImageSuffix = ".jpg"
 // The legacy grammar does not know "<base>.jpg": no lesson placed before the
 // record existed has one, and it is the name Plex documents for an episode's
 // image, so a file there that no record names may be one the owner put there.
+//
+// Nor does it know a song's own files per version (VersionEntry): its test
+// for a version, that no "<base> [X].nfo" is there, is exactly what a song
+// placed with an nfo per version fails. A caller that knows the song's
+// versions asks VersionEntry first.
 func EpisodeEntry(base, name string, isDir bool, listing map[string]bool) bool {
 	if !isDir && name == base+EpisodeImageSuffix {
 		return true
 	}
 	return legacyEpisodeEntry(base, name, isDir, listing)
+}
+
+// VersionEntry reports whether name is one of the files the plex-tv move
+// gives a version of the song whose episode base is base, for a label in
+// versions (owner ruling #78 5): its video "<base> [L].mp4", its image
+// "<base> [L].jpg", its nfo "<base> [L].nfo", or its captions
+// "<base> [L].<lang>.<subtitle>".
+//
+// Names alone can not say this: "<base> [L].nfo" is also the nfo of another
+// lesson titled "<title> [L]" (see legacyEpisodeEntry). So the caller must
+// know the versions from something that proves them the song's: the lesson's
+// own record, for a lesson Musora says is a song, or the download in hand.
+// A lesson with no record never gets here: its files are still in the shape
+// they were placed in, one nfo and one image for the song, and the legacy
+// grammar reads that shape.
+func VersionEntry(base, name string, versions []string) bool {
+	for _, l := range versions {
+		rest, ok := strings.CutPrefix(name, base+" ["+l+"]")
+		if !ok {
+			continue
+		}
+		switch rest {
+		case ".mp4", ".nfo", EpisodeImageSuffix:
+			return true
+		}
+		if sub, ok := strings.CutPrefix(rest, "."); ok && isSubtitleSuffix(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// Versions returns the labels L, sorted, for which names holds a song
+// version video "<base> [L].mp4" (L not empty). Which of them really are
+// versions of the song base is for the caller to know (VersionEntry).
+func Versions(base string, names []string) []string {
+	var out []string
+	for _, n := range names {
+		rest, ok := strings.CutPrefix(n, base+" [")
+		if !ok {
+			continue
+		}
+		if l, ok := strings.CutSuffix(rest, "].mp4"); ok && l != "" {
+			out = append(out, l)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // legacyEpisodeEntry reports whether name is one of the entries the plex-tv
@@ -744,6 +797,13 @@ func EpisodeEntry(base, name string, isDir bool, listing map[string]bool) bool {
 //
 // Anything else (another title that merely starts with this one, "…Five-Part
 // Fill.mp4", "…Five.5.mp4", "…Five Bonus.mp4") is not the episode's.
+//
+// This is the shape every lesson without a record still has: a song placed
+// before the record existed has one "<base>.nfo" and no nfo per version. A
+// song is placed with an nfo per version only by a move that records it, or
+// by the one-time rename, which records it first (the scheduler's
+// episodefiles.go), so that "<base> [X].nfo" test keeps reading a legacy
+// folder right.
 func legacyEpisodeEntry(base, name string, isDir bool, listing map[string]bool) bool {
 	rest, ok := strings.CutPrefix(name, base)
 	if !ok {

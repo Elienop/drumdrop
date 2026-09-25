@@ -697,6 +697,17 @@ var songScratchEntries = []string{
 	"05 - Even Flow-poster.jpg", "05 - Even Flow.nfo", "resources",
 }
 
+// songEpisodeNames is what the plex-tv move places for seedSongScratch's
+// song at episodeBase: each version's video, image and nfo (owner ruling
+// #78 5), and the resources folder.
+func songEpisodeNames(episodeBase string) []string {
+	var out []string
+	for _, v := range []string{"Drumless", "Original"} {
+		out = append(out, episodeBase+" ["+v+"].mp4", episodeBase+" ["+v+"].jpg", episodeBase+" ["+v+"].nfo")
+	}
+	return append(out, episodeBase+" resources")
+}
+
 // assertScratchWhole checks the scratch folder still holds every entry of the
 // song, and assertNoEpisodeIn that the season folder holds none of it (only the
 // names in keep).

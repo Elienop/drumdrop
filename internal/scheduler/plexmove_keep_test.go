@@ -58,7 +58,7 @@ func TestPlexTVMoveWithAnUnknownPreviousDownload(t *testing.T) {
 	t.Run("moved", func(t *testing.T) {
 		tmp := t.TempDir()
 		lib := filepath.Join(tmp, "lib")
-		lessonDir, _, season := seedSongScratch(t, tmp)
+		lessonDir, episodeBase, season := seedSongScratch(t, tmp)
 		seedSeason(t, season, legacyVideo)
 		self := legacyRow(1, "Even Flow", 5, season, legacyVideo)
 
@@ -66,7 +66,7 @@ func TestPlexTVMoveWithAnUnknownPreviousDownload(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "the previous download's library files are not known, so none were removed") {
 			t.Errorf("err = %v, want the note that the previous download is not known", err)
 		}
-		if res.seasonDir != season || len(res.placed) != len(songScratchEntries) || len(res.kept) != 0 || !res.known {
+		if res.seasonDir != season || len(res.placed) != len(songEpisodeNames(episodeBase)) || len(res.kept) != 0 || !res.known {
 			t.Errorf("result %+v, want the lesson moved into %s", res, season)
 		}
 		assertExist(t, true, filepath.Join(season, legacyVideo))
@@ -125,9 +125,10 @@ func TestPlexTVMoveSetsNothingAsideUnlessItCanSetAll(t *testing.T) {
 // TestPlexTVUndoThatCannotRenameBackKeepsTheEntry proves an entry the move
 // renamed into the season folder and could not rename back (its only copy) is
 // still owned by the lesson after the undo, so the library never holds an
-// untracked only copy. The videos are placed last, so every entry placed
-// before [Original] failed is stuck: the image, the nfo, the resources and
-// [Drumless].
+// untracked only copy. The videos are placed last, so every entry renamed
+// before [Original] failed is stuck: the resources and [Drumless]. The
+// image and nfo of each version are copies (one file feeds both versions),
+// which the undo removes, so they are not.
 func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
@@ -146,11 +147,12 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 		t.Errorf("err = %v, want the stuck entry named", err)
 	}
 	// The undo goes newest first.
-	all := paths(season, episodeBase+" [Drumless].mp4", episodeBase+" resources", episodeBase+".nfo", episodeBase+".jpg")
+	all := paths(season, episodeBase+" [Drumless].mp4", episodeBase+" resources")
 	if res.seasonDir != "" || !res.known || !reflect.DeepEqual(res.kept, all) {
 		t.Errorf("result %+v, want the stuck entries still owned", res)
 	}
 	assertExist(t, true, all...)
+	assertExist(t, false, paths(season, episodeBase+" [Drumless].jpg", episodeBase+" [Original].jpg", episodeBase+" [Drumless].nfo", episodeBase+" [Original].nfo")...)
 }
 
 // TestPlexTVUndoThatCannotRemoveACopyKeepsIt proves copies the undo could not
@@ -160,7 +162,7 @@ func TestPlexTVUndoThatCannotRemoveACopyKeepsIt(t *testing.T) {
 	skipWithoutPermissionChecks(t)
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
-	lessonDir, _, season := seedSongScratch(t, tmp)
+	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
 	forceCopyFallback(t)
 	orig := syncFile
 	syncFile = func(f *os.File) error {
@@ -180,7 +182,7 @@ func TestPlexTVUndoThatCannotRemoveACopyKeepsIt(t *testing.T) {
 	if err == nil || res.seasonDir != "" {
 		t.Fatalf("move = (%+v, %v), want the flush failure", res, err)
 	}
-	if len(res.kept) != len(songScratchEntries) || !res.known {
+	if len(res.kept) != len(songEpisodeNames(episodeBase)) || !res.known {
 		t.Errorf("kept %v, want every copy still in the season folder", res.kept)
 	}
 	assertExist(t, true, res.kept...)
