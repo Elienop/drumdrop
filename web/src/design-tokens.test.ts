@@ -10,6 +10,7 @@ import { DialogFooter } from "@/components/ui/dialog"
 import { AlertDialogFooter } from "@/components/ui/alert-dialog"
 import { Sidebar } from "@/components/app-shell/Sidebar"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 // Read from disk: the test config (css: false) blanks every CSS import,
 // `?raw` included. (__dirname, not import.meta.url: under jsdom that is an
@@ -178,25 +179,165 @@ describe("focus ring everywhere", () => {
 })
 
 // Owner, 2026-09-25: a focused control's border turns amber, as Inputs and
-// Selects do. The app is dark-only, and a variant's dark:border-* (the
-// outline's dark:border-input) beats the base focus-visible:border-ring:
-// same specificity, later in the built CSS. Only a dark:focus-visible
-// border class wins back. jsdom builds no CSS, so the browser pass checks
-// the colour; this keeps the class from silently going.
+// Selects do. The app is dark-only, and a dark-scoped border colour class
+// (the outline button's dark:border-input, the active tab's
+// dark:data-[state=active]:border-input) beats the base
+// focus-visible:border-ring: at least as specific, and never earlier in the
+// built CSS than a class it ties with. jsdom builds no CSS, so the browser
+// pass checks the colour; this keeps the winning class from silently going.
 describe("the focus border in the dark theme", () => {
-  const variants = ["default", "destructive", "outline", "secondary", "ghost", "link"] as const
-  const classesOf = (variant: (typeof variants)[number]) =>
-    buttonVariants({ variant }).split(/\s+/)
+  // A class's variants and its utility: split at the colons outside brackets
+  // (`[&_svg:not(…)]:size-4` is one variant).
+  const parts = (cls: string): { variants: string[]; utility: string } => {
+    const out: string[] = []
+    let depth = 0
+    let from = 0
+    for (let i = 0; i < cls.length; i++) {
+      if (cls[i] === "[") depth++
+      else if (cls[i] === "]") depth--
+      else if (cls[i] === ":" && depth === 0) {
+        out.push(cls.slice(from, i))
+        from = i + 1
+      }
+    }
+    return { variants: out, utility: cls.slice(from) }
+  }
+  // border, border-2, border-x, border-t-0, border-dashed…: not a colour.
+  const NOT_A_COLOUR = /^border(-[xytrblse])?(-\d+)?$|^border-(solid|dashed|dotted|double|hidden|none)$/
 
-  it("turns amber on keyboard focus on every button variant with a dark border", () => {
-    const bordered = variants.filter((v) => classesOf(v).some((c) => /^dark:border-/.test(c)))
-    // Positive control: the outline button has one, so the check is not vacuous.
-    expect(bordered).toContain("outline")
-    for (const variant of bordered) {
-      expect(classesOf(variant), variant).toContain("dark:focus-visible:border-ring")
+  // The dark-scoped border colour classes that no focus class beats. A focus
+  // border-ring class beats one when it carries every variant the other has
+  // plus focus-visible (strictly more specific, so its place in the CSS no
+  // longer matters), or when it is important (`!`).
+  function unbeaten(classes: string[]): string[] {
+    const focus = classes
+      .map(parts)
+      .filter((p) => /^border-ring!?$/.test(p.utility) && p.variants.includes("focus-visible"))
+    return classes.filter((cls) => {
+      const { variants, utility } = parts(cls)
+      if (!variants.includes("dark") || !utility.startsWith("border-")) return false
+      if (NOT_A_COLOUR.test(utility) || /^border-ring!?$/.test(utility)) return false
+      return !focus.some(
+        (f) =>
+          (f.utility.endsWith("!") && !utility.endsWith("!")) ||
+          (f.variants.length > variants.length && variants.every((v) => f.variants.includes(v))),
+      )
+    })
+  }
+
+  // Every primitive with a dark-scoped border colour class, as rendered.
+  const buttonVariantNames = ["default", "destructive", "outline", "secondary", "ghost", "link"] as const
+  const rendered: Record<string, () => Record<string, string[]>> = {
+    "button.tsx": () =>
+      Object.fromEntries(
+        buttonVariantNames.map((variant) => [variant, buttonVariants({ variant }).split(/\s+/)]),
+      ),
+    "tabs.tsx": () => {
+      render(
+        createElement(
+          Tabs,
+          { defaultValue: "a" },
+          createElement(TabsList, null, createElement(TabsTrigger, { value: "a" }, "A")),
+        ),
+      )
+      return { TabsTrigger: screen.getByRole("tab", { name: "A" }).className.split(/\s+/) }
+    },
+  }
+
+  it("every primitive with a dark-scoped border colour class is checked below", () => {
+    const uiDir = resolve(__dirname, "components/ui")
+    const withDarkBorder = readdirSync(uiDir).filter((f) => {
+      // Comments stripped: only the classes the component ships count.
+      const code = readFileSync(resolve(uiDir, f), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")
+      return code
+        .split(/[\s"'`]+/)
+        .some((cls) => {
+          const { variants, utility } = parts(cls)
+          return variants.includes("dark") && utility.startsWith("border-") && !NOT_A_COLOUR.test(utility)
+        })
+    })
+    // Positive control: the scan finds the two known ones.
+    expect(withDarkBorder).toEqual(expect.arrayContaining(["button.tsx", "tabs.tsx"]))
+    expect(withDarkBorder.sort()).toEqual(Object.keys(rendered).sort())
+  })
+
+  it.each(Object.keys(rendered))("%s: turns amber on keyboard focus whatever dark border it has", (file) => {
+    const elements = rendered[file]()
+    for (const [name, classes] of Object.entries(elements)) {
+      expect(unbeaten(classes), name).toEqual([])
     }
   })
+
+  // Positive controls: without its focus class each known collision is caught,
+  // so the check above is not passing vacuously.
+  it("catches the outline button's and the active tab's collision without their focus class", () => {
+    const outline = rendered["button.tsx"]().outline
+    expect(unbeaten(outline.filter((c) => c !== "dark:focus-visible:border-ring"))).toEqual([
+      "dark:border-input",
+    ])
+    const tab = rendered["tabs.tsx"]().TabsTrigger
+    expect(unbeaten(tab.filter((c) => c !== "dark:focus-visible:border-ring!"))).toEqual([
+      "dark:group-data-[variant=line]/tabs-list:data-[state=active]:border-transparent",
+      "dark:data-[state=active]:border-input",
+    ])
+    // The plain class that fixes the button does not fix the tab: it is only
+    // as specific as dark:data-[state=active]:border-input, and Tailwind emits
+    // it earlier.
+    expect(
+      unbeaten(tab.map((c) => (c === "dark:focus-visible:border-ring!" ? "dark:focus-visible:border-ring" : c))),
+    ).toContain("dark:data-[state=active]:border-input")
+  })
 })
+
+// A small reader of index.css, for the checks below on where its rules sit.
+type CssRule = { selector: string; body: string; within: string[] }
+
+// Every block of a stylesheet (rules and @-blocks alike), each with its OWN
+// declarations (not its nested blocks') and the blocks around it. Enough of a
+// parser for index.css: comments are stripped, and no string holds a brace.
+// Nesting counts: in `.y { border-color: red; &:hover { … } }` the
+// declaration before `&:hover` is .y's.
+function cssBlocks(source: string): CssRule[] {
+  const blocks: CssRule[] = []
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, "")
+  const open: { selector: string; body: string }[] = []
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{") {
+      const run = text.slice(from, i)
+      const cut = run.lastIndexOf(";") + 1
+      if (open.length > 0) open.at(-1)!.body += run.slice(0, cut)
+      open.push({ selector: run.slice(cut).trim(), body: "" })
+      from = i + 1
+    } else if (text[i] === "}") {
+      const block = open.pop()
+      if (block) {
+        block.body += text.slice(from, i)
+        blocks.push({ ...block, within: open.map((o) => o.selector) })
+      }
+      from = i + 1
+    }
+  }
+  return blocks
+}
+
+// The default border colour's own rule: `*` in the base layer, where a
+// border-* colour class (utilities layer) can replace it.
+const baseBorderBodies = (blocks: CssRule[]) =>
+  blocks.filter((b) => b.selector === "*" && b.within.includes("@layer base")).map((b) => b.body.trim())
+
+// The blocks outside every layer that set a border property, by declaration
+// (property names are case-insensitive) or by @apply of a border-* utility.
+// A rule outside a layer outranks every layered utility.
+const unlayeredBorderSetters = (blocks: CssRule[]) =>
+  blocks
+    .filter((b) => ![...b.within, b.selector].some((s) => s.startsWith("@layer")))
+    .filter(
+      (b) =>
+        /(^|[;{\s])border(-[a-z]+)*\s*:/i.test(b.body) ||
+        /@apply\b[^;]*(?<=[\s:])!?border(?=[-\s;!]|$)/i.test(b.body),
+    )
+    .map((b) => b.selector)
 
 // The browser pass on 2026-09-25 found every border-* colour class dead, the
 // one above included: index.css set the default border colour outside any
@@ -204,35 +345,50 @@ describe("the focus border in the dark theme", () => {
 // utilities whatever their specificity. jsdom has no cascade, so this reads
 // where each rule of index.css sits.
 describe("the default border colour", () => {
-  // index.css's rules, each with the @-rules around it. Enough of a parser for
-  // this file: comments are stripped, and no string in it holds a brace.
-  const rules: { selector: string; body: string; within: string[] }[] = []
-  const text = css.replace(/\/\*[\s\S]*?\*\//g, "")
-  const open: string[] = []
-  let from = 0
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === "{") {
-      open.push(text.slice(from, i).split(";").at(-1)!.trim())
-      from = i + 1
-    } else if (text[i] === "}") {
-      const selector = open.pop() ?? ""
-      if (!selector.startsWith("@")) rules.push({ selector, body: text.slice(from, i), within: [...open] })
-      from = i + 1
-    }
-  }
+  const blocks = cssBlocks(css)
 
   it("is set in the base layer, where a border-* colour class can replace it", () => {
-    const base = rules.filter((r) => r.selector === "*" && r.within.includes("@layer base"))
-    expect(base.map((r) => r.body.trim())).toEqual(["border-color: var(--color-border);"])
+    expect(baseBorderBodies(blocks)).toEqual(["border-color: var(--color-border);"])
   })
 
   it("is not set, nor any other border property, by a rule outside a layer", () => {
     // Positive control: the scan sees the rules outside a layer (:root's tokens).
-    expect(rules.some((r) => r.selector === ":root" && r.within.length === 0)).toBe(true)
-    const unlayered = rules.filter(
-      (r) => !r.within.some((w) => w.startsWith("@layer")) && /(^|[;\s])border(-[a-z]+)*\s*:/.test(r.body),
-    )
-    expect(unlayered.map((r) => r.selector)).toEqual([])
+    expect(blocks.some((b) => b.selector === ":root" && b.within.length === 0)).toBe(true)
+    expect(unlayeredBorderSetters(blocks)).toEqual([])
+  })
+
+  // The scanner itself, on stylesheets that must fail.
+  it.each([
+    ["shadcn's template form, @apply outside a layer", "* { @apply border-border; }", ["*"]],
+    ["@apply with a variant", ".x { @apply outline-none hover:border-input; }", [".x"]],
+    [
+      "a declaration before a nested rule",
+      ".y { border-color: red; &:hover { color: blue } }",
+      [".y"],
+    ],
+    ["an uppercase property", ".z { BORDER-COLOR: red; }", [".z"]],
+    ["a list selector", "*, ::before { border-color: red; }", ["*, ::before"]],
+    ["a border set inside @media", "@media (hover: hover) { .m { border: 1px solid; } }", [".m"]],
+  ])("flags %s", (_, sheet, flagged) => {
+    expect(unlayeredBorderSetters(cssBlocks(sheet))).toEqual(flagged)
+  })
+
+  it("passes a border set inside a layer, and a nested rule's own declarations stay its own", () => {
+    const sheet = `
+      :root { --border: red; }
+      @layer base { * { border-color: var(--color-border); } }
+      @layer components { .c { border-width: 2px; } }
+      .n { color: red; &:hover { color: blue; } }
+      .o { @apply outline-border bg-background; }`
+    expect(unlayeredBorderSetters(cssBlocks(sheet))).toEqual([])
+    expect(baseBorderBodies(cssBlocks(sheet))).toEqual(["border-color: var(--color-border);"])
+  })
+
+  it("does not take @apply, or a list selector, as the base rule", () => {
+    expect(baseBorderBodies(cssBlocks("@layer base { * { @apply border-border; } }"))).toEqual([
+      "@apply border-border;",
+    ])
+    expect(baseBorderBodies(cssBlocks("@layer base { *, ::before { border-color: red; } }"))).toEqual([])
   })
 })
 
