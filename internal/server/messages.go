@@ -107,10 +107,14 @@ const (
 	// 2026-09-24 (y)). It says nothing of downloads: it is known up front,
 	// and the rare check once the delete holds the lesson says it too. "The
 	// same place" keeps the season folders, or the next Delete finds nothing
-	// and says "deleted". Setting it back is safe only when no file moved:
-	// otherwise the moved ones are read in the old folder, not found, and
-	// stay, recorded by nothing, when their lesson is deleted.
-	msgLessonLeftBehind = "Nothing was deleted: this lesson's files are in the old library folder. Move them to the same place in the new one, or set it back if you moved nothing, then Delete again."
+	// and says "deleted". Switching back is safe only while the new folder
+	// holds nothing: a file moved there is looked for in the old folder, not
+	// found, and stays, recorded by nothing, when its lesson is deleted; a
+	// copy kept in both loses the old copy and keeps the new one, recorded
+	// by nothing; and a lesson DrumDrop placed there since the change is
+	// then refused with this same sentence. "If you moved nothing" is true
+	// after a copy, so the condition names the new folder instead.
+	msgLessonLeftBehind = "Nothing was deleted: this lesson's files are in the old library folder. Move them to the same place in the new one, or switch back if the new one is still empty, then Delete again."
 )
 
 // Lesson skip (POST /api/lessons/{id}/skip).
@@ -135,7 +139,7 @@ const (
 	msgFollowNoClaimsUpFront = "Nothing was deleted and the follow was kept: DrumDrop couldn't read which files belong to which lesson. Check the server log, fix the problem, then Remove again."
 	// msgFollowLeftBehind: see msgLessonLeftBehind; no lesson of the follow
 	// was deleted.
-	msgFollowLeftBehind = "Nothing was deleted and the follow was kept: some of its files are in the old library folder. Move them to the same place in the new one, or set it back if you moved nothing, then Remove again."
+	msgFollowLeftBehind = "Nothing was deleted and the follow was kept: some of its files are in the old library folder. Move them to the same place in the new one, or switch back if the new one is still empty, then Remove again."
 )
 
 // Follow edit (PATCH /api/follows/{id}).
