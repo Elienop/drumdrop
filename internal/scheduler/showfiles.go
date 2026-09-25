@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -191,16 +192,26 @@ func createOnly(dir *os.Root, name string, data []byte) (created bool, err error
 	return false, wrapWrite(path, err)
 }
 
+// tempWriter tells this process's hidden files from another's: createOnly
+// writes into folders that are shared (a show folder, a season folder), and
+// two drumdrop processes can write one slot at once (drumdrop sync beside
+// serve). A test sets it to play a second process.
+var tempWriter = strconv.Itoa(os.Getpid())
+
 // createTempName is the hidden name createOnly writes name's data under
-// first: ".<name>.drumdrop-part", or, when that would not fit in
+// first: ".<name>.<writer>.drumdrop-part", or, when that would not fit in
 // maxNameBytes (an episode's file under a long title), a short one keyed on
-// name, so a run that died there leaves a name the next one removes.
+// name. Each writer has its own (tempWriter, the process id), so no writer
+// ever removes, or publishes, another's unfinished file; a run that died
+// leaves a name the same writer removes next time. The container's serve is
+// the same process id on every start; a leftover of another process stays,
+// a hidden file Plex ignores.
 func createTempName(name string) string {
-	if tmp := "." + name + musora.TempSuffix; len(tmp) <= maxNameBytes {
+	if tmp := "." + name + "." + tempWriter + musora.TempSuffix; len(tmp) <= maxNameBytes {
 		return tmp
 	}
 	sum := sha256.Sum256([]byte(name))
-	return ".drumdrop-" + hex.EncodeToString(sum[:8]) + musora.TempSuffix
+	return ".drumdrop-" + hex.EncodeToString(sum[:8]) + "." + tempWriter + musora.TempSuffix
 }
 
 // wrapWrite is err as a failed write of path, or nil.

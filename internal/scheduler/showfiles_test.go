@@ -193,7 +193,7 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 		if !created || err != nil {
 			t.Fatalf("createOnly = %v, %v; want created", created, err)
 		}
-		if want := []string{".poster.jpg.drumdrop-part -> poster.jpg"}; !reflect.DeepEqual(renamed, want) {
+		if want := []string{".poster.jpg." + tempWriter + ".drumdrop-part -> poster.jpg"}; !reflect.DeepEqual(renamed, want) {
 			t.Errorf("renames %q, want %q", renamed, want)
 		}
 		if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
@@ -235,7 +235,7 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 	})
 	t.Run("a leftover part is replaced", func(t *testing.T) {
 		r, dir := open(t)
-		seedSeason(t, dir, ".poster.jpg.drumdrop-part") // a crash's
+		seedSeason(t, dir, createTempName("poster.jpg")) // this writer's crash's
 		if created, err := createOnly(r, "poster.jpg", []byte("image")); !created || err != nil {
 			t.Fatalf("createOnly = %v, %v; want created", created, err)
 		}
@@ -244,6 +244,64 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 			t.Errorf("poster.jpg = %q", got)
 		}
 	})
+}
+
+// TestCreateOnlyNeverPublishesAnotherWritersFile pins that two writers of one
+// slot (drumdrop sync beside serve: two processes, one library) never touch
+// each other's unfinished file: B starts while A's file is written but not
+// yet renamed, and gets as far as writing its own; A must still publish its
+// own flushed bytes, never B's unflushed ones (which, write-once, would stay
+// truncated forever if B then died), and B finds the slot filled.
+func TestCreateOnlyNeverPublishesAnotherWritersFile(t *testing.T) {
+	dir := t.TempDir()
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	origSync, origWriter := syncFile, tempWriter
+	t.Cleanup(func() { syncFile, tempWriter = origSync, origWriter })
+
+	bWrote := make(chan struct{})
+	aDone := make(chan struct{})
+	type result struct {
+		created bool
+		err     error
+	}
+	bResult := make(chan result, 1)
+	var once sync.Once
+	syncFile = func(f *os.File) error {
+		if strings.Contains(filepath.Base(f.Name()), ".B.") {
+			close(bWrote) // B has written its file and not flushed it...
+			<-aDone       // ...and stays there until A is done
+			return origSync(f)
+		}
+		once.Do(func() {
+			tempWriter = "B" // a second process, from here on
+			go func() {
+				created, err := createOnly(r, "poster.jpg", []byte("B's, unflushed"))
+				bResult <- result{created, err}
+			}()
+			<-bWrote
+		})
+		return origSync(f)
+	}
+	tempWriter = "A"
+	created, err := createOnly(r, "poster.jpg", []byte("A's"))
+	close(aDone)
+	b := <-bResult
+	if !created || err != nil {
+		t.Errorf("A: createOnly = %v, %v; want its file created", created, err)
+	}
+	if b.created || b.err != nil {
+		t.Errorf("B: createOnly = %v, %v; want the slot found filled", b.created, b.err)
+	}
+	if got := readFile(filepath.Join(dir, "poster.jpg")); got != "A's" {
+		t.Errorf("poster.jpg = %q, want A's own flushed bytes", got)
+	}
+	if got := showFileNames(t, dir); !reflect.DeepEqual(got, []string{"poster.jpg"}) {
+		t.Errorf("folder holds %v, want poster.jpg only", got)
+	}
 }
 
 // TestShowFilesLeaveTheNFOOutWhenAnImageIsNotWritten proves tvshow.nfo, the

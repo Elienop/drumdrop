@@ -520,7 +520,7 @@ func TestRenameEpisodeFilesOnlyInPlexTV(t *testing.T) {
 // a name: ".<name>.drumdrop-part" when it does, else a short one of its own
 // per name (an episode's file under a long title).
 func TestCreateTempNameFitsAName(t *testing.T) {
-	if got := createTempName("poster.jpg"); got != ".poster.jpg"+musora.TempSuffix {
+	if got := createTempName("poster.jpg"); got != ".poster.jpg."+tempWriter+musora.TempSuffix {
 		t.Errorf("createTempName(poster.jpg) = %q", got)
 	}
 	long := strings.Repeat("a", maxNameBytes-4) + ".jpg"
