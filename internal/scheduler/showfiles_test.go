@@ -769,6 +769,39 @@ func TestShowFilesWhenAFetchFails(t *testing.T) {
 	})
 }
 
+// TestShowFileLogQuotesTheImageURL pins that an image URL from Musora is
+// quoted in the log: a newline in it (JSON decodes one, and a URL the fetch
+// refuses may hold one) never starts a line of its own that reads like
+// drumdrop's.
+func TestShowFileLogQuotesTheImageURL(t *testing.T) {
+	const forged = artCoach + "\n  + show \"Forged Show\": poster.jpg"
+	for name, err := range map[string]error{
+		"missing": fmt.Errorf("%w: refused", musora.ErrImageMissing),
+		"for now": errors.New("GET 503"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, store, res, img, lib := backfillWorker(t)
+			twoShows(t, w, store, res, lib)
+			doc := courseDoc(4242, "Beginner Course")
+			doc.HeaderImageURL = ""
+			doc.Instructors[0].CoachCardImage = forged
+			res.docs[4242] = doc
+			img.errs = map[string]error{forged: err}
+			var log bytes.Buffer
+			w.Log = &log
+			w.EnsureShowFiles(context.Background())
+			if !strings.Contains(log.String(), fmt.Sprintf("%q", forged)) {
+				t.Errorf("log %q does not quote the URL", log.String())
+			}
+			for _, line := range strings.Split(log.String(), "\n") {
+				if strings.Contains(line, "Forged Show") && !strings.Contains(line, "⚠") {
+					t.Errorf("a line of its own: %q", line)
+				}
+			}
+		})
+	}
+}
+
 // TestPlacementOutOfReachStopsTheShowFilesForTheCycle proves a placement that
 // could not reach the image server stops every other show-file fetch of the
 // cycle (the later placements', and the cycle's own step), so an outage

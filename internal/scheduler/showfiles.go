@@ -407,14 +407,14 @@ func (w *Worker) fetchShowFiles(ctx context.Context, title string, doc *musora.L
 			fetched[u] = data
 			return data, nil
 		case errors.Is(err, musora.ErrImageMissing):
-			fmt.Fprintf(w.log(), "  ⚠ show %q: no image from %s: %v\n", title, u, err)
+			fmt.Fprintf(w.log(), "  ⚠ show %q: no image from %q: %v\n", title, u, err)
 			return nil, nil
 		}
 		if err = offline(err); errors.Is(err, errShowOffline) {
 			return nil, err
 		}
 		complete = false
-		fmt.Fprintf(w.log(), "  ⚠ show %q: the image %s could not be fetched now: %v\n", title, u, err)
+		fmt.Fprintf(w.log(), "  ⚠ show %q: the image %q could not be fetched now: %v\n", title, u, err)
 		return nil, nil
 	}
 	var err error
