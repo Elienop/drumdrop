@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D162 on 2026-09-26 (*moves*; re-check the
+the highest ID on this page: the next new ID is D164 on 2026-09-26 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -1484,6 +1484,33 @@ D53 waits on an owner decision.
   - *Evidence:* `createOnly` in `internal/scheduler/showfiles.go` · `renameat_linux.go`,
     `renameat_other.go` in `internal/scheduler`; found by the code seat of
     `feat/plex-show-artwork`
+
+- **D162 · A symlinked show folder gets the episode but not the show's files.** *Owner's call.*
+  - *What:* when a plex-tv show folder is a symlink to another show folder inside the
+    library, the placement still puts the episode through it (it lands in the other show's
+    `Season 01` and is recorded there), because `openLibraryParent` follows symlinks that
+    stay inside the library. The show-file step refuses the same symlink (`openRealDir`),
+    so the other show never receives this show's poster, background or `tvshow.nfo`. The
+    two paths disagree: one refuses to write this show's artwork into another show's folder,
+    the other writes this show's episode there.
+  - *Why:* no known way for DrumDrop itself to create such a link; it needs the owner (or
+    another tool) to make one. The question is whether the placement should refuse a
+    symlinked show folder too, which changes what the owner can do with links on purpose.
+  - *Evidence:* `TestPlexTVPlacementWritesNoShowFilesThroughASymlink` in
+    `internal/scheduler/showfiles_test.go` (it shows the episode recorded under the other
+    show) · `openLibraryParent`, `openShowDir`; found by the Sonar round of
+    `feat/plex-show-artwork`
+
+- **D163 · One test hangs instead of failing when `createOnly` skips its flush.**
+  - *What:* `TestCreateOnlyNeverPublishesAnotherWritersFile` coordinates its two writers only
+    inside the `syncFile` stub. A change that skips the flush never reaches that stub, so the
+    second writer waits and the test runs until the 5-minute `go test` timeout instead of
+    failing at once. It still fails, so the guard is pinned, but slowly and with a timeout's
+    stack dump instead of a message.
+  - *Why:* a mutation run or a real regression costs 5 minutes and reads as a hang. Fix: give
+    the coordination its own timeout that fails the test with a message.
+  - *Evidence:* the test in `internal/scheduler/showfiles_test.go`; found by the Sonar round of
+    `feat/plex-show-artwork` (mutant s1)
 
 ## Housekeeping & dependencies
 
