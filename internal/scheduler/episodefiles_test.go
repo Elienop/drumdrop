@@ -588,3 +588,61 @@ func TestRenameEpisodeFilesSaysWhichLegacyFilesItLeaves(t *testing.T) {
 		})
 	}
 }
+
+// TestRenameEpisodeFilesTouchesNothingWhileARecordIsDamaged pins that one
+// lesson's damaged record stops the whole pass before it writes anything:
+// which files each lesson owns can not be known then, so no lesson's file
+// is renamed or copied and no record is written, and the pass says why.
+func TestRenameEpisodeFilesTouchesNothingWhileARecordIsDamaged(t *testing.T) {
+	w, store, log, _, season := renameWorker(t)
+	five := []string{renameBase + ".mp4", renameBase + "-poster.jpg"}
+	six := []string{"Show - s01e06 - Six.mp4", "Show - s01e06 - Six-poster.jpg"}
+	seedSeason(t, season, append(append([]string(nil), five...), six...)...)
+	damaged := recordedRow(2, season, six...)
+	damaged.LibraryEntries = sql.NullString{String: "not a list", Valid: true}
+	store.withFiles = []database.Lesson{recordedRow(1, season, five...), damaged}
+	renames := 0
+	stubRename(t, func(oldpath, newpath string) error {
+		renames++
+		return renameNoReplace(oldpath, newpath)
+	})
+
+	w.RenameEpisodeFiles(context.Background())
+	if renames != 0 || len(store.swaps) != 0 {
+		t.Errorf("%d files written, record writes %+v; want none while a record is damaged", renames, store.swaps)
+	}
+	if !strings.Contains(log.String(), "the lessons' files are not known") {
+		t.Errorf("log %q does not say why nothing was renamed", log.String())
+	}
+	assertContent(t, season, append(append([]string(nil), five...), six...)...)
+	assertExist(t, false, paths(season, renameBase+".jpg", "Show - s01e06 - Six.jpg")...)
+}
+
+// TestRenameEpisodeFilesRenamesNothingItCouldNotRecord pins that a legacy
+// row's files are only ever renamed once they are recorded: when the store
+// refuses the record write that comes first, no file is copied or renamed
+// and nothing is recorded; the next cycle records them, then renames them.
+func TestRenameEpisodeFilesRenamesNothingItCouldNotRecord(t *testing.T) {
+	w, store, _, _, season := renameWorker(t)
+	names := []string{renameBase + ".mp4", renameBase + ".nfo", renameBase + "-poster.jpg"}
+	seedSeason(t, season, names...)
+	store.withFiles = []database.Lesson{legacyRow(1, "Five", 5, season, renameBase+".mp4")}
+	store.swapErr = errors.New("database is locked")
+	renames := 0
+	stubRename(t, func(oldpath, newpath string) error {
+		renames++
+		return renameNoReplace(oldpath, newpath)
+	})
+
+	w.RenameEpisodeFiles(context.Background())
+	if renames != 0 || store.row(t, 1).LibraryEntries.Valid {
+		t.Errorf("%d files written, record %v; want nothing for a row that could not be recorded", renames, store.row(t, 1).LibraryEntries)
+	}
+	assertContent(t, season, names...)
+	assertExist(t, false, filepath.Join(season, renameBase+".jpg"))
+
+	store.swapErr = nil
+	w.RenameEpisodeFiles(context.Background())
+	assertHolds(t, season, renameBase+"-poster.jpg", renameBase+".jpg")
+	assertRowRecords(t, store, 1, season, renameBase+".jpg", renameBase+".mp4", renameBase+".nfo")
+}
