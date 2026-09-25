@@ -84,44 +84,52 @@ func assertRecordIs(t *testing.T, store *fakeWorkerStore, season string, names .
 // stays recorded, so the episode never loses its only copy.
 func TestPlexTVSongReDownloadRetiresTheSharedFiles(t *testing.T) {
 	const base = sameTitleBase
-	videos := versionNames(base, ".mp4", "Drumless", "Original")
 	for _, oldImage := range []string{base + musora.PosterSuffix, base + ".jpg"} {
 		for _, imageAgain := range []bool{true, false} {
 			name := "image " + oldImage[len(base):] + " fetched again"
 			if !imageAgain {
 				name = "image " + oldImage[len(base):] + " not fetched again"
 			}
-			t.Run(name, func(t *testing.T) {
-				w, store, _, season := songWorker(t, imageAgain)
-				seedRecordedSong(t, store, season, append(videos, base+".nfo", oldImage)...)
+			t.Run(name, func(t *testing.T) { checkSongRetiresTheSharedFiles(t, oldImage, imageAgain) })
+		}
+	}
+}
 
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				nfos := versionNames(base, ".nfo", "Drumless", "Original")
-				images := versionNames(base, ".jpg", "Drumless", "Original")
-				want := append(append(append([]string(nil), videos...), nfos...), base+" resources")
-				assertExist(t, false, filepath.Join(season, base+".nfo"))
-				if imageAgain {
-					want = append(want, images...)
-					assertExist(t, false, filepath.Join(season, oldImage))
-					for _, p := range paths(season, images...) {
-						if got := readFile(p); got != "new image" {
-							t.Errorf("%s = %q, want the new image", filepath.Base(p), got)
-						}
-					}
-				} else {
-					want = append(want, oldImage)
-					assertContent(t, season, oldImage)
-					assertExist(t, false, paths(season, images...)...)
-				}
-				for _, p := range paths(season, nfos...) {
-					if got := readFile(p); !strings.Contains(got, "<episodedetails>") {
-						t.Errorf("%s = %q, want the episode nfo", filepath.Base(p), got)
-					}
-				}
-				assertRecordIs(t, store, season, want...)
-			})
+// checkSongRetiresTheSharedFiles is TestPlexTVSongReDownloadRetiresTheSharedFiles
+// for a song placed with the one image oldImage, whose re-download fetches
+// its image again or not (imageAgain).
+func checkSongRetiresTheSharedFiles(t *testing.T, oldImage string, imageAgain bool) {
+	const base = sameTitleBase
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	w, store, _, season := songWorker(t, imageAgain)
+	seedRecordedSong(t, store, season, append(videos, base+".nfo", oldImage)...)
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	want := append(append(append([]string(nil), videos...), nfos...), base+" resources")
+	assertExist(t, false, filepath.Join(season, base+".nfo"))
+	if imageAgain {
+		want = append(want, images...)
+		assertExist(t, false, filepath.Join(season, oldImage))
+		assertHolds(t, season, "new image", images...)
+	} else {
+		want = append(want, oldImage)
+		assertContent(t, season, oldImage)
+		assertExist(t, false, paths(season, images...)...)
+	}
+	assertEpisodeNFOs(t, season, nfos...)
+	assertRecordIs(t, store, season, want...)
+}
+
+// assertEpisodeNFOs fails unless each name in season is an episode nfo.
+func assertEpisodeNFOs(t *testing.T, season string, names ...string) {
+	t.Helper()
+	for _, p := range paths(season, names...) {
+		if got := readFile(p); !strings.Contains(got, "<episodedetails>") {
+			t.Errorf("%s = %q, want the episode nfo", filepath.Base(p), got)
 		}
 	}
 }
@@ -410,39 +418,42 @@ func TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles(t *testing.T) {
 		"gone":     {base + ".nfo", base + ".jpg"},
 		"a folder": {base + ".nfo", base + ".jpg", base + ".mp4/"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			w, store, _, season := songWorker(t, true)
-			seedSeason(t, season, seed...)
-			prev := recordedRow(100, season, base+".mp4", base+".nfo", base+".jpg")
-			prev.Position = sql.NullInt64{Int64: 5, Valid: true}
-			prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
-			store.lessons[100] = prev
-			store.withFiles = []database.Lesson{prev}
+		t.Run(name, func(t *testing.T) { checkOwnVideoGoneRetiresItsFiles(t, seed) })
+	}
+}
 
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertExist(t, false, paths(season, base+".nfo", base+".jpg")...)
-			videos := versionNames(base, ".mp4", "Drumless", "Original")
-			nfos := versionNames(base, ".nfo", "Drumless", "Original")
-			images := versionNames(base, ".jpg", "Drumless", "Original")
-			for _, p := range paths(season, images...) {
-				if got := readFile(p); got != "new image" {
-					t.Errorf("%s = %q, want the song's image", filepath.Base(p), got)
-				}
-			}
-			for _, n := range append(append(append([]string(nil), videos...), nfos...), images...) {
-				rec := onlyRecord(t, store)
-				if !slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
-					t.Errorf("record %v does not name %s", rec.entries, n)
-				}
-			}
-			for _, n := range []string{base + ".nfo", base + ".jpg"} {
-				if rec := onlyRecord(t, store); slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
-					t.Errorf("record %v still names %s", rec.entries, n)
-				}
-			}
-		})
+// checkOwnVideoGoneRetiresItsFiles is
+// TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles with seed in the
+// season folder, where the record names "<base>.mp4", "<base>.nfo" and
+// "<base>.jpg".
+func checkOwnVideoGoneRetiresItsFiles(t *testing.T, seed []string) {
+	const base = sameTitleBase
+	w, store, _, season := songWorker(t, true)
+	seedSeason(t, season, seed...)
+	prev := recordedRow(100, season, base+".mp4", base+".nfo", base+".jpg")
+	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+	prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertExist(t, false, paths(season, base+".nfo", base+".jpg")...)
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	assertHolds(t, season, "new image", images...)
+	rec := onlyRecord(t, store)
+	for _, n := range append(append(append([]string(nil), videos...), nfos...), images...) {
+		if !slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
+			t.Errorf("record %v does not name %s", rec.entries, n)
+		}
+	}
+	for _, n := range []string{base + ".nfo", base + ".jpg"} {
+		if slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
+			t.Errorf("record %v still names %s", rec.entries, n)
+		}
 	}
 }
 
