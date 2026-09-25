@@ -365,3 +365,50 @@ func checkPlacementThatFailsAfterAMergeTakesItBack(t *testing.T, layout string) 
 	assertTree(t, scratch, download)
 	assertExist(t, false, filepath.Join(lib, privateRootName, replacedFolderName(7)), filepath.Join(lib, privateRootName, replacedFolderName(0)))
 }
+
+// TestPlacementThatFailsWhileClearingNamesTakesTheMergeBack (round-5l code
+// seat W1) is the same rule where the failure comes earlier, while the names
+// are still being cleared (clearNames): resources/ is merged, then the file at
+// the name sheets/ goes to can not be set aside. The merge must still be taken
+// back, in both layouts: the earlier subfolder holds exactly its own file, the
+// download is whole in its folder, and the file at sheets' name stays.
+func TestPlacementThatFailsWhileClearingNamesTakesTheMergeBack(t *testing.T) {
+	for _, layout := range []string{"", LayoutPlexTV} {
+		t.Run("layout="+layout, func(t *testing.T) {
+			checkPlacementThatFailsWhileClearingNamesTakesTheMergeBack(t, layout)
+		})
+	}
+}
+
+// checkPlacementThatFailsWhileClearingNamesTakesTheMergeBack is
+// TestPlacementThatFailsWhileClearingNamesTakesTheMergeBack in layout.
+func checkPlacementThatFailsWhileClearingNamesTakesTheMergeBack(t *testing.T, layout string) {
+	t.Helper()
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	scratch := filepath.Join(dl, "Course", "05 - Five")
+	download := map[string]string{"05 - Five.mp4": "new mp4", "resources/a.pdf": "new a", "sheets/b.pdf": "new b"}
+	writeTree(t, scratch, download)
+	dest, sub := fiveDest(lib, layout)
+	sheets := strings.TrimSuffix(sub, "resources") + "sheets"
+	earlier := map[string]string{"f.pdf": "earlier f"}
+	writeTree(t, filepath.Join(dest, sub), earlier)
+	blocker := map[string]string{sheets: "a file where the sheets folder goes"}
+	writeTree(t, dest, blocker)
+	// Only setting the file at sheets' name aside is refused: resources/
+	// sorts before sheets/, so it is merged by then.
+	refuseRenames(t, func(oldpath, newpath string) bool {
+		return filepath.Base(oldpath) == sheets && strings.Contains(newpath, privateRootName)
+	})
+
+	moved, err := placeFiveIn(t, layout, dl, lib, scratch,
+		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}}, database.Lesson{})
+	if err == nil || moved != "" {
+		t.Fatalf("placement = %q, %v; want the refused set-aside's failure", moved, err)
+	}
+	assertTree(t, filepath.Join(dest, sub), earlier)
+	assertTree(t, scratch, download)
+	if got, _ := os.ReadFile(filepath.Join(dest, sheets)); string(got) != blocker[sheets] {
+		t.Errorf("%s = %q, want the file that was there", sheets, got)
+	}
+}
