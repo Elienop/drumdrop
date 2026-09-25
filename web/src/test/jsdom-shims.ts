@@ -38,7 +38,8 @@ globalThis.ResizeObserver = class implements ResizeObserver {
 // An in-memory Storage for localStorage. Node 26 defines its own global
 // `localStorage`, `undefined` without `--localstorage-file`, and it shadows
 // jsdom's; older Nodes leave jsdom's in place. This one replaces either.
-class MemoryStorage implements Storage {
+// Exported for jsdom-shims.test.ts, which checks that it is the one installed.
+export class MemoryStorage implements Storage {
   private readonly store = new Map<string, string>()
   get length(): number {
     return this.store.size

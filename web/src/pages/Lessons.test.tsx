@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { delay, http, HttpResponse } from "msw"
@@ -10,15 +10,6 @@ import { qk } from "@/lib/queryKeys"
 import { Toaster } from "@/components/ui/sonner"
 import type { JobDTO, LessonDTO } from "@/types"
 import { Lessons } from "./Lessons"
-
-// Radix DropdownMenu (used for the row actions) reads pointer-capture APIs and
-// scrollIntoView that jsdom does not implement; stub them so the menu opens.
-beforeAll(() => {
-  if (!Element.prototype.hasPointerCapture)
-    Element.prototype.hasPointerCapture = () => false
-  if (!Element.prototype.scrollIntoView)
-    Element.prototype.scrollIntoView = () => {}
-})
 
 const lessons: LessonDTO[] = [
   {
