@@ -346,8 +346,16 @@ func checkPlacementThatFailsAfterAMergeTakesItBack(t *testing.T, layout string) 
 	dest, subName := fiveDest(lib, layout)
 	sub := filepath.Join(dest, subName)
 	writeTree(t, sub, earlierResources)
+	// mergedFirst records, at the first refusal, whether resources/ was merged
+	// by then: a failure before the merge would pass every check below.
+	refused, mergedFirst := false, false
 	stubRename(t, func(oldpath, newpath string) error {
 		if filepath.Ext(newpath) == ".nfo" {
+			if !refused {
+				refused = true
+				got, _ := os.ReadFile(filepath.Join(sub, "a.pdf"))
+				mergedFirst = string(got) == download["resources/a.pdf"]
+			}
 			return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
 		}
 		return renameNoReplace(oldpath, newpath)
@@ -360,6 +368,9 @@ func checkPlacementThatFailsAfterAMergeTakesItBack(t *testing.T, layout string) 
 	}
 	if err == nil {
 		t.Fatal("the placement succeeded, want the refused rename's failure")
+	}
+	if !mergedFirst {
+		t.Fatal("the nfo's rename was refused before resources/ was merged")
 	}
 	assertTree(t, sub, earlierResources)
 	assertTree(t, scratch, download)
@@ -396,15 +407,29 @@ func checkPlacementThatFailsWhileClearingNamesTakesTheMergeBack(t *testing.T, la
 	blocker := map[string]string{sheets: "a file where the sheets folder goes"}
 	writeTree(t, dest, blocker)
 	// Only setting the file at sheets' name aside is refused: resources/
-	// sorts before sheets/, so it is merged by then.
+	// sorts before sheets/, so it is merged by then. mergedFirst records that
+	// at the first refusal: a failure before the merge would pass every check
+	// below.
+	refused, mergedFirst := false, false
 	refuseRenames(t, func(oldpath, newpath string) bool {
-		return filepath.Base(oldpath) == sheets && strings.Contains(newpath, privateRootName)
+		if filepath.Base(oldpath) != sheets || !strings.Contains(newpath, privateRootName) {
+			return false
+		}
+		if !refused {
+			refused = true
+			_, err := os.Lstat(filepath.Join(dest, sub, "a.pdf"))
+			mergedFirst = err == nil
+		}
+		return true
 	})
 
 	moved, err := placeFiveIn(t, layout, dl, lib, scratch,
 		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}}, database.Lesson{})
 	if err == nil || moved != "" {
 		t.Fatalf("placement = %q, %v; want the refused set-aside's failure", moved, err)
+	}
+	if !mergedFirst {
+		t.Fatal("the set-aside was refused before resources/ was merged")
 	}
 	assertTree(t, filepath.Join(dest, sub), earlier)
 	assertTree(t, scratch, download)
