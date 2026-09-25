@@ -205,7 +205,7 @@ func cmdDownload(argv []string) error {
 		Quality:       *quality,
 		AudioLang:     config.AudioLang(),
 		ResourcesOnly: *resourcesOnly,
-	}, os.Stdout, os.Stderr)
+	}, console{stdout: os.Stdout, stderr: os.Stderr})
 
 	fmt.Printf("\nDone → %s\n  downloaded: %d  failed: %d\n", outDir, downloaded, failed)
 	if ctx.Err() != nil {
@@ -223,36 +223,42 @@ type resolvedLesson struct {
 	failed bool
 }
 
+// console is where a one-shot download reports: progress to stdout, failures
+// to stderr.
+type console struct {
+	stdout, stderr io.Writer
+}
+
 // downloadResolved downloads each resolved lesson into <out>/<course>/NN -
 // Title, one at a time, and counts the outcomes. Each download goes through
 // scheduler.DownloadOneShot: it is written in a private folder and placed
 // only once it finished, so a failed or interrupted one leaves the lesson's
 // folder as it was. Once ctx is done no further lesson starts.
-func downloadResolved(ctx context.Context, d scheduler.Downloader, out, course string, lessons []resolvedLesson, opts musora.DownloadOpts, stdout, stderr io.Writer) (downloaded, failed int) {
+func downloadResolved(ctx context.Context, d scheduler.Downloader, out, course string, lessons []resolvedLesson, opts musora.DownloadOpts, con console) (downloaded, failed int) {
 	for _, r := range lessons {
 		if r.failed {
 			failed++
 			continue
 		}
 		if ctx.Err() != nil {
-			fmt.Fprintf(stderr, "✖  lesson %d not downloaded: interrupted\n", r.id)
+			fmt.Fprintf(con.stderr, "✖  lesson %d not downloaded: interrupted\n", r.id)
 			failed++
 			continue
 		}
-		fmt.Fprintf(stdout, "\n▼ [%02d] %s\n", r.index, r.lesson.Title)
+		fmt.Fprintf(con.stdout, "\n▼ [%02d] %s\n", r.index, r.lesson.Title)
 		o := opts
 		o.Index = r.index
 		replaced, err := scheduler.DownloadOneShot(ctx, d, r.lesson, out, course, o)
 		for _, p := range replaced {
-			fmt.Fprintf(stdout, "  ↻ replaced %s\n", p)
+			fmt.Fprintf(con.stdout, "  ↻ replaced %s\n", p)
 		}
 		if err != nil {
 			failed++
-			fmt.Fprintf(stderr, "✖  lesson %d failed: %v\n", r.id, err)
+			fmt.Fprintf(con.stderr, "✖  lesson %d failed: %v\n", r.id, err)
 			continue
 		}
 		downloaded++
-		fmt.Fprintf(stdout, "  ✓ lesson %d\n", r.id)
+		fmt.Fprintf(con.stdout, "  ✓ lesson %d\n", r.id)
 	}
 	return downloaded, failed
 }

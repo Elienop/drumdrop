@@ -59,7 +59,7 @@ func TestDownloadResolvedFailureKeepsExistingVideo(t *testing.T) {
 	video := seedRunVideo(t, out)
 	dl := &overwritingDownloader{fail: true}
 
-	downloaded, failed := downloadResolved(context.Background(), dl, out, "Course", runLessons(), musora.DownloadOpts{}, io.Discard, io.Discard)
+	downloaded, failed := downloadResolved(context.Background(), dl, out, "Course", runLessons(), musora.DownloadOpts{}, console{stdout: io.Discard, stderr: io.Discard})
 	if downloaded != 0 || failed != 1 || dl.calls != 1 {
 		t.Fatalf("downloaded, failed, calls = %d, %d, %d; want 0, 1, 1", downloaded, failed, dl.calls)
 	}
@@ -74,7 +74,7 @@ func TestDownloadResolvedSuccessReplacesVideo(t *testing.T) {
 	out := t.TempDir()
 	video := seedRunVideo(t, out)
 
-	downloaded, failed := downloadResolved(context.Background(), &overwritingDownloader{}, out, "Course", runLessons(), musora.DownloadOpts{}, io.Discard, io.Discard)
+	downloaded, failed := downloadResolved(context.Background(), &overwritingDownloader{}, out, "Course", runLessons(), musora.DownloadOpts{}, console{stdout: io.Discard, stderr: io.Discard})
 	if downloaded != 1 || failed != 0 {
 		t.Fatalf("downloaded, failed = %d, %d; want 1, 0", downloaded, failed)
 	}
@@ -91,7 +91,7 @@ func TestDownloadResolvedInterruptedStartsNothing(t *testing.T) {
 	cancel()
 	dl := &overwritingDownloader{}
 
-	downloaded, failed := downloadResolved(ctx, dl, out, "Course", runLessons(), musora.DownloadOpts{}, io.Discard, io.Discard)
+	downloaded, failed := downloadResolved(ctx, dl, out, "Course", runLessons(), musora.DownloadOpts{}, console{stdout: io.Discard, stderr: io.Discard})
 	if downloaded != 0 || failed != 1 || dl.calls != 0 {
 		t.Fatalf("downloaded, failed, calls = %d, %d, %d; want 0, 1, 0", downloaded, failed, dl.calls)
 	}
