@@ -32,7 +32,7 @@ it("shows Pause and calls POST /api/pause when running", async () => {
 
 // msgNoDaemon and msgServerError, verbatim from internal/server/messages.go.
 const NO_DAEMON =
-  "This server runs without the download daemon, so there's nothing to pause, resume or sync."
+  "This server runs without the download daemon, so it can't pause, resume or run a sync."
 const SERVER_ERROR =
   "This may not have finished: something went wrong on the server. Check the server log, fix the problem, then try again."
 

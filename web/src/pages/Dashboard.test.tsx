@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
 import { ORIGIN, renderWithProviders, server } from "@/test/msw"
+import { toast } from "sonner"
 import { Toaster } from "@/components/ui/sonner"
 import { Dashboard } from "./Dashboard"
 
@@ -43,7 +44,7 @@ it("a sync that fails without a server message toasts the outcome and a sentence
 // The server's own sentences for its 503s on /api/sync (msgNoDaemon and
 // msgNoPlanner, internal/server/messages.go).
 const NO_DAEMON =
-  "This server runs without the download daemon, so there's nothing to pause, resume or sync."
+  "This server runs without the download daemon, so it can't pause, resume or run a sync."
 const NO_PLANNER =
   "This server runs without the sync planner, so it can't say what a sync would queue."
 
@@ -110,15 +111,22 @@ describe("a sync button blocked by a 503", () => {
   // where the reason is read, since the tooltip needs a hover or focus.
   it.each([
     ["Run sync", "Couldn't start a sync", NO_DAEMON],
-    ["Dry-run", "Couldn't run the dry run", NO_PLANNER],
+    ["Dry-run", "Couldn't do a dry run", NO_PLANNER],
   ])("%s toasts the outcome and the server's reason, until closed", async (name, outcome, reason) => {
+    const toastError = vi.spyOn(toast, "error")
+    onTestFinished(() => toastError.mockRestore())
     blockSync()
     render(<Toaster />)
     await block(name)
 
-    const toast = (await screen.findByText(outcome)).closest<HTMLElement>("[data-sonner-toast]")
-    expect(toast).toHaveTextContent(reason)
-    expect(within(toast!).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+    // The outcome is the title, the reason the sentence under it (as TopBar's).
+    const shown = (await screen.findByText(outcome)).closest<HTMLElement>("[data-sonner-toast]")!
+    expect(within(shown).getByText(reason, { selector: "[data-description]" })).toBeInTheDocument()
+    expect(within(shown).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+    expect(toastError).toHaveBeenCalledWith(
+      outcome,
+      expect.objectContaining({ description: reason, duration: Infinity, closeButton: true }),
+    )
   })
 
   it("gives the reason on hover", async () => {
@@ -226,8 +234,8 @@ const proxy503s = {
 it.each([
   ["Run sync", "with no body", "Couldn't start a sync"],
   ["Run sync", "with a proxy's HTML page", "Couldn't start a sync"],
-  ["Dry-run", "with no body", "Couldn't run the dry run"],
-  ["Dry-run", "with a proxy's HTML page", "Couldn't run the dry run"],
+  ["Dry-run", "with no body", "Couldn't do a dry run"],
+  ["Dry-run", "with a proxy's HTML page", "Couldn't do a dry run"],
 ] as const)("%s: a 503 %s leaves the button live", async (name, kind, outcome) => {
   server.use(http.post(`${ORIGIN}/api/sync`, proxy503s[kind]))
   renderWithProviders(
@@ -240,7 +248,9 @@ it.each([
   await userEvent.click(await screen.findByRole("button", { name }))
   // The failure is still said, as any other failure is.
   expect(await screen.findByText(outcome)).toBeInTheDocument()
-  // Re-queried: a blocked button would be a new node.
+  // Re-queried: a blocked button would be a new node. Not a bare absence
+  // check: the pressed button is aria-disabled while its request runs, and a
+  // blocked one stays so, so this passes only once it is live again.
   await waitFor(() =>
     expect(screen.getByRole("button", { name })).not.toHaveAttribute("aria-disabled"),
   )

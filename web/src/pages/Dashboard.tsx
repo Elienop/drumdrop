@@ -69,9 +69,10 @@ export function Dashboard() {
       toast.success("Sync triggered")
       invalidate()
     },
-    // Blocked or not, the outcome and the server's sentence, which stays until
-    // closed: on touch or with a screen reader the toast is where a blocked
-    // button's reason is read (its tooltip needs a hover or keyboard focus).
+    // Blocked or not, the outcome and errorMessage's sentence (the server's
+    // own, or ours when it sent none), which stays until closed: on touch or
+    // with a screen reader the toast is where a blocked button's reason is read
+    // (its tooltip needs a hover or keyboard focus).
     onError: (err) => failureToast("Couldn't start a sync", errorMessage(err)),
   })
 
@@ -81,7 +82,7 @@ export function Dashboard() {
     onSuccess: (result) => {
       toast.message(`A sync would queue ${countOf(result.data.would_enqueue ?? 0, "lesson", "lessons")}`)
     },
-    onError: (err) => failureToast("Couldn't run the dry run", errorMessage(err)),
+    onError: (err) => failureToast("Couldn't do a dry run", errorMessage(err)),
   })
 
   const runBlocked = nothingAttached(run.error)

@@ -929,9 +929,12 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'Copy path' web/src/pages/Lessons.tsx`
 - **D71 · Touch targets are under 44px.**
   - *What:* row buttons are 32px, *Actions* 36px, dialog buttons 36px: shadcn's default
-    density (round-3 UI review, P18).
+    density (round-3 UI review, P18). A failure toast's close × is 20px (sonner's own
+    stylesheet), and for a toast that stays until closed it is the only visible way to close
+    it on a phone (a swipe works too, but nothing shows that).
   - *Why:* below the usual 44px minimum for touch.
-  - *Evidence:* `grep -n 'h-8\|h-9\|size-8\|size-9' web/src/components/ui/button.tsx`
+  - *Evidence:* `grep -n 'h-8\|h-9\|size-8\|size-9' web/src/components/ui/button.tsx` ·
+    `grep -n 'close-button' web/node_modules/sonner/dist/styles.css`
 - **D91 · PlayBass's name in the UI is unconfirmed.**
   - *What:* the UI names a brand as Musora does: Drumeo, Pianote, Guitareo, Singeo (the
     add dialog's preview ends "… lessons on Pianote"). For `playbass` no spelling is
@@ -1406,14 +1409,19 @@ D53 waits on an owner decision.
     attached):
     - its reason shows in the press's toast, which stays until closed (since
       `fix/sonar-gate-and-coverage`, on the owner's choice: *"Use the server's sentence"*),
-      and afterwards only in a tooltip. Escape hides that, touch never opens it, and a screen
-      reader hears it only while it is open (Radix sets `aria-describedby` only then);
+      and once that is closed, only in a tooltip. Escape hides that, touch can't open it by
+      hovering (whether a tap focuses the button, which would open it, is unmeasured), and a
+      screen reader hears it only while it is open (Radix sets `aria-describedby` only then);
     - the user learns about the block only by pressing the button;
     - the block lasts until the page remounts, even if the server restarts with a daemon.
 
     The summary DTO already carries `paused` (`web/src/types.ts:62`); a daemon or planner
     presence field would let the buttons show blocked from the start. TopBar's Pause meets the
-    same 503 differently: it stays live and toasts on every press.
+    same 503 differently: it stays live and toasts on every press. Since these toasts stay
+    until closed, repeats pile up: leaving the Dashboard and coming back makes the buttons
+    live again, and each new press, and each Pause, adds another. sonner already updates a
+    toast in place when given an id it has (`toast(…, { id })`), so a fixed id per sentence
+    would stop it; that is a new parameter on `failureToast`, so it waits here.
   - *Why:* rare in practice, since `drumdrop serve` always attaches its daemon. The owner chose
     to record it for later (2026-09-25, *"Record it for later"*), rather than add a visible
     line beside the buttons on `fix/sonar-gate-and-coverage`.
@@ -1423,8 +1431,8 @@ D53 waits on an owner decision.
     and show its sentence, as text. Most proxies send HTML, plain text or nothing. A
     DrumDrop-only marker would be a new mechanism, so it waits here (security seat of
     `fix/sonar-gate-and-coverage`).
-  - *Evidence:* `nothingAttached` and `SyncButton` in `web/src/pages/Dashboard.tsx` ·
-    `TopBar.tsx:27-31`
+  - *Evidence:* `nothingAttached` and `SyncButton` in `web/src/pages/Dashboard.tsx` · the
+    `toggle` mutation's `onError` in `web/src/components/app-shell/TopBar.tsx`
 
 - **D144 · The Queue's job-error tooltip can't be reached by keyboard.**
   - *What:* the full error of a failed job shows in a tooltip whose trigger is a truncated
