@@ -539,3 +539,52 @@ func TestCreateTempNameFitsAName(t *testing.T) {
 		t.Errorf("createOnly(a %d-byte name) = %v, %v; want it created", len(long), created, err)
 	}
 }
+
+// TestRenameEpisodeFilesMakesARecordedNameThatIsMissing pins invariant 6 for
+// a record that already names the new name while that file is missing (the
+// owner removed it): the pass never counts a name done because the record
+// names it. It makes the file from the old one first, and only then removes
+// the old one, so the lesson keeps its image and the record names only files
+// that are there.
+func TestRenameEpisodeFilesMakesARecordedNameThatIsMissing(t *testing.T) {
+	w, store, _, _, season := renameWorker(t)
+	names := []string{renameBase + ".mp4", renameBase + "-poster.jpg", renameBase + ".jpg"}
+	seedSeason(t, season, names[:2]...) // "<base>.jpg" recorded, not there
+	store.withFiles = []database.Lesson{recordedRow(1, season, names...)}
+	w.RenameEpisodeFiles(context.Background())
+	assertHolds(t, season, renameBase+"-poster.jpg", renameBase+".jpg")
+	assertExist(t, false, filepath.Join(season, renameBase+"-poster.jpg"))
+	assertRowRecords(t, store, 1, season, renameBase+".mp4", renameBase+".jpg")
+}
+
+// TestRenameEpisodeFilesSaysWhichLegacyFilesItLeaves pins that a legacy row
+// the pass leaves (wholly or partly) unconverted because another lesson
+// claims some of its files is said once per process, naming them: never
+// silence, as those files keep their old shape until a re-download.
+func TestRenameEpisodeFilesSaysWhichLegacyFilesItLeaves(t *testing.T) {
+	versions := versionNames(renameBase, ".mp4", "Drumless", "Original")
+	for _, tc := range []struct {
+		name    string
+		claimed []string // what lesson 2's record names of lesson 1's files
+	}{
+		{"nothing renamed", []string{renameBase + ".nfo", renameBase + "-poster.jpg"}},
+		{"partly renamed", []string{renameBase + ".nfo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, store, log, _, season := renameWorker(t)
+			seedSeason(t, season, append(append([]string(nil), versions...), renameBase+".nfo", renameBase+"-poster.jpg")...)
+			store.withFiles = []database.Lesson{legacyRow(1, "Five", 5, season, versions[0]), recordedRow(2, season, tc.claimed...)}
+			for range 2 {
+				w.RenameEpisodeFiles(context.Background())
+			}
+			if n := strings.Count(log.String(), "episode files 1: not renamed:"); n != 1 {
+				t.Errorf("said %d times why lesson 1's files are left, want once:\n%s", n, log.String())
+			}
+			for _, c := range tc.claimed {
+				if !strings.Contains(log.String(), c) {
+					t.Errorf("log does not name %s:\n%s", c, log.String())
+				}
+			}
+		})
+	}
+}

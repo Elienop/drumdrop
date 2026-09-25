@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/library"
@@ -154,6 +155,7 @@ func (w *Worker) recordLegacy(ctx context.Context, lib *os.Root, c *library.Clai
 		names = append(names, filepath.Base(p))
 	}
 	if len(renamesOf(names)) == 0 {
+		w.claimedLeftAlone(id, plan.Kept)
 		w.renameDone(id, true)
 		return nil
 	}
@@ -169,10 +171,27 @@ func (w *Worker) recordLegacy(ctx context.Context, lib *os.Root, c *library.Clai
 	}
 	row.LibraryEntries = database.EncodeLibraryEntries(entries)
 	fmt.Fprintf(w.log(), "  ✎ episode files %d: recorded %d file(s) to rename\n", id, len(entries))
+	w.claimedLeftAlone(id, plan.Kept)
 	if now := w.renameRecorded(ctx, lib, c, row, entries); now != nil {
 		return now
 	}
 	return &row
+}
+
+// claimedLeftAlone says, once per process (the row is then recorded, or done
+// for this process), which of legacy lesson id's files the pass left
+// unrecorded and unconverted because another lesson's name match claims them
+// too (library.Entries.Kept): their per-version or renamed files come only
+// with a re-download.
+func (w *Worker) claimedLeftAlone(id int, kept []string) {
+	if len(kept) == 0 {
+		return
+	}
+	names := make([]string, 0, len(kept))
+	for _, p := range kept {
+		names = append(names, filepath.Base(p))
+	}
+	fmt.Fprintf(w.log(), "  ⚠ episode files %d: not renamed: %q are claimed by another lesson too\n", id, names)
 }
 
 // swapRefused logs a record write the store refused. A row that is gone is
@@ -387,10 +406,16 @@ func (w *Worker) createNames(c *library.Claims, season *os.Root, g seasonGroup, 
 
 // newName readies the new name t of a file holding data, in season, for
 // lesson id: "" when t holds data now (created here, recorded in mine), or
-// already was the lesson's or an exact unclaimed copy; otherwise why not.
+// already was the lesson's (its record names it and it is there) or an exact
+// unclaimed copy; otherwise why not.
 func (w *Worker) newName(c *library.Claims, season *os.Root, g seasonGroup, id int, t string, data []byte, mine map[string]os.FileInfo) string {
 	if slices.Contains(g.names, t) {
-		return "" // the lesson's own already
+		if fi, err := season.Lstat(t); err == nil && fi.Mode().IsRegular() {
+			return "" // the lesson's own already, and there
+		}
+		// The record names it, but it is not there (the owner removed it):
+		// it is made like any other name, so the old file is never removed
+		// while the record names a file that is missing.
 	}
 	abs := filepath.Join(season.Name(), t)
 	if ids, err := c.Claimants(abs, id, true); err != nil || len(ids) > 0 {
@@ -568,6 +593,15 @@ func openSeason(lib *os.Root, rel string) (*os.Root, error) {
 	return openRealDir(show, filepath.Base(rel))
 }
 
+// openRegular opens name in dir to read, never waiting: O_NONBLOCK, so a
+// FIFO swapped in for a regular file after readRegular's Lstat opens at once
+// (its Stat then differs) instead of blocking the cycle until a writer
+// comes. O_NONBLOCK changes nothing for a regular file, and Windows ignores
+// it. A package variable so a test can swap the file in that window.
+var openRegular = func(dir *os.Root, name string) (*os.File, error) {
+	return dir.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
 // readRegular reads name in dir: a regular file (not through a symlink),
 // read up to maxRenameBytes, with its Lstat.
 func readRegular(dir *os.Root, name string) (os.FileInfo, []byte, error) {
@@ -578,7 +612,7 @@ func readRegular(dir *os.Root, name string) (os.FileInfo, []byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, nil, fmt.Errorf("%q is not a regular file", name)
 	}
-	f, err := dir.Open(name)
+	f, err := openRegular(dir, name)
 	if err != nil {
 		return nil, nil, err
 	}
