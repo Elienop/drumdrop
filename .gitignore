@@ -27,6 +27,11 @@ session.cookie
 # Built web UI assets
 /web/dist/
 
+# Test reports `make coverage` writes for SonarQube
+/coverage.out
+/go-test-report.json
+/web/coverage/
+
 # Claude Code's local folder: its settings, agent worktrees, and the CLAUDE.md
 # symlink into the owner's Obsidian vault (the project rules note). Kept local on
 # purpose, like docs/superpowers/ above: none of it belongs in the repo's history.
