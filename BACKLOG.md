@@ -2015,6 +2015,21 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     own test file. Every stub installs unconditionally, so the tests (and the coverage) are
     the same on CI's Node 20 and on a newer local Node.
   - *Evidence:* `sonar-issues --all | grep web/src/test` (nothing) · `ls web/src/test`
+- **D148 · Border colour classes paint again.** Branch `fix/sonar-gate-and-coverage`, found by
+  its browser pass on 2026-09-25.
+  - *Was:* `web/src/index.css` set `* { border-color: var(--color-border) }` outside any
+    cascade layer, since PR #6. A rule outside a layer outranks every layered Tailwind utility
+    whatever its specificity, so no `border-*` colour class painted: a focused control's amber
+    border (the outline one restored on this branch included), a checked checkbox's primary, a
+    status badge's tone, a `border-transparent` badge. Class tests passed throughout, since
+    jsdom builds no CSS.
+  - *Now:* the rule sits in `@layer base`, as shadcn's Tailwind v4 setup has it. Measured in
+    the browser: a focused button, input or checkbox and a checked checkbox draw the ring
+    colour; StatusBadge's border takes its tone (emerald at 30% for done); the Lessons filter
+    badge's border is transparent. `aria-invalid:border-destructive` works again too, though
+    no page sets `aria-invalid` today.
+  - *Evidence:* the `the default border colour` tests in `web/src/design-tokens.test.ts` ·
+    in a browser, `getComputedStyle(el).borderTopColor` on a focused outline button
 - **D19 · `main` rescanned at v0.8.0.** No PR, since a scan writes only to the Sonar server. The
   owner's OK on 2026-09-25: *"Yes, right after the merge"*.
   - *Was:* one analysis, of `1c2dbda` (v0.7.1) on 2026-08-15: 67 open, under older rule sets.
