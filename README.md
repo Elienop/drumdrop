@@ -557,19 +557,26 @@ own copy of both:
   title, a plain-text plot, and when known its premiere date, studio, genres, instructors
   and Musora id), `poster.jpg` and, for a course, `fanart.jpg`. The poster is the
   course's square header image when it has one, else the instructor's portrait coach
-  card, else the course's thumbnail; a song show uses the song's square cover. The
+  card, else the instructor's square photo, else the course's thumbnail (which Plex
+  crops); a song show uses the song's square cover. The
   background is the course's wide thumbnail; a song or instructor show has no wide image
   and gets none. These files are the show's, not a lesson's: drumdrop only ever
-  **creates a missing one**, never replaces or deletes one, and records none. A file you
+  **creates a missing one**, never replaces or deletes one (except on a filesystem
+  without `RENAME_NOREPLACE`, and on Windows, where a file that appears between the check
+  and the rename is replaced; see the placement notes below), and records none. A file you
   put there yourself under any name Plex reads for the same slot (`poster`, `folder` or
   `show` `.jpg`/`.jpeg`/`.png`/`.tbn` for the poster; `fanart`, `art`, `backdrop` or
   `background` for the background; `tvshow.nfo`) counts as filled and is left alone.
   `tvshow.nfo` is written last and marks the show done, so a finished show costs no
   request; to have drumdrop write a show's files again, remove its `tvshow.nfo` and the
-  images to replace. A new show gets them before its first episode is placed; a show
-  already in the library gets them at the end of the next sync or daemon cycle. When
-  Musora or its image server can't be reached, the episode is placed anyway and the show
-  files come a later cycle.
+  images to replace. A `tvshow.nfo` you wrote yourself marks the show done too, so
+  drumdrop then adds **no** poster or background to that show; delete it and the next
+  cycle fills every missing file. A new show gets them before its first episode is
+  placed; a show already in the library gets them at the end of the next sync or daemon
+  cycle. When Musora or its image server can't be reached, the episode is placed anyway
+  and the show files come a later cycle. When Musora gives nothing for a show's course, the
+  show gets no files at all (never a title-only `tvshow.nfo`) and is asked about again
+  after drumdrop restarts.
 - **Episode files**: a lesson's image is `<episode>.jpg` and its `.nfo` is
   `<episode>.nfo`; a song's are one per version, as above. All of them are placed
   **before** the episode's video, so Plex finds them when it first sees the episode.
@@ -637,7 +644,9 @@ own copy of both:
   network filesystems), where it retries without it and replaces. When a rename refuses,
   the move refuses, as above, and the entry in the way is neither removed nor copied into.
   drumdrop copies instead of renaming only when downloads and the library are on different
-  filesystems (volumes on Windows), and a copy that fails removes only what it created. On
+  filesystems (volumes on Windows), or when one downloaded file goes to several names (a
+  song's image and `.nfo`, one per version), and a copy that fails removes only what it
+  created. On
   Windows the rename goes by path and replaces an existing entry, so neither guarantee
   holds there. The default layout's move works the same way, and never places into a
   library folder another lesson records anything in. When its move is refused or fails,
@@ -671,9 +680,12 @@ with these settings (the setup tested on Plex Media Server 1.43):
 Plex **chooses** a local image only if it is there when Plex first matches the show or
 episode. Added later, it is only offered in the image picker. New shows and episodes are
 fine, since drumdrop places their files first. A show that was already in Plex before
-its files were written needs a one-time **"Plex Dance"** to be matched afresh: move the
+its files were written needs a one-time **"Plex Dance"** to be matched afresh. First
+pause drumdrop (**Pause** in the web UI) or stop its container, so no download re-creates
+the show's folder and no delete finds its files missing while it is away. Then move the
 show's folder out of the library folder, run *Scan Library Files*, *Empty Trash* and
-*Clean Bundles*, move the folder back, and scan again. An image you pick by hand in Plex
+*Clean Bundles*, move the folder back, scan again, and resume drumdrop once the scan is
+done. An image you pick by hand in Plex
 is locked: Plex keeps it and ignores the local file from then on, until you unlock it.
 
 The third-party [XBMCnfoTVImporter](https://github.com/gboudreau/XBMCnfoTVImporter.bundle)
