@@ -655,7 +655,8 @@ func TestTombstoneAndKeepCompareEachColumn(t *testing.T) {
 
 // TestSwapLibraryEntries pins the one-time rename's write (owner ruling #78):
 // it records the new list only while the row still records exactly the files
-// that were read (any ONE column changed is caught) and no delete holds it,
+// that were read (any ONE column changed is caught), no delete holds it and
+// no job of the lesson is running (a second process's download),
 // writing nothing else (not even updated_at); a legacy row's NULL record is
 // matched as NULL; and it never writes "no record".
 func TestSwapLibraryEntries(t *testing.T) {
@@ -709,6 +710,24 @@ func TestSwapLibraryEntries(t *testing.T) {
 		}
 		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, held) {
 			t.Errorf("row touched:\n got %+v\nwant %+v", got, held)
+		}
+	})
+	t.Run("a download of it is running", func(t *testing.T) {
+		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+		job, ok, err := s.ClaimNextJob(ctx)
+		if err != nil || !ok || job.RailcontentID != 1 {
+			t.Fatalf("ClaimNextJob = %+v, %v, %v; want lesson 1's job running", job, ok, err)
+		}
+		if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonDownloading) {
+			t.Errorf("SwapLibraryEntries = %v, want ErrLessonDownloading", err)
+		}
+		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
+			t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
+		}
+		// Another lesson's running job does not hold it back.
+		mustExec(t, s, `UPDATE jobs SET railcontent_id = 2 WHERE id = ?`, job.ID)
+		if err := s.SwapLibraryEntries(ctx, before, newRecord); err != nil {
+			t.Errorf("SwapLibraryEntries beside another lesson's job = %v, want it written", err)
 		}
 	})
 	t.Run("no record", func(t *testing.T) {
