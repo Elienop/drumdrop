@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"strings"
 	"testing"
 )
@@ -148,9 +149,13 @@ var jpegBytes = []byte{0xFF, 0xD8, 0xFF, 0xE0, 'J', 'F', 'I', 'F'}
 // else is worth another try later.
 func TestFetchJPEG(t *testing.T) {
 	var ua string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua = r.Header.Get("User-Agent")
 		switch r.URL.Path {
+		case "/max.jpg", "/big.jpg":
+			body := make([]byte, maxImageBytes+map[bool]int{true: 1}[r.URL.Path == "/big.jpg"])
+			copy(body, jpegBytes)
+			_, _ = w.Write(body)
 		case "/ok.jpg":
 			w.Header().Set("Content-Type", "image/jpeg")
 			_, _ = w.Write(jpegBytes)
@@ -168,12 +173,14 @@ func TestFetchJPEG(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
 	ctx := context.Background()
 
 	got, err := FetchJPEG(ctx, srv.URL+"/ok.jpg")
 	if err != nil || string(got) != string(jpegBytes) {
 		t.Errorf("ok: %q, %v; want the JPEG bytes", got, err)
+	}
+	if got, err := FetchJPEG(ctx, srv.URL+"/max.jpg"); err != nil || len(got) != maxImageBytes {
+		t.Errorf("an image of exactly %d bytes: %d bytes, %v; want it whole", maxImageBytes, len(got), err)
 	}
 	if ua != browserUA {
 		t.Errorf("User-Agent = %q, want %q", ua, browserUA)
@@ -182,6 +189,7 @@ func TestFetchJPEG(t *testing.T) {
 		"/missing.jpg": ErrImageMissing,
 		"/gone.jpg":    ErrImageMissing,
 		"/png.jpg":     ErrImageMissing,
+		"/big.jpg":     ErrImageMissing,
 		"/page.jpg":    nil,
 		"/busy.jpg":    nil,
 	} {
@@ -198,10 +206,49 @@ func TestFetchJPEG(t *testing.T) {
 		}
 	}
 
-	down := httptest.NewServer(http.NotFoundHandler())
+	down := httptest.NewTLSServer(http.NotFoundHandler())
 	url := down.URL + "/ok.jpg"
 	down.Close()
 	if _, err := FetchJPEG(ctx, url); !errors.Is(err, ErrUnreachable) {
 		t.Errorf("closed server: err = %v, want ErrUnreachable", err)
+	}
+}
+
+// tlsImageServer is an https test server serving h, which FetchJPEG's client
+// trusts (and waits for no longer than the real one) until the test ends.
+func tlsImageServer(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(h)
+	prev := httpClient
+	c := srv.Client()
+	c.Timeout = prev.Timeout
+	httpClient = c
+	t.Cleanup(func() {
+		httpClient = prev
+		srv.Close()
+	})
+	return srv
+}
+
+// TestFetchJPEGRefusesAURLItNeverFetches pins that an image URL the client
+// can never fetch (not https, no host, not a URL) is a missing image, asked
+// for nowhere: never "could not be reached", which would stop the whole
+// show-file step, cycle after cycle, over one bad field.
+func TestFetchJPEGRefusesAURLItNeverFetches(t *testing.T) {
+	asked := 0
+	srv := tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		_, _ = w.Write(jpegBytes)
+	}))
+	plain := "http" + strings.TrimPrefix(srv.URL, "https") + "/ok.jpg"
+	for _, u := range []string{"", "/images/p/d/x-10x10.png", "//cdn.sanity.io/images/p/d/x-10x10.png", "https:///x.jpg", plain, "ftp://cdn.sanity.io/x.jpg", "https://cdn.sanity.io/%zz"} {
+		got, err := FetchJPEG(context.Background(), u)
+		var ue *neturl.Error
+		if got != nil || !errors.Is(err, ErrImageMissing) || errors.Is(err, ErrUnreachable) || errors.As(err, &ue) {
+			t.Errorf("FetchJPEG(%q) = %q, %v; want ErrImageMissing only", u, got, err)
+		}
+	}
+	if asked != 0 {
+		t.Errorf("%d requests made, want none", asked)
 	}
 }

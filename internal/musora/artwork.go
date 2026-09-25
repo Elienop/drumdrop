@@ -19,13 +19,15 @@ import (
 // bytes whatever the stored format (PNG and WebP are common).
 const sanityImageHost = "cdn.sanity.io"
 
-// maxImageBytes bounds an image FetchJPEG holds in memory. Musora's largest
-// images (4500x4500) are a few MB as JPEG; anything past this is not one.
-const maxImageBytes = 64 << 20
+// maxImageBytes bounds an image FetchJPEG holds in memory. Musora's images
+// are far smaller as JPEG (measured 2026-09-25: 354 KB for a 1500x1500
+// poster, 270 KB for a 1920x1080 background); anything past this is not one.
+const maxImageBytes = 16 << 20
 
 // ErrImageMissing is an image that is not there to fetch: the server says it
-// is gone (404, 410), it is too large, or it is an image that could not be had
-// as JPEG. Asking again will not change the answer.
+// is gone (404, 410), it is too large, it is an image that could not be had
+// as JPEG, or its URL is one FetchJPEG never fetches (not https, or no host).
+// Asking again will not change the answer.
 var ErrImageMissing = errors.New("the image is not available")
 
 // ErrUnreachable is an image server that could not be reached at all (no
@@ -122,11 +124,17 @@ func ShowArt(doc *Lesson) (poster, fanart string) {
 //   - ErrUnreachable: the server could not be reached (so no other fetch can
 //     be now);
 //   - ErrImageMissing: the image is not there, too large, or an image that
-//     is not JPEG (asking again gives the same);
+//     is not JPEG, or u is not an https URL with a host (asking again gives
+//     the same; checked before any request, since the client reports such a
+//     URL as it reports a server out of reach);
 //   - anything else (another status, a page that is not an image): try again
 //     later.
 func FetchJPEG(ctx context.Context, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, JPEGURL(u), nil)
+	ju := JPEGURL(u)
+	if p, err := url.Parse(ju); err != nil || p.Scheme != "https" || p.Host == "" {
+		return nil, fmt.Errorf("%w: %q is not an https URL of an image", ErrImageMissing, u)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ju, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrImageMissing, err)
 	}
