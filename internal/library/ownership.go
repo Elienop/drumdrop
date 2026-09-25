@@ -278,34 +278,73 @@ func (c *Claims) ownFilesIn(l database.Lesson, dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	video := videoIn(l, dir)
 	var paths []string
-	if l.VideoPath.Valid && l.VideoPath.String != "" && filepath.Dir(absPath(l.VideoPath.String)) == dir {
-		paths = append(paths, absPath(l.VideoPath.String))
+	if video != "" {
+		paths = append(paths, video)
 	}
 	if recorded {
 		oldRoot := filepath.Dir(filepath.Dir(dir))
 		for _, e := range entries {
 			paths = append(paths, Resolve(oldRoot, e))
 		}
-	} else {
-		listing, err := c.listing(dir)
-		if err != nil {
-			return false, err
-		}
-		row := l
-		row.OutputDir.String = dir
-		if len(paths) > 0 {
-			row.VideoPath.String = paths[0]
-		}
-		bases, _ := legacyEpisodeBases(row, dir, listing)
-		for name, isDir := range listing {
-			for _, b := range bases {
-				if legacyEpisodeEntry(b, name, isDir, listing) {
-					return true, nil
-				}
-			}
+	} else if own, err := c.legacyOwnFileIn(l, dir, video); err != nil || own {
+		return own, err
+	}
+	return anyExists(paths)
+}
+
+// videoIn returns lesson l's recorded video, made absolute, when it is in
+// the folder dir, and "" otherwise.
+func videoIn(l database.Lesson, dir string) string {
+	if !l.VideoPath.Valid || l.VideoPath.String == "" {
+		return ""
+	}
+	if video := absPath(l.VideoPath.String); filepath.Dir(video) == dir {
+		return video
+	}
+	return ""
+}
+
+// legacyOwnFileIn reports whether the season folder dir holds an entry the
+// legacy name grammar gives to lesson l, a row without a record, read as
+// filed in dir with its video (when there) at video. It fails when dir can't
+// be listed.
+func (c *Claims) legacyOwnFileIn(l database.Lesson, dir, video string) (bool, error) {
+	listing, err := c.listing(dir)
+	if err != nil {
+		return false, err
+	}
+	row := l
+	row.OutputDir.String = dir
+	if video != "" {
+		row.VideoPath.String = video
+	}
+	bases, _ := legacyEpisodeBases(row, dir, listing)
+	for name, isDir := range listing {
+		if anyBaseClaims(bases, name, isDir, listing) {
+			return true, nil
 		}
 	}
+	return false, nil
+}
+
+// anyBaseClaims reports whether one of bases, a legacy row's episode names
+// (legacyEpisodeBases), gives the entry name of listing to that row
+// (legacyEpisodeEntry).
+func anyBaseClaims(bases []string, name string, isDir bool, listing map[string]bool) bool {
+	for _, b := range bases {
+		if legacyEpisodeEntry(b, name, isDir, listing) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyExists reports whether one of paths exists, read with Lstat (a symlink
+// counts, whatever it leads to). A gone path (gone) is not there; one that
+// can't be read fails.
+func anyExists(paths []string) (bool, error) {
 	for _, p := range paths {
 		_, err := os.Lstat(p)
 		if err == nil {
@@ -393,11 +432,8 @@ func (c *Claims) legacyClaims(f map[string][]claim, folder string, rows []databa
 	for _, row := range rows {
 		bases, _ := legacyEpisodeBases(row, folder, listing)
 		for name, isDir := range listing {
-			for _, b := range bases {
-				if legacyEpisodeEntry(b, name, isDir, listing) {
-					f[name] = append(f[name], claim{path: filepath.Join(folder, name), ids: []int{row.RailcontentID}})
-					break
-				}
+			if anyBaseClaims(bases, name, isDir, listing) {
+				f[name] = append(f[name], claim{path: filepath.Join(folder, name), ids: []int{row.RailcontentID}})
 			}
 		}
 	}
