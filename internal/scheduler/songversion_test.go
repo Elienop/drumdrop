@@ -151,6 +151,9 @@ func TestPlexTVSongRefusedRecordPutsTheSharedFilesBack(t *testing.T) {
 //   - an image it did not fetch again stays, and stays recorded (ruling (j));
 //   - a resources-only re-download, which brings no version, keeps every
 //     version video and names the new nfo per recorded version;
+//   - a version the re-download no longer brings (Musora dropped it) stays,
+//     its video, image and nfo, and stays recorded, as it did before the
+//     per-version nfo;
 //   - a lesson that is NOT a song gets no such reading: the files of an old
 //     title "<title> [Live]" still go (ruling #66).
 func TestPlexTVSongReDownloadKeepsItsVersionFiles(t *testing.T) {
@@ -186,6 +189,18 @@ func TestPlexTVSongReDownloadKeepsItsVersionFiles(t *testing.T) {
 		}
 		assertExist(t, false, filepath.Join(season, base+".nfo"), filepath.Join(season, base+".jpg"))
 		assertRecordIs(t, store, season, append(append([]string(nil), perVersion...), base+" resources")...)
+	})
+
+	t.Run("a version Musora no longer has", func(t *testing.T) {
+		w, store, _, season := songWorker(t, true)
+		gone := versionNames(base, "", "Live")[0]
+		goneFiles := []string{gone + ".mp4", gone + ".nfo", gone + ".jpg"}
+		seedRecordedSong(t, store, season, append(append([]string(nil), perVersion...), goneFiles...)...)
+		if _, err := w.RunOnce(context.Background(), 0); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		assertContent(t, season, goneFiles...)
+		assertRecordIs(t, store, season, append(append(append([]string(nil), perVersion...), goneFiles...), base+" resources")...)
 	})
 
 	t.Run("not a song: an old title's files go", func(t *testing.T) {

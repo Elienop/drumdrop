@@ -212,7 +212,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
 	}
 	prevSeason := seasonPrevious{libraryDir: libraryDir, seasonDir: seasonDir, plan: plan, tree: tree, listing: listing,
-		versions: append(append([]string(nil), plan.labels...), recorded(plan.episodeBase)...)}
+		versions: recorded(plan.episodeBase)}
 	ours, kept, stays, err := prevSeason.setAside(previous.Remove, aside)
 	if err != nil {
 		return fail(err, nil)
@@ -312,8 +312,9 @@ func stepDsts(steps []plexMoveStep) []string {
 // seasonPrevious is what step 2 of moveToLibraryPlexTV reads to decide on the
 // lesson's previous entries: the library and season folders, the move's
 // plan, the download's tree and the season folder's listing (listSeason),
-// and the song's versions (the labels the download brings, and for a song
-// the ones its record names at this episode's base: recordedVersions).
+// and, for a song, the versions its record names at this episode's base
+// (recordedVersions): a version the download brings is placed at its names
+// anyway, so only the recorded ones decide what stays.
 type seasonPrevious struct {
 	libraryDir, seasonDir string
 	plan                  plexMovePlan

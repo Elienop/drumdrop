@@ -197,8 +197,8 @@ type fileRename struct {
 // entries (of one lesson) are names:
 //   - "<base>-poster.jpg" becomes the episode's image by episodeNames:
 //     "<base>.jpg", or for a song one "<base> [L].jpg" per version;
-//   - for a song, a "<base>.jpg" with no "<base>-poster.jpg" beside it
-//     becomes one image per version too, and "<base>.nfo" one nfo per version.
+//   - for a song, "<base>.jpg" becomes one image per version too, and
+//     "<base>.nfo" one nfo per version.
 //
 // A song is a base whose names hold version videos "<base> [L].mp4" and no
 // "<base>.mp4": these are one lesson's own entries (its record, or what the
@@ -211,7 +211,7 @@ func renamesOf(names []string) []fileRename {
 			continue
 		}
 		labels := songVersions(base, names)
-		if ext != musora.PosterSuffix && (len(labels) == 0 || ext == library.EpisodeImageSuffix && slices.Contains(names, base+musora.PosterSuffix)) {
+		if ext != musora.PosterSuffix && len(labels) == 0 {
 			continue // a lesson's own "<base>.jpg" or ".nfo" already has its name
 		}
 		kind := ext
@@ -510,11 +510,12 @@ type leftover struct {
 // each song base (a base
 // "<base> [L].mp4" is cut at, with no "<base>.mp4"), its "<base>-poster.jpg"
 // and "<base>.jpg" beside its first version's image, and its "<base>.nfo"
-// beside its first version's nfo. Names the record holds are none.
+// beside its first version's nfo. A name the lesson records is never left:
+// it is renamed instead, and removeLeftovers' claim check names the lesson.
 func leftoversOf(names []string) []leftover {
 	var out []leftover
 	add := func(name, copyOf string) {
-		if !slices.Contains(names, name) && slices.Contains(names, copyOf) {
+		if slices.Contains(names, copyOf) {
 			out = append(out, leftover{name: name, copyOf: copyOf})
 		}
 	}

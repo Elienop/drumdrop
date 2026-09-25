@@ -371,6 +371,11 @@ func TestRenameEpisodeFilesLosesToADelete(t *testing.T) {
 			seedSeason(t, season, mine...)
 			row := recordedRow(1, season, mine...)
 			store.withFiles = []database.Lesson{row}
+			renames := 0
+			stubRename(t, func(oldpath, newpath string) error {
+				renames++
+				return renameNoReplace(oldpath, newpath)
+			})
 			switch when {
 			case "held when read":
 				store.withFiles[0].Deleting = true
@@ -388,6 +393,9 @@ func TestRenameEpisodeFilesLosesToADelete(t *testing.T) {
 				t.Errorf("record = %v, want it as it was", got)
 			}
 			if when == "held when read" {
+				if renames != 0 {
+					t.Errorf("%d files written for a lesson a delete holds, want none", renames)
+				}
 				return
 			}
 			// The next cycle, with the store answering again, does it.
