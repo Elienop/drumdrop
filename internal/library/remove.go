@@ -59,6 +59,22 @@ func Remove(roots []string, path string) error {
 // holdingRoot finds the root that holds path and path relative to it (see
 // Remove), or refuses.
 func holdingRoot(roots []string, path string) (root, rel string, err error) {
+	if root, rel, err = writtenRoot(roots, path); err != nil || root != "" {
+		return root, rel, err
+	}
+	if root, rel, err = identityRoot(roots, path); err != nil || root != "" {
+		return root, rel, err
+	}
+	if _, lerr := os.Lstat(path); errors.Is(lerr, fs.ErrNotExist) {
+		return "", "", fmt.Errorf("%q is not inside the downloads or library folder (%q) and is not there: it may have moved with a folder mounted elsewhere since, so it is not reported as removed", path, roots)
+	}
+	return "", "", fmt.Errorf("%q is not safely inside any of %q; refusing to remove it", path, roots)
+}
+
+// writtenRoot finds the longest of roots path is written inside, and path
+// relative to it; root is "" when none is. It refuses path when it is one of
+// roots itself.
+func writtenRoot(roots []string, path string) (root, rel string, err error) {
 	for _, r := range roots {
 		if r == "" {
 			continue
@@ -71,32 +87,42 @@ func holdingRoot(roots []string, path string) (root, rel string, err error) {
 			root, rel = r, x
 		}
 	}
-	if root != "" {
-		return root, rel, nil
-	}
-	// Not written inside any root: find the nearest existing folder above path
-	// that is a root under another spelling.
+	return root, rel, nil
+}
+
+// identityRoot, for a path written inside none of roots, finds the nearest
+// existing folder above it that is a root under another spelling, and returns
+// that root and path relative to the folder; root is "" when there is none.
+// It refuses path when it is such a folder itself.
+func identityRoot(roots []string, path string) (root, rel string, err error) {
 	infos := rootInfos(roots)
 	for dir := path; ; dir = filepath.Dir(dir) {
-		if info, serr := os.Stat(dir); serr == nil {
-			for r, ri := range infos {
-				if os.SameFile(info, ri) {
-					if dir == path {
-						return "", "", fmt.Errorf("%q is the root %q itself; refusing to remove it", path, r)
-					}
-					x, _ := filepath.Rel(dir, path)
-					return r, x, nil
-				}
+		if r, ok := rootAt(dir, infos); ok {
+			if dir == path {
+				return "", "", fmt.Errorf("%q is the root %q itself; refusing to remove it", path, r)
 			}
+			x, _ := filepath.Rel(dir, path)
+			return r, x, nil
 		}
 		if filepath.Dir(dir) == dir {
-			break
+			return "", "", nil
 		}
 	}
-	if _, lerr := os.Lstat(path); errors.Is(lerr, fs.ErrNotExist) {
-		return "", "", fmt.Errorf("%q is not inside the downloads or library folder (%q) and is not there: it may have moved with a folder mounted elsewhere since, so it is not reported as removed", path, roots)
+}
+
+// rootAt returns the root of infos (rootInfos) that the existing folder dir
+// is, by identity (os.SameFile), and whether there is one.
+func rootAt(dir string, infos map[string]os.FileInfo) (string, bool) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", false
 	}
-	return "", "", fmt.Errorf("%q is not safely inside any of %q; refusing to remove it", path, roots)
+	for r, ri := range infos {
+		if os.SameFile(info, ri) {
+			return r, true
+		}
+	}
+	return "", false
 }
 
 // rootInfos stats every root that exists, keyed by its absolute path.

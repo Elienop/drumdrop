@@ -111,33 +111,50 @@ func NewClaims(root string, rows []database.Lesson) (*Claims, error) {
 		dirStats: map[string]os.FileInfo{},
 	}
 	for _, row := range rows {
-		entries, recorded, err := Record(row)
-		if err != nil {
+		if err := c.add(row); err != nil {
 			return nil, err
-		}
-		id := row.RailcontentID
-		for _, p := range []sql.NullString{row.OutputDir, row.VideoPath} {
-			if p.Valid && p.String != "" {
-				c.paths = append(c.paths, ownedPath{id: id, path: absPath(p.String)})
-			}
-		}
-		if recorded {
-			if root == "" {
-				continue // Plan and the move refuse to act without a library
-			}
-			for _, e := range entries {
-				p := Resolve(root, e)
-				c.recorded[p] = append(c.recorded[p], id)
-				c.byID[id] = append(c.byID[id], p)
-			}
-			continue
-		}
-		if row.OutputDir.Valid && IsSeasonDir(row.OutputDir.String) {
-			norm := c.legacyRow(row)
-			c.legacy[norm.OutputDir.String] = append(c.legacy[norm.OutputDir.String], norm)
 		}
 	}
 	return c, nil
+}
+
+// add indexes one row (see NewClaims): its output_dir and video for Holds,
+// then its record or, for a row without one filed in a season folder, its
+// legacy name match. It fails on a damaged record, before indexing any of it.
+func (c *Claims) add(row database.Lesson) error {
+	entries, recorded, err := Record(row)
+	if err != nil {
+		return err
+	}
+	id := row.RailcontentID
+	for _, p := range []sql.NullString{row.OutputDir, row.VideoPath} {
+		if p.Valid && p.String != "" {
+			c.paths = append(c.paths, ownedPath{id: id, path: absPath(p.String)})
+		}
+	}
+	if recorded {
+		c.addRecord(id, entries)
+		return nil
+	}
+	if row.OutputDir.Valid && IsSeasonDir(row.OutputDir.String) {
+		norm := c.legacyRow(row)
+		c.legacy[norm.OutputDir.String] = append(c.legacy[norm.OutputDir.String], norm)
+	}
+	return nil
+}
+
+// addRecord indexes lesson id's recorded entries under the library folder.
+// Without a library folder it indexes none: Plan and the move refuse to act
+// without one.
+func (c *Claims) addRecord(id int, entries []string) {
+	if c.root == "" {
+		return
+	}
+	for _, e := range entries {
+		p := Resolve(c.root, e)
+		c.recorded[p] = append(c.recorded[p], id)
+		c.byID[id] = append(c.byID[id], p)
+	}
 }
 
 // Forget drops every claim of lesson id: its files are gone (a delete
@@ -493,38 +510,45 @@ func withoutID(ids []int, self int) []int {
 // a legacy lesson's episode name can not be told apart from a look-alike (see
 // legacyEpisodeBases).
 func (c *Claims) Plan(self database.Lesson) (Entries, error) {
-	var out Entries
 	entries, recorded, err := Record(self)
 	if err != nil {
-		return out, err
+		return Entries{}, err
 	}
 	season := self.OutputDir.Valid && IsSeasonDir(self.OutputDir.String)
 	if (recorded && len(entries) > 0 || !recorded && season) && c.root == "" {
-		return out, fmt.Errorf("lesson %d has files in a library season folder, but no library folder is configured (DRUMDROP_LIBRARY_DIR); refusing to guess where they are", self.RailcontentID)
+		return Entries{}, fmt.Errorf("lesson %d has files in a library season folder, but no library folder is configured (DRUMDROP_LIBRARY_DIR); refusing to guess where they are", self.RailcontentID)
 	}
-	if recorded {
-		for _, e := range entries {
-			p := Resolve(c.root, e)
-			ids, err := c.Claimants(p, self.RailcontentID, false)
-			if err != nil {
-				return Entries{}, err
-			}
-			if len(ids) > 0 {
-				out.Kept = append(out.Kept, p)
-			} else {
-				out.Remove = append(out.Remove, p)
-			}
+	switch {
+	case recorded:
+		return c.planRecorded(self.RailcontentID, entries)
+	case season:
+		return c.planLegacy(self)
+	}
+	return Entries{}, nil
+}
+
+// planRecorded is Plan for a lesson with a record: each recorded entry, kept
+// when another lesson's record claims it.
+func (c *Claims) planRecorded(self int, entries []string) (Entries, error) {
+	var out Entries
+	for _, e := range entries {
+		if err := c.sortEntry(&out, Resolve(c.root, e), self, false); err != nil {
+			return Entries{}, err
 		}
-		return out, nil
 	}
-	if !season {
-		return out, nil
-	}
+	return out, nil
+}
+
+// planLegacy is Plan for a lesson without a record filed in a season folder:
+// the entries of that folder the legacy name grammar gives to it, in name
+// order, kept when another row claims one. It fails when the folder can't be
+// listed, or the lesson's episode name is uncertain.
+func (c *Claims) planLegacy(self database.Lesson) (Entries, error) {
 	row := c.legacyRow(self)
 	dir := row.OutputDir.String
 	listing, err := c.listing(dir)
 	if err != nil {
-		return out, err
+		return Entries{}, err
 	}
 	bases, exact := legacyEpisodeBases(row, dir, listing)
 	if !exact {
@@ -535,22 +559,31 @@ func (c *Claims) Plan(self database.Lesson) (Entries, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	var out Entries
 	for _, name := range names {
 		if !legacyEpisodeEntry(bases[0], name, listing[name], listing) {
 			continue
 		}
-		p := filepath.Join(dir, name)
-		ids, err := c.Claimants(p, self.RailcontentID, true)
-		if err != nil {
+		if err := c.sortEntry(&out, filepath.Join(dir, name), self.RailcontentID, true); err != nil {
 			return Entries{}, err
-		}
-		if len(ids) > 0 {
-			out.Kept = append(out.Kept, p)
-		} else {
-			out.Remove = append(out.Remove, p)
 		}
 	}
 	return out, nil
+}
+
+// sortEntry adds p to out.Kept when a lesson other than self claims it
+// (Claimants, with legacy), and to out.Remove otherwise.
+func (c *Claims) sortEntry(out *Entries, p string, self int, legacy bool) error {
+	ids, err := c.Claimants(p, self, legacy)
+	if err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		out.Kept = append(out.Kept, p)
+	} else {
+		out.Remove = append(out.Remove, p)
+	}
+	return nil
 }
 
 // Holds returns the ids of the lessons other than self that record a path at
@@ -632,34 +665,45 @@ func legacyEpisodeBases(l database.Lesson, seasonDir string, listing map[string]
 	if filepath.Dir(video) != seasonDir || !isMP4 || !strings.HasPrefix(stem, prefix) {
 		return []string{derived}, false
 	}
-	// The whole stem, or (for a name ending in "]") the stem cut before any
-	// " [" after the show prefix.
-	cands := []string{stem}
-	if strings.HasSuffix(stem, "]") {
-		for i := len(prefix); i < len(stem); i++ {
-			if strings.HasPrefix(stem[i:], " [") {
-				cands = append(cands, stem[:i])
-			}
-		}
-	}
-	for _, c := range cands {
-		if c == derived {
-			return []string{derived}, true
-		}
+	cands := stemCandidates(stem, prefix)
+	if slices.Contains(cands, derived) {
+		return []string{derived}, true
 	}
 	if len(cands) == 1 {
 		return cands, true
 	}
-	var withNFO []string
-	for _, c := range cands {
-		if isDir, ok := listing[c+".nfo"]; ok && !isDir {
-			withNFO = append(withNFO, c)
-		}
-	}
-	if len(withNFO) == 1 {
+	if withNFO := withOwnNFO(cands, listing); len(withNFO) == 1 {
 		return withNFO, true
 	}
 	return append(cands, derived), false
+}
+
+// stemCandidates returns the episode names a video's stem can be read as: the
+// whole stem, and (for a name ending in "]") the stem cut before any " ["
+// after the show prefix.
+func stemCandidates(stem, prefix string) []string {
+	cands := []string{stem}
+	if !strings.HasSuffix(stem, "]") {
+		return cands
+	}
+	for i := len(prefix); i < len(stem); i++ {
+		if strings.HasPrefix(stem[i:], " [") {
+			cands = append(cands, stem[:i])
+		}
+	}
+	return cands
+}
+
+// withOwnNFO returns the candidates of cands that have their own "<name>.nfo"
+// file in listing (name -> isDir).
+func withOwnNFO(cands []string, listing map[string]bool) []string {
+	var out []string
+	for _, c := range cands {
+		if isDir, ok := listing[c+".nfo"]; ok && !isDir {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // subtitleExts are the subtitle formats yt-dlp writes next to a lesson video.
@@ -700,27 +744,40 @@ func legacyEpisodeEntry(base, name string, isDir bool, listing map[string]bool) 
 		return true
 	}
 	if label, ok := strings.CutPrefix(rest, " ["); ok {
-		label, ok = strings.CutSuffix(label, "].mp4")
-		if !ok || label == "" {
-			return false
-		}
-		// "<base> [" + label[:i] + "]" for every "]" in the label, and the whole
-		// label: a lesson "<base> [Live]" owns "<base> [Live] [Drumless].mp4".
-		for i := 0; i <= len(label); i++ {
-			if i < len(label) && label[i] != ']' {
-				continue
-			}
-			if isDirNFO, hasNFO := listing[base+" ["+label[:i]+"].nfo"]; hasNFO && !isDirNFO {
-				return false
-			}
-		}
-		return true
+		return isOwnSongVersion(base, label, listing)
 	}
 	if sub, ok := strings.CutPrefix(rest, "."); ok {
-		lang, ext, ok := strings.Cut(sub, ".")
-		return ok && lang != "" && isLangCode(lang) && subtitleExts[ext]
+		return isSubtitleSuffix(sub)
 	}
 	return false
+}
+
+// isOwnSongVersion reports whether "<base> [<label>" (label is what follows
+// " [") is a song version "<base> [Label].mp4" of the episode base, and not
+// of another lesson whose episode starts inside it (see legacyEpisodeEntry).
+func isOwnSongVersion(base, label string, listing map[string]bool) bool {
+	label, ok := strings.CutSuffix(label, "].mp4")
+	if !ok || label == "" {
+		return false
+	}
+	// "<base> [" + label[:i] + "]" for every "]" in the label, and the whole
+	// label: a lesson "<base> [Live]" owns "<base> [Live] [Drumless].mp4".
+	for i := 0; i <= len(label); i++ {
+		if i < len(label) && label[i] != ']' {
+			continue
+		}
+		if isDirNFO, hasNFO := listing[base+" ["+label[:i]+"].nfo"]; hasNFO && !isDirNFO {
+			return false
+		}
+	}
+	return true
+}
+
+// isSubtitleSuffix reports whether sub, what follows "<base>.", is
+// "<lang>.<subtitle>".
+func isSubtitleSuffix(sub string) bool {
+	lang, ext, ok := strings.Cut(sub, ".")
+	return ok && lang != "" && isLangCode(lang) && subtitleExts[ext]
 }
 
 // isLangCode reports whether s looks like a yt-dlp subtitle language code
