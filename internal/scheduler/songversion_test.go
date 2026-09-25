@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -420,4 +421,69 @@ func TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles(t *testing.T) {
 	nfos := versionNames(base, ".nfo", "Drumless", "Original")
 	images := versionNames(base, ".jpg", "Drumless", "Original")
 	assertRecordIs(t, store, season, append(append(append(append([]string(nil), videos...), nfos...), images...), base+" resources")...)
+}
+
+// resourcesAndImageRedownload is resourcesRedownload that brings the image
+// back too.
+type resourcesAndImageRedownload struct{}
+
+func (resourcesAndImageRedownload) Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	if err := (resourcesRedownload{}).Download(ctx, l, o); err != nil {
+		return err
+	}
+	base := fmt.Sprintf("%02d - %s", o.Index, musora.Sanitize(l.Title))
+	return os.WriteFile(filepath.Join(o.Dir, base, base+musora.PosterSuffix), []byte("new image"), 0o644)
+}
+
+// TestAKeptPlainVideosOldImageIsRetiredWhenItsImageIsBroughtBack pins ruling
+// (j) beside the rule that a plain video that stays keeps its files: a
+// resources-only re-download that fetches the image again places it at
+// "<base>.jpg", the kept "<base>.mp4"'s own name, so the recorded
+// "<base>-poster.jpg" is brought back and goes (no duplicate), while the
+// video stays, with its new nfo and image.
+func TestAKeptPlainVideosOldImageIsRetiredWhenItsImageIsBroughtBack(t *testing.T) {
+	const base = sameTitleBase
+	w, store, _, _, season := plexWorker(t) // lesson 100 is not a song
+	w.Cfg.ResourcesOnly = true
+	w.Downloader = resourcesAndImageRedownload{}
+	own := []string{base + ".mp4", base + ".nfo", base + musora.PosterSuffix}
+	seedSeason(t, season, own...)
+	prev := recordedRow(100, season, own...)
+	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+	prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, season, base+".mp4")
+	assertExist(t, false, filepath.Join(season, base+musora.PosterSuffix))
+	if got := readFile(filepath.Join(season, base+".jpg")); got != "new image" {
+		t.Errorf("%s.jpg = %q, want the new image", base, got)
+	}
+	assertRecordIs(t, store, season, base+".mp4", base+".nfo", base+".jpg", base+" resources")
+}
+
+// TestAPlainVideoNoRecordNamesKeepsItsFiles pins that the rule is about the
+// video being there, not about whose it is: a song placed before ruling 5
+// (its versions, one "<base>.nfo" and one image), beside which a
+// "<base>.mp4" no record names sits (the owner's), keeps "<base>.nfo" and its
+// image on a re-download, recorded as before: Plex reads that nfo for the
+// video, and the versions' own files are not its.
+func TestAPlainVideoNoRecordNamesKeepsItsFiles(t *testing.T) {
+	const base = sameTitleBase
+	w, store, _, season := songWorker(t, true)
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	shared := []string{base + ".nfo", base + musora.PosterSuffix}
+	seedRecordedSong(t, store, season, append(append([]string(nil), videos...), shared...)...)
+	seedSeason(t, season, base+".mp4")
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, season, append([]string{base + ".mp4"}, shared...)...)
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	assertRecordIs(t, store, season, append(append(append(append(append([]string(nil), videos...), nfos...), images...), shared...), base+" resources")...)
 }

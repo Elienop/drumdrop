@@ -2184,7 +2184,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     it too). Only an old title still recorded with its `<episode> [L]-poster.jpg` (not yet
     renamed) goes as before. The other way round, a lesson recorded as an ordinary one that
     Musora now calls a song keeps its `<episode>.mp4` with its own `.jpg` and `.nfo`,
-    recorded, beside the versions the re-download brings. The show-file step has no per-cycle
+    recorded, beside the versions the re-download brings (any `<episode>.mp4` in the season
+    folder keeps them, recorded or not, unless the re-download places them anew). The show-file step has no per-cycle
     memory of a show Musora answered nothing for beyond the process: it is asked again after
     each restart. An empty image field, or an image URL drumdrop refuses (a scheme other
     than https, no host name), leaves that slot empty for good once the show's `tvshow.nfo`

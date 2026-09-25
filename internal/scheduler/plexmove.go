@@ -337,22 +337,21 @@ type seasonPrevious struct {
 // lesson's previous download by its record: one at one of this episode's
 // names is left to step 3 (ours, which also holds every entry of remove,
 // says it is the lesson's own); an image or nfo under a name earlier
-// versions gave it is set aside as replaced (replacedByVersion), unless the
-// lesson's own plain video stays (ownVideoStays), whose files they are; one
-// at this episode's base that no step places at stays, and stays the
-// lesson's (stays); a folder the download does
+// versions gave it is set aside when the move places it under another name
+// (replacedByVersion); one at this episode's base that no step places at
+// stays, and stays the lesson's (stays); a folder the download does
 // not fully bring back stays, no longer recorded (kept); any other is set
 // aside. An error means the move must fail.
 func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[string]bool, kept []keptFolder, stays []string, err error) {
 	ours = make(map[string]bool, len(remove))
-	videoStays := s.ownVideoStays(remove)
+	plainStays := s.plainVideoStays()
 	for _, p := range remove {
 		ours[p] = true
 		if dst := placedAt(p, s.plan.steps); dst != "" {
 			ours[dst] = true
 			continue
 		}
-		if !videoStays && s.replacedByVersion(p) {
+		if s.replacedByVersion(p, plainStays) {
 			if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
 				return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
 			}
@@ -373,19 +372,17 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 	return ours, kept, stays, nil
 }
 
-// ownVideoStays reports whether the lesson's own plain video,
-// "<episode base>.mp4", stays where it is: remove (its record) names it, it
-// is in the season folder, and no step places anything there. Musora calls
-// the lesson a song now while its record is an ordinary lesson's; that video
-// is not brought back, and is kept (owner ruling #72: a re-download keeps
-// what it did not bring back). Its image and nfo, "<base>.jpg" and
-// "<base>.nfo", then stay with it (Plex reads them only under the video's
-// own name), never retired as replaced by the versions' own.
-func (s seasonPrevious) ownVideoStays(remove []string) bool {
+// plainVideoStays reports whether a plain video, "<episode base>.mp4", is in
+// the season folder and stays there: no step places anything at its name.
+// That happens when Musora calls a lesson a song whose record is an
+// ordinary lesson's (the re-download brings versions, never that video, and
+// keeps what it did not bring back, owner ruling #72), or when a video is
+// there that no record names. Plex reads that video's image and nfo only
+// under its own name, "<base>.jpg" and "<base>.nfo".
+func (s seasonPrevious) plainVideoStays() bool {
 	name := s.plan.episodeBase + ".mp4"
-	p := filepath.Join(filepath.Clean(s.seasonDir), name)
 	isDir, there := s.listing[name]
-	return there && !isDir && slices.Contains(remove, p) && placedAt(p, s.plan.steps) == ""
+	return there && !isDir && placedAt(filepath.Join(filepath.Clean(s.seasonDir), name), s.plan.steps) == ""
 }
 
 // replacedByVersion reports whether p, an entry the lesson's record names,
@@ -396,24 +393,28 @@ func (s seasonPrevious) ownVideoStays(remove []string) bool {
 // "<base>.nfo" once it places one nfo per version (owner rulings #78 and
 // (j)). The download brought the file back, so the old one goes like any
 // replaced entry (removed once the download is recorded, put back by an
-// undo), and the episode keeps its file, never none, never two.
-func (s seasonPrevious) replacedByVersion(p string) bool {
+// undo), and the episode keeps its file, never none, never two. While a
+// plain video stays (plainStays, plainVideoStays), only a file the move
+// places under that video's own name ("<base>.jpg", "<base>.nfo") brings
+// the old one back: the versions' own files are no image or nfo of that
+// video, so without it the video would lose its own.
+func (s seasonPrevious) replacedByVersion(p string, plainStays bool) bool {
 	season := filepath.Clean(s.seasonDir)
 	if filepath.Dir(p) != season {
 		return false
 	}
 	base := s.plan.episodeBase
-	var kind string
+	var kind, plain string
 	switch filepath.Base(p) {
 	case base + musora.PosterSuffix, base + library.EpisodeImageSuffix:
-		kind = musora.PosterSuffix
+		kind, plain = musora.PosterSuffix, base+library.EpisodeImageSuffix
 	case base + ".nfo":
-		kind = ".nfo"
+		kind, plain = ".nfo", base+".nfo"
 	default:
 		return false
 	}
 	for _, st := range s.plan.steps {
-		if st.from == kind && st.dst != p {
+		if st.from == kind && st.dst != p && (!plainStays || st.dst == filepath.Join(season, plain)) {
 			return true
 		}
 	}
