@@ -249,42 +249,48 @@ func TestPlaceLessonFolderUndoRemovesTheFolderItMade(t *testing.T) {
 // one another lesson records something in.
 func TestPlaceLessonFolderReplacesThePreviousFolder(t *testing.T) {
 	for _, held := range []bool{false, true} {
-		t.Run(fmt.Sprintf("held=%v", held), func(t *testing.T) {
-			tmp := t.TempDir()
-			downloadsDir, libraryDir := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-			lessonDir := filepath.Join(downloadsDir, privateRootName, "job-7", "Inst", "Course", "01 - L")
-			seedSeason(t, lessonDir, lessonFiles...)
-			previous := filepath.Join(downloadsDir, "Inst", "Course", "01 - L")
-			seedSeason(t, previous, "01 - L.mp4")
-			self := database.Lesson{RailcontentID: 1, OutputDir: sql.NullString{String: previous, Valid: true}}
-			var others []database.Lesson
-			if held {
-				others = append(others, database.Lesson{RailcontentID: 2, VideoPath: sql.NullString{String: filepath.Join(previous, "01 - L.mp4"), Valid: true}})
-			}
-			c, err := library.NewClaims(libraryDir, others)
-			if err != nil {
-				t.Fatal(err)
-			}
-			src, err := openScratch(downloadsDir, lessonDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer src.close()
-			pl, err := placeLessonFolder(libraryDir, filepath.Join("Inst", "Course", "01 - L"), src, self, c, library.Roots(libraryDir, downloadsDir), 7)
-			if err != nil {
-				t.Fatalf("placeLessonFolder: %v", err)
-			}
-			replaced, err := pl.commit()
-			if err != nil {
-				t.Fatalf("commit: %v", err)
-			}
-			assertExist(t, held, previous)
-			if !held && (len(replaced) != 1 || replaced[0].path != previous || !replaced[0].own) {
-				t.Errorf("replaced = %+v, want the previous folder, as the lesson's own", replaced)
-			}
-			assertContent(t, filepath.Join(libraryDir, "Inst", "Course", "01 - L"), lessonFiles...)
-		})
+		t.Run(fmt.Sprintf("held=%v", held), func(t *testing.T) { checkPlaceReplacesPrevious(t, held) })
 	}
+}
+
+// checkPlaceReplacesPrevious places lesson 1, whose row records a previous
+// folder in downloads, into the library and commits it. When held, lesson 2
+// records the previous folder's video, so the placement must keep that folder;
+// otherwise it must replace it as the lesson's own.
+func checkPlaceReplacesPrevious(t *testing.T, held bool) {
+	tmp := t.TempDir()
+	downloadsDir, libraryDir := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	lessonDir := filepath.Join(downloadsDir, privateRootName, "job-7", "Inst", "Course", "01 - L")
+	seedSeason(t, lessonDir, lessonFiles...)
+	previous := filepath.Join(downloadsDir, "Inst", "Course", "01 - L")
+	seedSeason(t, previous, "01 - L.mp4")
+	self := database.Lesson{RailcontentID: 1, OutputDir: sql.NullString{String: previous, Valid: true}}
+	var others []database.Lesson
+	if held {
+		others = append(others, database.Lesson{RailcontentID: 2, VideoPath: sql.NullString{String: filepath.Join(previous, "01 - L.mp4"), Valid: true}})
+	}
+	c, err := library.NewClaims(libraryDir, others)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := openScratch(downloadsDir, lessonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.close()
+	pl, err := placeLessonFolder(libraryDir, filepath.Join("Inst", "Course", "01 - L"), src, self, c, library.Roots(libraryDir, downloadsDir), 7)
+	if err != nil {
+		t.Fatalf("placeLessonFolder: %v", err)
+	}
+	replaced, err := pl.commit()
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	assertExist(t, held, previous)
+	if !held && (len(replaced) != 1 || replaced[0].path != previous || !replaced[0].own) {
+		t.Errorf("replaced = %+v, want the previous folder, as the lesson's own", replaced)
+	}
+	assertContent(t, filepath.Join(libraryDir, "Inst", "Course", "01 - L"), lessonFiles...)
 }
 
 // TestPlaceLessonFolderRefusesItsOwnSource (hard rule 12, was
