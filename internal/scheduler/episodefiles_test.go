@@ -218,6 +218,20 @@ func TestRenameEpisodeFilesGivesASongItsFilesPerVersion(t *testing.T) {
 	}
 }
 
+// TestRenameEpisodeFilesTellsASongByItsVideos pins which lessons the rename
+// reads as a song: version videos and no "<base>.mp4". A lesson with its own
+// video that also records a version video (one a re-download kept at its
+// base, ruling (j)) gets "<base>.jpg" and keeps its one nfo.
+func TestRenameEpisodeFilesTellsASongByItsVideos(t *testing.T) {
+	w, store, _, _, season := renameWorker(t)
+	names := []string{renameBase + ".mp4", renameBase + " [Live].mp4", renameBase + ".nfo", renameBase + "-poster.jpg"}
+	seedSeason(t, season, names...)
+	store.withFiles = []database.Lesson{recordedRow(1, season, names...)}
+	w.RenameEpisodeFiles(context.Background())
+	assertRowRecords(t, store, 1, season, renameBase+".mp4", renameBase+" [Live].mp4", renameBase+".nfo", renameBase+".jpg")
+	assertExist(t, false, filepath.Join(season, renameBase+" [Live].jpg"), filepath.Join(season, renameBase+" [Live].nfo"))
+}
+
 // TestRenameEpisodeFilesLeavesATakenName pins that no new name is ever taken
 // over: one that holds another file (the owner's own "<base>.jpg", Plex's
 // documented name), or that another lesson's record names, leaves the
@@ -231,7 +245,7 @@ func TestRenameEpisodeFilesLeavesATakenName(t *testing.T) {
 		name   string
 		mine   []string
 		taken  string
-		byLess bool
+		byLess bool // another lesson's record names it, and it is not there
 	}{
 		{"the owner's image", regular, renameBase + ".jpg", false},
 		{"another lesson's name", regular, renameBase + ".jpg", true},
@@ -240,16 +254,21 @@ func TestRenameEpisodeFilesLeavesATakenName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w, store, log, _, season := renameWorker(t)
 			seedSeason(t, season, tc.mine...)
-			seedWith(t, season, "the owner's", tc.taken)
 			store.withFiles = []database.Lesson{recordedRow(1, season, tc.mine...)}
 			if tc.byLess {
 				store.withFiles = append(store.withFiles, recordedRow(2, season, tc.taken))
+			} else {
+				seedWith(t, season, "the owner's", tc.taken)
 			}
 			for range 2 {
 				w.RenameEpisodeFiles(context.Background())
 			}
 			assertContent(t, season, tc.mine...)
-			assertHolds(t, season, "the owner's", tc.taken)
+			if tc.byLess {
+				assertExist(t, false, filepath.Join(season, tc.taken))
+			} else {
+				assertHolds(t, season, "the owner's", tc.taken)
+			}
 			assertExist(t, false, filepath.Join(season, renameBase+" [Drumless].jpg"))
 			assertRowRecords(t, store, 1, season, tc.mine...)
 			if n := strings.Count(log.String(), "not renamed"); n != 1 {
@@ -391,7 +410,8 @@ func TestRenameEpisodeFilesWithTheLibraryAway(t *testing.T) {
 		t.Run(away, func(t *testing.T) {
 			w, store, _, lib, season := renameWorker(t)
 			names := []string{renameBase + ".mp4", renameBase + ".nfo", renameBase + "-poster.jpg"}
-			store.withFiles = []database.Lesson{legacyRow(1, "Five", 5, season, renameBase+".mp4"), recordedRow(2, filepath.Join(lib, "Other", "Season 01"), "x-poster.jpg")}
+			six := []string{"Show - s01e06 - Six.mp4", "Show - s01e06 - Six-poster.jpg"}
+			store.withFiles = []database.Lesson{legacyRow(1, "Five", 5, season, renameBase+".mp4"), recordedRow(2, season, six...)}
 			if away == "no season folder" {
 				if err := os.MkdirAll(lib, 0o755); err != nil {
 					t.Fatal(err)
@@ -407,9 +427,12 @@ func TestRenameEpisodeFilesWithTheLibraryAway(t *testing.T) {
 				t.Errorf("wrote %v into the library", entries)
 			}
 			seedSeason(t, season, names...)
+			seedSeason(t, season, six...)
 			w.RenameEpisodeFiles(context.Background())
 			assertHolds(t, season, renameBase+"-poster.jpg", renameBase+".jpg")
 			assertRowRecords(t, store, 1, season, renameBase+".jpg", renameBase+".mp4", renameBase+".nfo")
+			assertHolds(t, season, six[1], "Show - s01e06 - Six.jpg")
+			assertRowRecords(t, store, 2, season, six[0], "Show - s01e06 - Six.jpg")
 		})
 	}
 }
@@ -441,6 +464,28 @@ func TestRenameEpisodeFilesNeverThroughASymlink(t *testing.T) {
 	assertExist(t, false, filepath.Join(outside, "Season 01", renameBase+".jpg"))
 	if len(store.swaps) != 0 {
 		t.Errorf("record writes %+v, want none", store.swaps)
+	}
+}
+
+// TestRenameEpisodeFilesNeverReadsThroughASymlink proves an old name that
+// is a symlink (to a file outside the library) is not renamed: nothing is
+// copied from where it leads, and the lesson's record stays as it is.
+func TestRenameEpisodeFilesNeverReadsThroughASymlink(t *testing.T) {
+	w, store, _, _, season := renameWorker(t)
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("not the library's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedSeason(t, season, renameBase+".mp4")
+	if err := os.Symlink(secret, filepath.Join(season, renameBase+"-poster.jpg")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	row := recordedRow(1, season, renameBase+".mp4", renameBase+"-poster.jpg")
+	store.withFiles = []database.Lesson{row}
+	w.RenameEpisodeFiles(context.Background())
+	assertExist(t, false, filepath.Join(season, renameBase+".jpg"))
+	if got := store.row(t, 1).LibraryEntries; got != row.LibraryEntries {
+		t.Errorf("record = %v, want it as it was", got)
 	}
 }
 
