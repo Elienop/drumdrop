@@ -278,6 +278,66 @@ func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err err
 // attempts). A job that succeeds on the first try ends at attempts==1; one that
 // needs all three tries ends at attempts==3.
 func (w *Worker) execute(ctx context.Context, job database.Job) {
+	run, ok := w.prepare(ctx, job)
+	if !ok {
+		return
+	}
+
+	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
+	// the in-flight download (yt-dlp dies via the context). Cancelling jobCtx does
+	// not affect the outer ctx used for the store writes in the cancel branch.
+	jobCtx, cancel := context.WithCancel(ctx)
+	w.register(job.ID, cancel)
+	defer w.unregister(job.ID)
+	defer cancel()
+
+	// The download writes only into its private folder; whatever happens, the
+	// folder goes when the job ends (a placed download has left it already).
+	lessonBase := filepath.Base(lessonDir("", run.index, run.lesson.Title))
+	private, err := w.startPrivate(job.ID, lessonBase)
+	if err != nil {
+		w.failBeforeDownload(ctx, job, run.lesson.Title, err, failNoFolder)
+		return
+	}
+	defer w.dropPrivate(job.ID)
+	run.private, run.privateLesson = private, filepath.Join(private, lessonBase)
+
+	// The failure the job ends with if every attempt fails: the last
+	// attempt's.
+	final := failDownload
+	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
+		f, done := w.attempt(ctx, jobCtx, run, attempt)
+		if done {
+			return
+		}
+		final = f
+	}
+	w.endFailed(ctx, job, final)
+}
+
+// jobRun is one claimed job's lesson and what its attempts share: what the
+// download needs, and what placing and recording it needs.
+type jobRun struct {
+	job    database.Job
+	lesson *musora.Lesson
+	// follow is the job's follow, or a zero Follow (see prepare).
+	follow database.Follow
+	// prev is the lesson's row as it was before this download.
+	prev    database.Lesson
+	quality string
+	// index is the lesson's position (1-based), which numbers its folder.
+	index  int
+	outDir string
+	// private is the job's private folder, and privateLesson the lesson's
+	// folder in it, where the download writes.
+	private, privateLesson string
+}
+
+// prepare resolves the job's lesson and reads what its download needs. ok is
+// false when the job ended here, without downloading: Musora couldn't be
+// asked, it has no match for the lesson, something could not be read, or
+// drumdrop is shutting down.
+func (w *Worker) prepare(ctx context.Context, job database.Job) (run *jobRun, ok bool) {
 	id := job.RailcontentID
 
 	// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
@@ -292,35 +352,16 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 		// gone, so it is not skipped: a failed attempt, which later cycles
 		// retry like any failure.
 		w.failBeforeDownload(ctx, job, "", fmt.Errorf("asking Musora for the lesson: %w", err), failMusora)
-		return
+		return nil, false
 	}
 	if lesson == nil {
 		w.notReturned(ctx, job)
-		return
+		return nil, false
 	}
 
-	// Load the follow for quality + folder title. A NULL follow id (a manually
-	// enqueued job), or one whose row is missing (the follow was deleted), falls
-	// back to a zero Follow, which outDirFor/qualityFor handle via Cfg defaults
-	// and the lesson's parent title. A follow that can't be read is not
-	// "missing": the job fails without downloading, and the next cycle tries
-	// again. Defaults would name another folder, and the placement would then
-	// move the lesson there (D66).
-	var follow database.Follow
-	if job.FollowID.Valid {
-		f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
-		switch {
-		case err == nil:
-			follow = f
-		case errors.Is(err, sql.ErrNoRows):
-			fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
-		default:
-			if w.shuttingDown(ctx, job, lesson) {
-				return
-			}
-			w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the follow's record could not be read: %w", err), failNotStarted)
-			return
-		}
+	follow, ok := w.loadFollow(ctx, job, lesson)
+	if !ok {
+		return nil, false
 	}
 
 	outDir := w.outDir(follow, job, lesson)
@@ -337,168 +378,211 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	prev, err := w.Store.GetLesson(ctx, id)
 	if err != nil {
 		if w.shuttingDown(ctx, job, lesson) {
-			return
+			return nil, false
 		}
 		w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the lesson's record could not be read: %w", err), failNotStarted)
-		return
+		return nil, false
 	}
 	// What a download needs to be recorded is checked before it costs one.
 	if err := w.checkBeforeDownload(ctx); err != nil {
 		if w.shuttingDown(ctx, job, lesson) {
-			return
+			return nil, false
 		}
 		w.failBeforeDownload(ctx, job, lesson.Title, err, failNotStarted)
-		return
+		return nil, false
 	}
 	index := 1
 	if prev.Position.Valid {
 		index = int(prev.Position.Int64)
 	}
+	return &jobRun{job: job, lesson: lesson, follow: follow, prev: prev, quality: quality, index: index, outDir: outDir}, true
+}
 
-	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
-	// the in-flight download (yt-dlp dies via the context). Cancelling jobCtx does
-	// not affect the outer ctx used for the store writes in the cancel branch.
-	jobCtx, cancel := context.WithCancel(ctx)
-	w.register(job.ID, cancel)
-	defer w.unregister(job.ID)
-	defer cancel()
-
-	// The download writes only into its private folder; whatever happens, the
-	// folder goes when the job ends (a placed download has left it already).
-	lessonBase := filepath.Base(lessonDir("", index, lesson.Title))
-	private, err := w.startPrivate(job.ID, lessonBase)
-	if err != nil {
-		w.failBeforeDownload(ctx, job, lesson.Title, err, failNoFolder)
-		return
+// loadFollow reads the job's follow, for quality + folder title. A NULL
+// follow id (a manually enqueued job), or one whose row is missing (the
+// follow was deleted), falls back to a zero Follow, which outDirFor/qualityFor
+// handle via Cfg defaults and the lesson's parent title. A follow that can't
+// be read is not "missing": the job fails without downloading (ok is false),
+// and the next cycle tries again. Defaults would name another folder, and the
+// placement would then move the lesson there (D66).
+func (w *Worker) loadFollow(ctx context.Context, job database.Job, lesson *musora.Lesson) (follow database.Follow, ok bool) {
+	if !job.FollowID.Valid {
+		return database.Follow{}, true
 	}
-	defer w.dropPrivate(job.ID)
-	privateLesson := filepath.Join(private, lessonBase)
+	f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
+	switch {
+	case err == nil:
+		return f, true
+	case errors.Is(err, sql.ErrNoRows):
+		fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
+		return database.Follow{}, true
+	}
+	if w.shuttingDown(ctx, job, lesson) {
+		return database.Follow{}, false
+	}
+	w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the follow's record could not be read: %w", err), failNotStarted)
+	return database.Follow{}, false
+}
 
-	// The failure the job ends with if every attempt fails: the last
-	// attempt's.
-	final := failDownload
-	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
-		// Abort promptly on cancellation: leave the job in its current state (it
-		// is not downloaded and, after a re-mark, may be running) so the next
-		// planner/requeue cycle re-queues and retries it. A later attempt's end
-		// was already reported (attempt_failed); the first attempt's is not.
-		if err := ctx.Err(); err != nil {
-			if attempt == 1 {
-				w.ended(job, lesson, msgShutdown)
-			}
-			return
+// attempt runs attempt number attempt of run's download, placing and
+// recording it when it succeeds. done is true when the job ended in it: the
+// download was recorded, or the job was stopped, canceled or shut down.
+// Otherwise the attempt failed, and f is the failure the job ends with if it
+// was the last.
+func (w *Worker) attempt(ctx, jobCtx context.Context, run *jobRun, attempt int) (f failure, done bool) {
+	job, lesson, id := run.job, run.lesson, run.job.RailcontentID
+	// Abort promptly on cancellation: leave the job in its current state (it
+	// is not downloaded and, after a re-mark, may be running) so the next
+	// planner/requeue cycle re-queues and retries it. A later attempt's end
+	// was already reported (attempt_failed); the first attempt's is not.
+	if err := ctx.Err(); err != nil {
+		if attempt == 1 {
+			w.ended(job, lesson, msgShutdown)
 		}
+		return failure{}, true
+	}
 
-		// Attempt #1 was already claimed (running, attempts=1). Re-mark running
-		// only for retries, then wait the backoff for this retry.
-		if attempt > 1 {
-			// A job canceled or removed meanwhile is not re-marked; the
-			// StartDownload below then stops the download.
-			if err := w.Store.MarkJobRunning(ctx, job.ID); err != nil && !errors.Is(err, database.ErrDownloadCanceled) {
-				fmt.Fprintf(w.log(), "  ⚠ job %d: re-mark running failed: %v\n", job.ID, err)
-			}
-			// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
-			// last entry for any further retries. See the doc comment: Backoff[i]
-			// is the delay before attempt i+2. The wait is on the job's context,
-			// so a Cancel lands at once, not when the backoff ends (it is
-			// recorded, with no retry). A shutdown mid-backoff leaves the job
-			// running, to be requeued at the next start; its end was already
-			// reported with the failed attempt.
-			if !w.waitBackoff(jobCtx, w.backoff(attempt-2)) {
-				if ctx.Err() == nil {
-					w.finishCanceled(ctx, job, lesson)
-				}
-				return
-			}
-		}
+	// Attempt #1 was already claimed (running, attempts=1). Re-mark running
+	// only for retries, then wait the backoff for this retry.
+	if attempt > 1 && !w.retry(ctx, jobCtx, job, lesson, attempt) {
+		return failure{}, true
+	}
 
-		if w.stopped(ctx, job, lesson, w.Store.StartDownload(ctx, job.ID, id), "mark downloading") {
-			return
-		}
+	if w.stopped(ctx, job, lesson, w.Store.StartDownload(ctx, job.ID, id), "mark downloading") {
+		return failure{}, true
+	}
 
-		fmt.Fprintf(w.log(), "  ▼ [%02d/%d] %d %s\n", attempt, w.Cfg.MaxAttempts, id, lesson.Title)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "download_started",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Title:         lesson.Title,
-			Attempt:       attempt,
-			MaxAttempts:   w.Cfg.MaxAttempts,
-			Time:          time.Now(),
-		})
-		derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
-			Dir:           private,
-			Root:          private,
-			Index:         index,
-			Quality:       quality,
-			AudioLang:     w.Cfg.AudioLang,
-			ResourcesOnly: w.Cfg.ResourcesOnly,
-			OnProgress:    w.progressCallback(job, lesson, attempt),
-		})
+	fmt.Fprintf(w.log(), "  ▼ [%02d/%d] %d %s\n", attempt, w.Cfg.MaxAttempts, id, lesson.Title)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "download_started",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         lesson.Title,
+		Attempt:       attempt,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Time:          time.Now(),
+	})
+	derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
+		Dir:           run.private,
+		Root:          run.private,
+		Index:         run.index,
+		Quality:       run.quality,
+		AudioLang:     w.Cfg.AudioLang,
+		ResourcesOnly: w.Cfg.ResourcesOnly,
+		OnProgress:    w.progressCallback(job, lesson, attempt),
+	})
 
-		// Cancel-error-first: a kill (jobCtx cancelled) must never fall through
-		// to the success or failure branches. A shutdown leaves the job to start
-		// over; a Cancel is recorded, with no retry.
-		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
-			if w.shuttingDown(ctx, job, lesson) {
-				return
-			}
+	// Cancel-error-first: a kill (jobCtx cancelled) must never fall through
+	// to the success or failure branches. A shutdown leaves the job to start
+	// over; a Cancel is recorded, with no retry.
+	if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
+		if !w.shuttingDown(ctx, job, lesson) {
 			w.finishCanceled(ctx, job, lesson)
-			return
 		}
-
-		if derr == nil {
-			// The download is complete; nothing is placed yet. A job a delete
-			// removed, or one canceled meanwhile, stops here.
-			if w.stopped(ctx, job, lesson, w.Store.ConfirmDownload(ctx, job.ID, id), "confirm download") {
-				return
-			}
-			bytes, ok, rerr := w.recordDownload(ctx, job, lesson, follow, prev, quality, index, outDir, privateLesson)
-			if rerr == nil {
-				if ok {
-					w.downloaded(job, lesson, attempt, bytes)
-				}
-				return
-			}
-			// The download could not be placed or recorded: a failed attempt,
-			// retried.
-			derr = rerr
-		}
-		final = failDownload
-		switch {
-		case errors.Is(derr, errLeftBehind):
-			final = failLeftBehind
-		case errors.Is(derr, errKeptInLibrary):
-			final = failKeptInLibrary
-		}
-
-		fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, derr)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "attempt_failed",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Title:         lesson.Title,
-			Attempt:       attempt,
-			MaxAttempts:   w.Cfg.MaxAttempts,
-			Err:           msgAttemptFailed,
-			Time:          time.Now(),
-		})
+		return failure{}, true
 	}
 
-	// Every attempt failed: record the job as failed and move on. A lesson
-	// with no files from an earlier download is failed too, and the next
-	// planner cycle re-enqueues it, giving it another chance next interval;
-	// one that still records files, all on disk now, stays downloaded with a
-	// note, so syncs don't download it again and again, and the owner's
-	// Download retries it (owner rulings 2026-09-24 (h) and (o)). Each
-	// attempt's error was logged above; the lesson records a sentence. What
-	// the download wrote goes with its private folder; nothing outside it was
-	// touched. WithoutCancel for parity with the cancel/resolve branches: the
-	// per-attempt ctx.Err() guard makes a cancelled ctx here practically
-	// unreachable, but keeping all terminal writes uncancellable makes
-	// "shutdown never strands a job" a single, obvious invariant.
+	if derr == nil {
+		ended, rerr := w.recordAttempt(ctx, run, attempt)
+		if ended {
+			return failure{}, true
+		}
+		// The download could not be placed or recorded: a failed attempt,
+		// retried.
+		derr = rerr
+	}
+	w.attemptFailed(run, attempt, derr)
+	return attemptFailure(derr), false
+}
+
+// retry re-marks the job running before attempt, a retry, and waits the
+// backoff; false means the job ended during the wait.
+func (w *Worker) retry(ctx, jobCtx context.Context, job database.Job, lesson *musora.Lesson, attempt int) bool {
+	// A job canceled or removed meanwhile is not re-marked; the
+	// StartDownload after the wait then stops the download.
+	if err := w.Store.MarkJobRunning(ctx, job.ID); err != nil && !errors.Is(err, database.ErrDownloadCanceled) {
+		fmt.Fprintf(w.log(), "  ⚠ job %d: re-mark running failed: %v\n", job.ID, err)
+	}
+	// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
+	// last entry for any further retries. See the doc comment: Backoff[i]
+	// is the delay before attempt i+2. The wait is on the job's context,
+	// so a Cancel lands at once, not when the backoff ends (it is
+	// recorded, with no retry). A shutdown mid-backoff leaves the job
+	// running, to be requeued at the next start; its end was already
+	// reported with the failed attempt.
+	if !w.waitBackoff(jobCtx, w.backoff(attempt-2)) {
+		if ctx.Err() == nil {
+			w.finishCanceled(ctx, job, lesson)
+		}
+		return false
+	}
+	return true
+}
+
+// recordAttempt places and records a complete download (recordDownload).
+// ended is true when the job ended here: the download was recorded, or a job
+// a delete removed, or one canceled meanwhile, stopped (nothing is placed
+// yet when it is confirmed). Otherwise err is why the attempt failed.
+func (w *Worker) recordAttempt(ctx context.Context, run *jobRun, attempt int) (ended bool, err error) {
+	job, lesson := run.job, run.lesson
+	if w.stopped(ctx, job, lesson, w.Store.ConfirmDownload(ctx, job.ID, job.RailcontentID), "confirm download") {
+		return true, nil
+	}
+	bytes, ok, err := w.recordDownload(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		w.downloaded(job, lesson, attempt, bytes)
+	}
+	return true, nil
+}
+
+// attemptFailure is the failure an attempt that failed with err ends the job
+// with, if it was the last.
+func attemptFailure(err error) failure {
+	switch {
+	case errors.Is(err, errLeftBehind):
+		return failLeftBehind
+	case errors.Is(err, errKeptInLibrary):
+		return failKeptInLibrary
+	}
+	return failDownload
+}
+
+// attemptFailed logs why attempt number attempt of run's download failed,
+// and reports it (attempt_failed).
+func (w *Worker) attemptFailed(run *jobRun, attempt int, err error) {
+	id := run.job.RailcontentID
+	fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, err)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "attempt_failed",
+		JobID:         run.job.ID,
+		FollowID:      run.job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         run.lesson.Title,
+		Attempt:       attempt,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Err:           msgAttemptFailed,
+		Time:          time.Now(),
+	})
+}
+
+// endFailed ends a job every attempt of which failed, with final: record the
+// job as failed and move on. A lesson with no files from an earlier download
+// is failed too, and the next planner cycle re-enqueues it, giving it another
+// chance next interval; one that still records files, all on disk now, stays
+// downloaded with a note, so syncs don't download it again and again, and the
+// owner's Download retries it (owner rulings 2026-09-24 (h) and (o)). Each
+// attempt's error was logged already; the lesson records a sentence. What the
+// download wrote goes with its private folder; nothing outside it was
+// touched. WithoutCancel for parity with the cancel/resolve branches: the
+// per-attempt ctx.Err() guard makes a cancelled ctx here practically
+// unreachable, but keeping all terminal writes uncancellable makes "shutdown
+// never strands a job" a single, obvious invariant.
+func (w *Worker) endFailed(ctx context.Context, job database.Job, final failure) {
+	id := job.RailcontentID
 	onDisk := w.filesOnDisk(ctx, id)
 	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.keptNote(), final.job, onDisk); {
 	case errors.Is(ferr, database.ErrDownloadAbandoned):
@@ -808,6 +892,13 @@ func isPartialName(name, base string) bool {
 	if ext, ok := strings.CutPrefix(rest, ".temp."); ok {
 		return ext != "" && !strings.Contains(ext, ".")
 	}
+	return isFormatSuffix(rest)
+}
+
+// isFormatSuffix reports whether rest, what follows a lesson base (and its
+// version label), is ".f<digits>.<ext>": one format of a merge, before ffmpeg
+// joins them.
+func isFormatSuffix(rest string) bool {
 	after, ok := strings.CutPrefix(rest, ".f")
 	if !ok {
 		return false

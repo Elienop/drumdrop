@@ -157,18 +157,10 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	}
 
 	self := lib.self.RailcontentID
-	var notes []error
-	previous, perr := c.Plan(lib.self)
-	if perr != nil {
-		notes = append(notes, fmt.Errorf("the previous download's library files are not known, so none were removed: %w", perr))
-		previous = library.Entries{}
-	}
-	for _, p := range previous.Kept {
-		notes = append(notes, fmt.Errorf("left %q in the library: it looks like this lesson's previous download, but another lesson claims it", p))
-	}
+	previous, known, notes := previousDownload(c, lib.self)
 	// Refused, or undone, the lesson still owns its previous entries; if those
 	// are not known, its record stays as it is.
-	refused := plexMoveResult{kept: previous.Remove, known: perr == nil}
+	refused := plexMoveResult{kept: previous.Remove, known: known}
 
 	if err := checkPlexConflicts(plan.steps, c, self, previous.Remove); err != nil {
 		return refused, errors.Join(append([]error{err}, notes...)...)
@@ -210,42 +202,19 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	if err != nil {
 		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
 	}
-	var (
-		kept  []keptFolder
-		stays []string
-	)
-	ours := make(map[string]bool, len(previous.Remove))
-	for _, p := range previous.Remove {
-		ours[p] = true
-		if dst := placedAt(p, plan.steps); dst != "" {
-			ours[dst] = true
-			continue
-		}
-		if atEpisodeBase(p, seasonDir, plan.episodeBase, listing) {
-			stays = append(stays, p)
-			continue
-		}
-		if why := tree.previousStays(heldPath{root: libraryDir, path: p}, plexFolderInto(plan.steps), "", "", true); why != "" {
-			kept = append(kept, keptFolder{path: p, why: why})
-			continue
-		}
-		if err := aside.setAsidePath(libraryDir, p, true); err != nil {
-			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
-		}
+	prevSeason := seasonPrevious{libraryDir: libraryDir, seasonDir: seasonDir, plan: plan, tree: tree, listing: listing}
+	ours, kept, stays, err := prevSeason.setAside(previous.Remove, aside)
+	if err != nil {
+		return fail(err, nil)
 	}
 	// A previous download in the default layout (a lesson folder its row
 	// records, such as one kept in downloads when a move was refused) goes by
 	// the same rule: only if the download brings back every file in it.
-	if prev, why, ok := previousFolder(lib.self, seasonDir, c, lib.roots); ok {
-		if why == "" {
-			why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false)
-		}
-		if why != "" {
-			kept = append(kept, keptFolder{path: prev.path, why: why})
-		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
-			return fail(fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err), nil)
-		}
+	folderKept, err := setAsidePreviousLessonFolder(lib, seasonDir, tree, src.base, aside)
+	if err != nil {
+		return fail(err, nil)
 	}
+	kept = append(kept, folderKept...)
 
 	// 3. What is at one of this episode's names, the lesson's own or a
 	// leftover no lesson claims (step 1 refused every claimed one), is set
@@ -255,10 +224,8 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		return fail(fmt.Errorf("an entry at one of this episode's names could not be set aside or merged: %w", err), nil)
 	}
 
-	if lib.episodeNFO != nil {
-		if err := writeScratchNFO(src.dir, src.base+".nfo", lib.episodeNFO); err != nil {
-			notes = append(notes, err)
-		}
+	if err := writeEpisodeNFO(src, lib.episodeNFO); err != nil {
+		notes = append(notes, err)
 	}
 
 	// 4. Place every entry, or none.
@@ -267,12 +234,105 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		return fail(err, stuck)
 	}
 
-	res := plexMoveResult{seasonDir: seasonDir, videoPath: plan.videoPath, episodeBase: plan.episodeBase, kept: stays, known: true}
-	for _, st := range plan.steps {
-		res.placed = append(res.placed, st.dst)
-	}
+	res := plexMoveResult{seasonDir: seasonDir, videoPath: plan.videoPath, episodeBase: plan.episodeBase, placed: stepDsts(plan.steps), kept: stays, known: true}
 	res.pending = &placement{dir: seasonDir, dest: seasonRoot, src: src.dir, steps: placed, merged: merged, aside: aside, kept: kept}
 	return res, errors.Join(notes...)
+}
+
+// previousDownload is the lesson self's previous download in the library, as
+// the claims c plan it (library.Claims.Plan), and a note for each part of it
+// the move leaves alone: all of it when it is not known (known is false, and
+// previous is empty), and each entry another lesson claims.
+func previousDownload(c *library.Claims, self database.Lesson) (previous library.Entries, known bool, notes []error) {
+	previous, err := c.Plan(self)
+	if err != nil {
+		notes = append(notes, fmt.Errorf("the previous download's library files are not known, so none were removed: %w", err))
+		previous = library.Entries{}
+	}
+	for _, p := range previous.Kept {
+		notes = append(notes, fmt.Errorf("left %q in the library: it looks like this lesson's previous download, but another lesson claims it", p))
+	}
+	return previous, err == nil, notes
+}
+
+// writeEpisodeNFO replaces the download's "<base>.nfo" in src with the
+// episode nfo, when there is one (plexLibrary.episodeNFO).
+func writeEpisodeNFO(src *scratchDir, episodeNFO []byte) error {
+	if episodeNFO == nil {
+		return nil
+	}
+	return writeScratchNFO(src.dir, src.base+".nfo", episodeNFO)
+}
+
+// stepDsts is every step's destination, in order (nil for no steps).
+func stepDsts(steps []plexMoveStep) []string {
+	var dsts []string
+	for _, st := range steps {
+		dsts = append(dsts, st.dst)
+	}
+	return dsts
+}
+
+// seasonPrevious is what step 2 of moveToLibraryPlexTV reads to decide on the
+// lesson's previous entries: the library and season folders, the move's
+// plan, the download's tree and the season folder's listing (listSeason).
+type seasonPrevious struct {
+	libraryDir, seasonDir string
+	plan                  plexMovePlan
+	tree                  downloadTree
+	listing               map[string]bool
+}
+
+// setAside is step 2 of moveToLibraryPlexTV for the entries remove, the
+// lesson's previous download by its record: one at one of this episode's
+// names is left to step 3 (ours, which also holds every entry of remove,
+// says it is the lesson's own); one at this episode's base that no step
+// places at stays, and stays the lesson's (stays); a folder the download does
+// not fully bring back stays, no longer recorded (kept); any other is set
+// aside. An error means the move must fail.
+func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[string]bool, kept []keptFolder, stays []string, err error) {
+	ours = make(map[string]bool, len(remove))
+	for _, p := range remove {
+		ours[p] = true
+		if dst := placedAt(p, s.plan.steps); dst != "" {
+			ours[dst] = true
+			continue
+		}
+		if atEpisodeBase(p, s.seasonDir, s.plan.episodeBase, s.listing) {
+			stays = append(stays, p)
+			continue
+		}
+		if why := s.tree.previousStays(heldPath{root: s.libraryDir, path: p}, plexFolderInto(s.plan.steps), "", "", true); why != "" {
+			kept = append(kept, keptFolder{path: p, why: why})
+			continue
+		}
+		if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
+			return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
+		}
+	}
+	return ours, kept, stays, nil
+}
+
+// setAsidePreviousLessonFolder is the end of step 2 of moveToLibraryPlexTV:
+// the lesson's previous folder in the default layout (previousFolder, beside
+// the season folder seasonDir) is set aside when the download (tree, its
+// folder named newBase) brings back every file in it, and otherwise returned
+// as kept, with why. An error means the move must fail.
+func setAsidePreviousLessonFolder(lib plexLibrary, seasonDir string, tree downloadTree, newBase string, aside *asideArea) ([]keptFolder, error) {
+	prev, why, ok := previousFolder(lib.self, seasonDir, lib.claims, lib.roots)
+	if !ok {
+		return nil, nil
+	}
+	if why == "" {
+		why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), newBase, false)
+	}
+	if why != "" {
+		return []keptFolder{{path: prev.path, why: why}}, nil
+	}
+	if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
+		return nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
+	}
+	return nil, nil
 }
 
 // atEpisodeBase reports whether p, an entry the lesson's record names, is in

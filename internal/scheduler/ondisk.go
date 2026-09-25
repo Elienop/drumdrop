@@ -59,20 +59,27 @@ func (w *Worker) recordedFilesPresent(l database.Lesson) bool {
 		return false
 	}
 	if recorded && len(entries) > 0 {
-		if w.Cfg.LibraryDir == "" {
-			return false
-		}
-		for _, e := range entries {
-			info, err := os.Stat(library.Resolve(w.Cfg.LibraryDir, e))
-			if err != nil || (!info.Mode().IsRegular() && !info.IsDir()) {
-				return false
-			}
-		}
-		return true
+		return entriesPresent(w.Cfg.LibraryDir, entries)
 	}
 	if l.OutputDir.Valid && l.OutputDir.String != "" {
 		info, err := os.Stat(l.OutputDir.String)
 		return err == nil && info.IsDir()
 	}
 	return false
+}
+
+// entriesPresent reports whether every library record entry of entries is
+// on disk under the library folder libraryDir, as a regular file or a folder
+// (read through a symlink); with no library folder none can be found.
+func entriesPresent(libraryDir string, entries []string) bool {
+	if libraryDir == "" {
+		return false
+	}
+	for _, e := range entries {
+		info, err := os.Stat(library.Resolve(libraryDir, e))
+		if err != nil || (!info.Mode().IsRegular() && !info.IsDir()) {
+			return false
+		}
+	}
+	return true
 }

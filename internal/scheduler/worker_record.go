@@ -31,7 +31,8 @@ import (
 // Before it places anything, the partial files an earlier attempt left in the
 // private folder (isPartialName: yt-dlp's, and drumdrop's own temporary files)
 // are removed, so none of them is placed.
-func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, quality string, index int, outDir, privateLesson string) (bytes int64, ok bool, err error) {
+func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, ok bool, err error) {
+	job, lesson, privateLesson := run.job, run.lesson, run.privateLesson
 	id := job.RailcontentID
 	// The download is complete: a shutdown that began meanwhile does not stop
 	// it being placed and recorded (both are local and short).
@@ -46,8 +47,8 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 	}
 	defer src.close()
 
-	rec := database.DownloadRecord{Quality: quality}
-	pl, err := w.place(job, lesson, follow, prev, index, outDir, claims, src, &rec)
+	rec := database.DownloadRecord{Quality: run.quality}
+	pl, err := w.place(run, claims, src, &rec)
 	if err != nil {
 		return 0, false, err
 	}
@@ -114,9 +115,10 @@ func (w *Worker) recordDownload(ctx context.Context, job database.Job, lesson *m
 // a row can record a folder written under the other layout. An error
 // returned means the download could not be placed, and nothing outside its
 // private folder was changed.
-func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.Follow, prev database.Lesson, index int, outDir string, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
+func (w *Worker) place(run *jobRun, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
+	job, lesson, prev, index := run.job, run.lesson, run.prev, run.index
 	id := job.RailcontentID
-	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(outDir, index, lesson.Title))
+	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(run.outDir, index, lesson.Title))
 	if err != nil {
 		return nil, fmt.Errorf("not placed: %w", err)
 	}
@@ -148,7 +150,7 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 		// download's <movie> one before the entries are placed, so a Plex
 		// TV-Shows library (which can't match Drumeo to TheTVDB) gets the real
 		// episode title/season/episode from local metadata.
-		show := plexShow(follow, job, lesson)
+		show := plexShow(run.follow, job, lesson)
 		res, err := moveToLibraryPlexTV(lib, show, 1, index, lesson.Title, src, plexLibrary{
 			self: prev, claims: claims, roots: w.roots(), jobID: job.ID,
 			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),

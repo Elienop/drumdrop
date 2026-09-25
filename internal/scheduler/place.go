@@ -268,71 +268,90 @@ func lessonSteps(src *os.Root, dstDir string) ([]plexMoveStep, error) {
 // nothing unless it can place every entry: an error means the destination
 // is as it was (an entry an undo could not take back is named in it).
 func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, claims *library.Claims, roots []string, jobID int64) (*placement, error) {
-	if rel == "" || rel == "." || !filepath.IsLocal(rel) || filepath.Dir(rel) == "." {
-		return nil, fmt.Errorf("refusing to place the lesson at %q under %q: not a lesson folder inside it", rel, root)
-	}
-	if isPrivateRel(rel) {
-		return nil, fmt.Errorf("refusing to place the lesson in %q: that folder holds downloads in progress", filepath.Join(root, rel))
-	}
-	if claims == nil {
-		return nil, errors.New("refusing to place the lesson: the other lessons' files were not read")
-	}
-	dstDir := filepath.Join(root, rel)
-	if ids := claims.Holds(dstDir, self.RailcontentID); len(ids) > 0 {
-		return nil, fmt.Errorf("refusing to place the lesson: %q holds files lessons %v record", dstDir, ids)
-	}
-	// The downloaded folder itself is never the destination: replacing an
-	// entry there would delete what is being placed.
-	if library.Inside(src.dir.Name(), dstDir) || sameDir(src.dir.Name(), dstDir) {
-		return nil, fmt.Errorf("refusing to place the lesson at %q: it is the downloaded folder itself", dstDir)
+	dstDir, err := lessonFolderDest(root, rel, src, self, claims)
+	if err != nil {
+		return nil, err
 	}
 	own := recordsFolder(self, dstDir)
 
-	aside := newAsideArea(jobID)
-	var (
-		dest    *os.Root
-		created *createdDir
-		merged  []placedLevel
-	)
-	fail := func(err error) (*placement, error) {
-		if _, uerr := undoLevels(merged); uerr != nil {
-			err = errors.Join(err, uerr)
-		}
-		if dest != nil {
-			dest.Close()
-		}
-		created.remove()
-		if _, rerr := aside.restore(false); rerr != nil {
-			err = errors.Join(err, rerr)
-			return nil, errors.Join(err, aside.finish(true))
-		}
-		return nil, errors.Join(err, aside.finish(false))
-	}
-	var kept []keptFolder
-	if prev, why, ok := previousFolder(self, dstDir, claims, roots); ok {
-		if why == "" {
-			tree, err := readDownloadTree(src.dir)
-			if err != nil {
-				return fail(err)
-			}
-			why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false)
-		}
-		if why != "" {
-			kept = append(kept, keptFolder{path: prev.path, why: why})
-		} else if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
-			return fail(fmt.Errorf("refusing to place the lesson: %w", err))
-		}
+	p := &folderPlacement{aside: newAsideArea(jobID)}
+	kept, err := setAsidePreviousFolder(self, dstDir, claims, roots, src, p.aside)
+	if err != nil {
+		return p.fail(err)
 	}
 	parent, err := openLibraryParent(root, filepath.Dir(rel))
 	if err != nil {
-		return fail(err)
+		return p.fail(err)
 	}
 	defer parent.Close()
-	leaf := filepath.Base(rel)
+	if err := p.openDest(root, parent, filepath.Base(rel), dstDir, own); err != nil {
+		return p.fail(err)
+	}
+	steps, err := lessonSteps(src.dir, dstDir)
+	if err != nil {
+		return p.fail(err)
+	}
+	steps, err = clearNames(root, p.dest, src.dir, steps, func(string) bool { return own }, p.aside, &p.merged)
+	if err != nil {
+		return p.fail(err)
+	}
+	placed, stuck, err := placeSteps(p.dest, src.dir, steps)
+	if err != nil {
+		if len(stuck) > 0 {
+			err = fmt.Errorf("%w (left in %q: %q)", err, dstDir, stuck)
+		}
+		return p.fail(err)
+	}
+	// A folder the placement made: its own name is flushed too, as what was
+	// placed in it was (placeSteps).
+	if p.created != nil {
+		if err := syncIn(parent, "."); err != nil {
+			stuck, uerr := undoSteps(p.dest, src.dir, placed)
+			return p.fail(errors.Join(fmt.Errorf("flush %q after the placement: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
+		}
+	}
+	return &placement{dir: dstDir, dest: p.dest, src: src.dir, steps: placed, merged: p.merged, aside: p.aside, created: p.created, kept: kept}, nil
+}
+
+// folderPlacement is what placeLessonFolder has done so far, for fail to
+// undo: the area replaced entries are set aside in, the lesson's folder held
+// open (dest), the folder when it made it (created), and the subfolders it
+// merged.
+type folderPlacement struct {
+	aside   *asideArea
+	dest    *os.Root
+	created *createdDir
+	merged  []placedLevel
+}
+
+// fail undoes the placement so far and returns err, joined with whatever the
+// undo could not do: the merged subfolders are taken back, the lesson's
+// folder is released and, when the placement made it, removed if empty, and
+// the set-aside entries go back (the area is kept if one could not).
+func (p *folderPlacement) fail(err error) (*placement, error) {
+	if _, uerr := undoLevels(p.merged); uerr != nil {
+		err = errors.Join(err, uerr)
+	}
+	if p.dest != nil {
+		p.dest.Close()
+	}
+	p.created.remove()
+	if _, rerr := p.aside.restore(false); rerr != nil {
+		err = errors.Join(err, rerr)
+		return nil, errors.Join(err, p.aside.finish(true))
+	}
+	return nil, errors.Join(err, p.aside.finish(false))
+}
+
+// openDest makes the lesson's folder leaf in parent (dstDir), if missing, and
+// holds it open (dest): an entry at its name that is not a real folder (a
+// file, a symlink) is set aside first, as the lesson's own when own says so.
+// A folder it made is recorded (created), for fail to remove.
+func (p *folderPlacement) openDest(root string, parent *os.Root, leaf, dstDir string, own bool) error {
 	if info, lerr := parent.Lstat(leaf); lerr == nil && !info.IsDir() {
 		// Not a real folder (a file, a symlink): an entry at the lesson's name.
-		if err := aside.setAside(root, parent, leaf, own); err != nil {
-			return fail(err)
+		if err := p.aside.setAside(root, parent, leaf, own); err != nil {
+			return err
 		}
 	}
 	switch err := parent.Mkdir(leaf, 0o755); {
@@ -340,40 +359,72 @@ func placeLessonFolder(root, rel string, src *scratchDir, self database.Lesson, 
 		held, herr := parent.OpenRoot(".")
 		if herr != nil {
 			_ = parent.Remove(leaf)
-			return fail(fmt.Errorf("create %q: %w", dstDir, herr))
+			return fmt.Errorf("create %q: %w", dstDir, herr)
 		}
-		created = &createdDir{parent: held, name: leaf}
+		p.created = &createdDir{parent: held, name: leaf}
 	case !errors.Is(err, fs.ErrExist):
-		return fail(fmt.Errorf("create %q: %w", dstDir, err))
+		return fmt.Errorf("create %q: %w", dstDir, err)
 	}
-	if dest, err = openRealDir(parent, leaf); err != nil {
-		dest = nil
-		return fail(err)
-	}
-	steps, err := lessonSteps(src.dir, dstDir)
+	dest, err := openRealDir(parent, leaf)
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	steps, err = clearNames(root, dest, src.dir, steps, func(string) bool { return own }, aside, &merged)
-	if err != nil {
-		return fail(err)
+	p.dest = dest
+	return nil
+}
+
+// lessonFolderDest is the lesson's folder <root>/<rel> that placeLessonFolder
+// places into, or why it refuses to: rel is not a lesson folder inside root,
+// it is in the folder of downloads in progress, the other lessons' files
+// were not read, another lesson records files in it, or it is the
+// downloaded folder itself (replacing an entry there would delete what is
+// being placed). It writes nothing.
+func lessonFolderDest(root, rel string, src *scratchDir, self database.Lesson, claims *library.Claims) (string, error) {
+	if rel == "" || rel == "." || !filepath.IsLocal(rel) || filepath.Dir(rel) == "." {
+		return "", fmt.Errorf("refusing to place the lesson at %q under %q: not a lesson folder inside it", rel, root)
 	}
-	placed, stuck, err := placeSteps(dest, src.dir, steps)
-	if err != nil {
-		if len(stuck) > 0 {
-			err = fmt.Errorf("%w (left in %q: %q)", err, dstDir, stuck)
+	if isPrivateRel(rel) {
+		return "", fmt.Errorf("refusing to place the lesson in %q: that folder holds downloads in progress", filepath.Join(root, rel))
+	}
+	if claims == nil {
+		return "", errors.New("refusing to place the lesson: the other lessons' files were not read")
+	}
+	dstDir := filepath.Join(root, rel)
+	if ids := claims.Holds(dstDir, self.RailcontentID); len(ids) > 0 {
+		return "", fmt.Errorf("refusing to place the lesson: %q holds files lessons %v record", dstDir, ids)
+	}
+	if library.Inside(src.dir.Name(), dstDir) || sameDir(src.dir.Name(), dstDir) {
+		return "", fmt.Errorf("refusing to place the lesson at %q: it is the downloaded folder itself", dstDir)
+	}
+	return dstDir, nil
+}
+
+// setAsidePreviousFolder is placeLessonFolder's step for the lesson's
+// previous folder (previousFolder): it sets the folder aside when the
+// download src brings back every file in it, and otherwise returns it as
+// kept, with why (previousStays). There is nothing to do, and nothing is
+// returned, when the row records no previous folder. An error means the
+// placement must fail: the download could not be read, or the folder could
+// not be set aside.
+func setAsidePreviousFolder(self database.Lesson, dstDir string, claims *library.Claims, roots []string, src *scratchDir, aside *asideArea) ([]keptFolder, error) {
+	prev, why, ok := previousFolder(self, dstDir, claims, roots)
+	if !ok {
+		return nil, nil
+	}
+	if why == "" {
+		tree, err := readDownloadTree(src.dir)
+		if err != nil {
+			return nil, err
 		}
-		return fail(err)
+		why = tree.previousStays(prev, lessonFolderInto, filepath.Base(prev.path), src.base, false)
 	}
-	// A folder the placement made: its own name is flushed too, as what was
-	// placed in it was (placeSteps).
-	if created != nil {
-		if err := syncIn(parent, "."); err != nil {
-			stuck, uerr := undoSteps(dest, src.dir, placed)
-			return fail(errors.Join(fmt.Errorf("flush %q after the placement: %w", filepath.Dir(dstDir), err), uerr, stuckErr(stuck)))
-		}
+	if why != "" {
+		return []keptFolder{{path: prev.path, why: why}}, nil
 	}
-	return &placement{dir: dstDir, dest: dest, src: src.dir, steps: placed, merged: merged, aside: aside, created: created, kept: kept}, nil
+	if err := aside.setAsidePath(prev.root, prev.path, true); err != nil {
+		return nil, fmt.Errorf("refusing to place the lesson: %w", err)
+	}
+	return nil, nil
 }
 
 // stuckErr names entries an undo could not take back, or is nil.
