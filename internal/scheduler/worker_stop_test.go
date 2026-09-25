@@ -57,33 +57,46 @@ func TestWorkerSkipSticks(t *testing.T) {
 	for _, layout := range []string{LayoutPlexTV, ""} {
 		for _, when := range []string{"queued", "mid-download"} {
 			t.Run(when+"/layout="+layout, func(t *testing.T) {
-				ctx := context.Background()
-				w, s, dl, f, scratch := realWorker(t, layout)
-				if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100); err != nil {
-					t.Fatal(err)
-				}
-				skip := func() {
-					if _, err := s.SkipLesson(ctx, 100, "not wanted"); err != nil {
-						t.Fatalf("SkipLesson: %v", err)
-					}
-				}
-				if when == "queued" {
-					skip()
-				} else {
-					dl.afterWrite = func(string) { skip() }
-				}
-				if _, err := w.RunOnce(ctx, 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				l, err := s.GetLesson(ctx, 100)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if l.Status != database.StatusSkipped || l.Error.String != "not wanted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
-					t.Errorf("lesson = %+v, want skipped with its reason and no files", l)
-				}
-				assertExist(t, false, scratch, filepath.Join(w.Cfg.LibraryDir, "Beginner Course"))
+				checkSkipSticks(t, layout, when)
 			})
+		}
+	}
+}
+
+// checkSkipSticks is TestWorkerSkipSticks in layout, for a Skip while the
+// job is queued, or mid-download (when).
+func checkSkipSticks(t *testing.T, layout, when string) {
+	t.Helper()
+	ctx := context.Background()
+	w, s, dl, f, scratch := realWorker(t, layout)
+	if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100); err != nil {
+		t.Fatal(err)
+	}
+	skip := skipLesson100(t, s)
+	if when == "queued" {
+		skip()
+	} else {
+		dl.afterWrite = func(string) { skip() }
+	}
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	l, err := s.GetLesson(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Status != database.StatusSkipped || l.Error.String != "not wanted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
+		t.Errorf("lesson = %+v, want skipped with its reason and no files", l)
+	}
+	assertExist(t, false, scratch, filepath.Join(w.Cfg.LibraryDir, "Beginner Course"))
+}
+
+// skipLesson100 is a Skip of lesson 100 in s, with the reason "not wanted",
+// to run when the test says; it fails the test if the Skip fails.
+func skipLesson100(t *testing.T, s *database.Store) func() {
+	return func() {
+		if _, err := s.SkipLesson(context.Background(), 100, "not wanted"); err != nil {
+			t.Fatalf("SkipLesson: %v", err)
 		}
 	}
 }

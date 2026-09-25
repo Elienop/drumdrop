@@ -129,53 +129,73 @@ func TestWorkerAttemptThatFailsBeforeDownloadingKeepsALessonOnDisk(t *testing.T)
 // recorded video is gone, or that has no files, is skipped, as before, and
 // reported so.
 func TestWorkerLessonMusoraDoesNotReturn(t *testing.T) {
-	for _, c := range []struct {
-		name         string
-		files, gone  bool
-		status, note string
-		kind         string
-	}{
+	for _, c := range []notReturnedCase{
 		{"earlier download on disk", true, false, database.StatusDownloaded, msgNotReturnedKept, "attempt_failed"},
 		{"earlier video gone", true, true, database.StatusSkipped, msgNotResolved, "lesson_skipped"},
 		{"never downloaded", false, false, database.StatusSkipped, msgNotResolved, "lesson_skipped"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
-			w, s, _, f, _ := realWorker(t, "")
-			dir := ""
-			if c.files {
-				w, s, _, f, dir = downloadedInLibrary(t)
-			}
-			if c.gone {
-				if err := os.Remove(videoOf(t, s)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			w.Resolver = fakeResolver{lessons: map[int]*musora.Lesson{}}
-			sink := &recordingSink{}
-			w.Progress = sink
-			job := enqueue(t, s, f)
-
-			if _, err := w.RunOnce(ctx, 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertEnded(t, s, job, c.status, c.note, dir, msgNotResolved)
-			if n := planCount(t, s, f); n != 0 {
-				t.Errorf("the next sync queued %d downloads, want none", n)
-			}
-			var ends []string
-			for _, e := range sink.snapshot() {
-				if e.Kind != "job_claimed" {
-					ends = append(ends, e.Kind)
-					if e.Err != msgNotResolved {
-						t.Errorf("%s event says %q, want %q", e.Kind, e.Err, msgNotResolved)
-					}
-				}
-			}
-			if len(ends) != 1 || ends[0] != c.kind {
-				t.Errorf("the job's end was reported as %v, want one %s", ends, c.kind)
-			}
+			checkLessonMusoraDoesNotReturn(t, c)
 		})
+	}
+}
+
+// notReturnedCase is a lesson Musora answers with no match: whether it has
+// files from an earlier download (files) and its video is gone since (gone),
+// and how it must end (status, note) and be reported (kind).
+type notReturnedCase struct {
+	name         string
+	files, gone  bool
+	status, note string
+	kind         string
+}
+
+// checkLessonMusoraDoesNotReturn is one case of
+// TestWorkerLessonMusoraDoesNotReturn.
+func checkLessonMusoraDoesNotReturn(t *testing.T, c notReturnedCase) {
+	t.Helper()
+	ctx := context.Background()
+	w, s, _, f, _ := realWorker(t, "")
+	dir := ""
+	if c.files {
+		w, s, _, f, dir = downloadedInLibrary(t)
+	}
+	if c.gone {
+		if err := os.Remove(videoOf(t, s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Resolver = fakeResolver{lessons: map[int]*musora.Lesson{}}
+	sink := &recordingSink{}
+	w.Progress = sink
+	job := enqueue(t, s, f)
+
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertEnded(t, s, job, c.status, c.note, dir, msgNotResolved)
+	if n := planCount(t, s, f); n != 0 {
+		t.Errorf("the next sync queued %d downloads, want none", n)
+	}
+	assertNotResolvedEndReportedAs(t, sink, c.kind)
+}
+
+// assertNotResolvedEndReportedAs fails unless the job's end, every event
+// after its claim, is one event of kind, and each such event says
+// msgNotResolved.
+func assertNotResolvedEndReportedAs(t *testing.T, sink *recordingSink, kind string) {
+	t.Helper()
+	var ends []string
+	for _, e := range sink.snapshot() {
+		if e.Kind != "job_claimed" {
+			ends = append(ends, e.Kind)
+			if e.Err != msgNotResolved {
+				t.Errorf("%s event says %q, want %q", e.Kind, e.Err, msgNotResolved)
+			}
+		}
+	}
+	if len(ends) != 1 || ends[0] != kind {
+		t.Errorf("the job's end was reported as %v, want one %s", ends, kind)
 	}
 }
 

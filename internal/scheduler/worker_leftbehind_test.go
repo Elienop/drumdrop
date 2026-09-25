@@ -32,21 +32,7 @@ import (
 func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) {
 	plain := []string{"Beginner Course - s01e05 - Lesson A.mp4", "Beginner Course - s01e05 - Lesson A.nfo", "Beginner Course - s01e05 - Lesson A.en.vtt"}
 	song := []string{"Beginner Course - s01e05 - Old Title [Live] [Drumless].mp4", "Beginner Course - s01e05 - Old Title [Live] [Drumless].en.vtt"}
-	for _, c := range []struct {
-		name   string
-		layout string
-		// lib and dl are the settings now, row the season folder the row
-		// records, files where its files are ("" = row), all relative to a
-		// temporary folder. link, when set, is a symlink there to
-		// "media/lib".
-		lib, dl, row, files, link string
-		names                     []string
-		recorded                  bool
-		leftBehind                bool
-		// emptyRow: the row's season folder is still there, emptied (the
-		// files moved to the same place in the new library: round 5j J1).
-		emptyRow bool
-	}{
+	for _, c := range []leftBehindCase{
 		{name: "M1 plex-tv, moved up, downloads inside, song version", layout: LayoutPlexTV, lib: "media", dl: "media/drumeo", row: "media/drumeo/Beginner Course/Season 01", names: song, leftBehind: true},
 		{name: "M2 plex-tv, moved up, downloads inside, plain name", layout: LayoutPlexTV, lib: "media", dl: "media/drumeo", row: "media/drumeo/Beginner Course/Season 01", names: plain, leftBehind: true},
 		{name: "M3 plex-tv, moved up, downloads inside, recorded", layout: LayoutPlexTV, lib: "media", dl: "media/drumeo", row: "media/drumeo/Beginner Course/Season 01", names: plain, recorded: true, leftBehind: true},
@@ -67,64 +53,95 @@ func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) 
 		{name: "L2 plex-tv, the setting through a symlink to the same folder, recorded", layout: LayoutPlexTV, lib: "linked", link: "linked", dl: "dl", row: "media/lib/Beginner Course/Season 01", names: plain, recorded: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			w, store, _, _, _ := plexWorker(t)
-			tmp := t.TempDir()
-			abs := func(rel string) string { return filepath.Join(tmp, filepath.FromSlash(rel)) }
-			if c.link != "" {
-				if err := os.MkdirAll(abs("media/lib"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(abs("media/lib"), abs(c.link)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			w.Cfg.LibraryDir, w.Cfg.DownloadsDir, w.Cfg.Layout = abs(c.lib), abs(c.dl), c.layout
-			for _, d := range []string{w.Cfg.LibraryDir, w.Cfg.DownloadsDir} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			rowSeason, filesDir := abs(c.row), abs(c.row)
-			if c.files != "" {
-				filesDir = abs(c.files)
-			}
-			seedSeason(t, filesDir, c.names...)
-			if c.emptyRow {
-				seedSeason(t, rowSeason)
-			}
-			prev := legacyRow(100, "Lesson A", 5, rowSeason, c.names[0])
-			if c.recorded {
-				prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(rowSeason, c.names...))
-			}
-			store.lessons[100] = prev
-			store.withFiles = []database.Lesson{prev}
-			season := filepath.Join(w.Cfg.LibraryDir, "Beginner Course", "Season 01")
-			target := season
-			if c.layout == "" {
-				target = filepath.Join(w.Cfg.LibraryDir, "Beginner Course", "05 - Lesson A")
-			}
-			refuseFromJobInto(t, w, target)
-
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertContent(t, filesDir, c.names...)
-			if c.leftBehind {
-				assertRefusedAs(t, w, store, failLeftBehind)
-				if !store.onDisk[100] {
-					t.Errorf("the lesson's files read as missing; want it left 'downloaded' with its note")
-				}
-				return
-			}
-			rec := onlyRecord(t, store)
-			if want := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A"); rec.outputDir != want {
-				t.Errorf("recorded %q, want the downloads folder %q", rec.outputDir, want)
-			}
-			if want := recordOf(season, c.names...); !reflect.DeepEqual(sorted(rec.entries), sorted(want)) {
-				t.Errorf("entries = %v, want the season files recorded %v", rec.entries, want)
-			}
+			checkRefusedPlacementKeepsFilesLeftBehind(t, c)
 		})
 	}
+}
+
+// leftBehindCase is a library folder setting, and where the season-folder
+// row's files are against it.
+type leftBehindCase struct {
+	name   string
+	layout string
+	// lib and dl are the settings now, row the season folder the row
+	// records, files where its files are ("" = row), all relative to a
+	// temporary folder. link, when set, is a symlink there to
+	// "media/lib".
+	lib, dl, row, files, link string
+	names                     []string
+	recorded                  bool
+	leftBehind                bool
+	// emptyRow: the row's season folder is still there, emptied (the
+	// files moved to the same place in the new library: round 5j J1).
+	emptyRow bool
+}
+
+// checkRefusedPlacementKeepsFilesLeftBehind is one case of
+// TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove.
+func checkRefusedPlacementKeepsFilesLeftBehind(t *testing.T, c leftBehindCase) {
+	t.Helper()
+	w, store, _, _, _ := plexWorker(t)
+	rowSeason, filesDir := setUpTheLibrarySetting(t, w, c)
+	prev := legacyRow(100, "Lesson A", 5, rowSeason, c.names[0])
+	if c.recorded {
+		prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(rowSeason, c.names...))
+	}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+	season := filepath.Join(w.Cfg.LibraryDir, "Beginner Course", "Season 01")
+	refuseFromJobInto(t, w, lessonATarget(w.Cfg.LibraryDir, c.layout, season))
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, filesDir, c.names...)
+	if c.leftBehind {
+		assertRefusedAs(t, w, store, failLeftBehind)
+		if !store.onDisk[100] {
+			t.Errorf("the lesson's files read as missing; want it left 'downloaded' with its note")
+		}
+		return
+	}
+	rec := onlyRecord(t, store)
+	if want := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A"); rec.outputDir != want {
+		t.Errorf("recorded %q, want the downloads folder %q", rec.outputDir, want)
+	}
+	if want := recordOf(season, c.names...); !reflect.DeepEqual(sorted(rec.entries), sorted(want)) {
+		t.Errorf("entries = %v, want the season files recorded %v", rec.entries, want)
+	}
+}
+
+// setUpTheLibrarySetting sets w's library and downloads folders and layout
+// as c says, under a new temporary folder (the symlink c.link included), and
+// seeds the row's files: it returns the season folder the row records and
+// the folder its files are in.
+func setUpTheLibrarySetting(t *testing.T, w *Worker, c leftBehindCase) (rowSeason, filesDir string) {
+	t.Helper()
+	tmp := t.TempDir()
+	abs := func(rel string) string { return filepath.Join(tmp, filepath.FromSlash(rel)) }
+	if c.link != "" {
+		if err := os.MkdirAll(abs("media/lib"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(abs("media/lib"), abs(c.link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Cfg.LibraryDir, w.Cfg.DownloadsDir, w.Cfg.Layout = abs(c.lib), abs(c.dl), c.layout
+	for _, d := range []string{w.Cfg.LibraryDir, w.Cfg.DownloadsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rowSeason, filesDir = abs(c.row), abs(c.row)
+	if c.files != "" {
+		filesDir = abs(c.files)
+	}
+	seedSeason(t, filesDir, c.names...)
+	if c.emptyRow {
+		seedSeason(t, rowSeason)
+	}
+	return rowSeason, filesDir
 }
 
 // TestWorkerRefusedPlacementKeepsAnOldFolderItCantRead pins "when unsure,

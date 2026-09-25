@@ -64,43 +64,53 @@ func TestWorkerStopReportsTheJobsEnd(t *testing.T) {
 	for _, layout := range []string{"", LayoutPlexTV} {
 		for _, when := range []string{"during the move", "before the start"} {
 			t.Run(when+"/layout="+layout, func(t *testing.T) {
-				ctx := context.Background()
-				w, s, _, f, _ := realWorker(t, layout)
-				jobID, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100)
-				if err != nil {
-					t.Fatal(err)
-				}
-				skip := func() {
-					if _, err := s.SkipLesson(ctx, 100, "not wanted"); err != nil {
-						t.Fatalf("SkipLesson: %v", err)
-					}
-				}
-				if when == "during the move" {
-					orig := renameAt
-					once := false
-					renameAt = func(from *os.Root, src string, to *os.Root, dst string) error {
-						if !once {
-							once = true
-							skip()
-						}
-						return orig(from, src, to, dst)
-					}
-					t.Cleanup(func() { renameAt = orig })
-				} else {
-					w.Resolver = hookResolver{fakeResolver: w.Resolver.(fakeResolver), before: skip}
-				}
-				sink := &recordingSink{}
-				w.Progress = sink
-				if _, err := w.RunOnce(ctx, 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				if l, _ := s.GetLesson(ctx, 100); l.Status != database.StatusSkipped {
-					t.Errorf("lesson status = %q, want skipped", l.Status)
-				}
-				assertEndsOnce(t, sink, jobID)
+				checkStopReportsTheJobsEnd(t, layout, when)
 			})
 		}
 	}
+}
+
+// checkStopReportsTheJobsEnd is TestWorkerStopReportsTheJobsEnd in layout,
+// for a Skip landing during the move or before the start (when).
+func checkStopReportsTheJobsEnd(t *testing.T, layout, when string) {
+	t.Helper()
+	ctx := context.Background()
+	w, s, _, f, _ := realWorker(t, layout)
+	jobID, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := skipLesson100(t, s)
+	if when == "during the move" {
+		runBeforeTheFirstRename(t, skip)
+	} else {
+		w.Resolver = hookResolver{fakeResolver: w.Resolver.(fakeResolver), before: skip}
+	}
+	sink := &recordingSink{}
+	w.Progress = sink
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if l, _ := s.GetLesson(ctx, 100); l.Status != database.StatusSkipped {
+		t.Errorf("lesson status = %q, want skipped", l.Status)
+	}
+	assertEndsOnce(t, sink, jobID)
+}
+
+// runBeforeTheFirstRename runs f right before the first rename of the
+// placement, for the rest of the test, then renames as the placement would.
+func runBeforeTheFirstRename(t *testing.T, f func()) {
+	t.Helper()
+	orig := renameAt
+	once := false
+	renameAt = func(from *os.Root, src string, to *os.Root, dst string) error {
+		if !once {
+			once = true
+			f()
+		}
+		return orig(from, src, to, dst)
+	}
+	t.Cleanup(func() { renameAt = orig })
 }
 
 // TestWorkerCancelLeavesASentence (round-4 item 7) proves a canceled

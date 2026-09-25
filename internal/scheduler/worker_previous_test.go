@@ -185,41 +185,65 @@ func TestWorkerRemovesAPreviousFolderTheDownloadFullyBringsBack(t *testing.T) {
 	for _, c := range previousCases {
 		for _, stop := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stopped=%v", c.name, stop), func(t *testing.T) {
-				w, store, log := previousWorker(t, c)
-				dir, files := c.seed(t, w, store, nil)
-				if stop {
-					store.skipped = map[int64]bool{}
-					store.onConfirm = func() { store.skipped[1] = true }
-				}
-
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				if stop {
-					if len(store.markDownloaded) != 0 {
-						t.Errorf("recorded %+v, want nothing", store.markDownloaded)
-					}
-					assertTree(t, dir, files)
-					for _, body := range []string{"new mp4", "new a"} {
-						if p := findContent(t, c.placedIn(w), body); p != "" {
-							t.Errorf("the download's %q is left at %q", body, p)
-						}
-					}
-				} else {
-					if rec := onlyRecord(t, store); rec.outputDir != c.placedIn(w) {
-						t.Errorf("recorded %q, want %q", rec.outputDir, c.placedIn(w))
-					}
-					assertExist(t, false, dir)
-					if c.gone != nil {
-						assertExist(t, false, c.gone(w)...)
-					}
-					if strings.Contains(log.String(), "left its previous folder") {
-						t.Errorf("log %q says a folder was kept", log.String())
-					}
-				}
-				assertNoReplacedArea(t, w)
+				checkRemovesAPreviousFolderTheDownloadFullyBringsBack(t, c, stop)
 			})
 		}
+	}
+}
+
+// checkRemovesAPreviousFolderTheDownloadFullyBringsBack is
+// TestWorkerRemovesAPreviousFolderTheDownloadFullyBringsBack for c, with a
+// Skip landing during the placement (stop), or none.
+func checkRemovesAPreviousFolderTheDownloadFullyBringsBack(t *testing.T, c previousCase, stop bool) {
+	t.Helper()
+	w, store, log := previousWorker(t, c)
+	dir, files := c.seed(t, w, store, nil)
+	if stop {
+		store.skipped = map[int64]bool{}
+		store.onConfirm = func() { store.skipped[1] = true }
+	}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if stop {
+		assertStopPutThePreviousFolderBack(t, store, c.placedIn(w), dir, files)
+	} else {
+		assertPreviousFolderRemoved(t, w, store, c, dir, log.String())
+	}
+	assertNoReplacedArea(t, w)
+}
+
+// assertStopPutThePreviousFolderBack fails unless a stopped re-download
+// recorded nothing, the previous folder dir holds exactly files again, and
+// nothing of the download is left in placedIn, where it was being placed.
+func assertStopPutThePreviousFolderBack(t *testing.T, store *fakeWorkerStore, placedIn, dir string, files map[string]string) {
+	t.Helper()
+	if len(store.markDownloaded) != 0 {
+		t.Errorf("recorded %+v, want nothing", store.markDownloaded)
+	}
+	assertTree(t, dir, files)
+	for _, body := range []string{"new mp4", "new a"} {
+		if p := findContent(t, placedIn, body); p != "" {
+			t.Errorf("the download's %q is left at %q", body, p)
+		}
+	}
+}
+
+// assertPreviousFolderRemoved fails unless the re-download was recorded where
+// c places it, the previous folder dir and c's recorded files at old names
+// are gone, and the log (log) says no folder was kept.
+func assertPreviousFolderRemoved(t *testing.T, w *Worker, store *fakeWorkerStore, c previousCase, dir, log string) {
+	t.Helper()
+	if rec := onlyRecord(t, store); rec.outputDir != c.placedIn(w) {
+		t.Errorf("recorded %q, want %q", rec.outputDir, c.placedIn(w))
+	}
+	assertExist(t, false, dir)
+	if c.gone != nil {
+		assertExist(t, false, c.gone(w)...)
+	}
+	if strings.Contains(log, "left its previous folder") {
+		t.Errorf("log %q says a folder was kept", log)
 	}
 }
 

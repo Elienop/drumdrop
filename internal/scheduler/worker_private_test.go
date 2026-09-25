@@ -170,55 +170,83 @@ func assertNothingOfTheDownload(t *testing.T, w *Worker) {
 // which goes whole. The worker never removes a kept file for a delete either:
 // removing the lesson's files is the delete's own work.
 func TestWorkerStoppedReDownloadKeepsTheEarlierDownload(t *testing.T) {
+	forEachSetupLayout(t, func(t *testing.T, setup, layout string) {
+		for _, stop := range []string{"failure", "skip", "delete", "keep", "cancel", "shutdown"} {
+			t.Run(stop, func(t *testing.T) {
+				checkStoppedReDownloadKeepsTheEarlierDownload(t, setup, layout, stop)
+			})
+		}
+	})
+}
+
+// forEachSetupLayout runs run as the subtest "<setup>/layout=<layout>" for
+// every setup and layout a lesson can be placed in (plex-tv needs a library,
+// so not "none").
+func forEachSetupLayout(t *testing.T, run func(t *testing.T, setup, layout string)) {
+	t.Helper()
 	for _, setup := range setups {
 		for _, layout := range []string{"", LayoutPlexTV} {
 			if setup == "none" && layout == LayoutPlexTV {
 				continue // plex-tv needs a library
 			}
-			for _, stop := range []string{"failure", "skip", "delete", "keep", "cancel", "shutdown"} {
-				t.Run(fmt.Sprintf("%s/layout=%s/%s", setup, layout, stop), func(t *testing.T) {
-					w, store, dl := setupWorker(t, setup, layout)
-					w.Cfg.MaxAttempts = 2
-					e := seedEarlier(t, w, store)
-					ctx, shutdown := context.WithCancel(context.Background())
-					defer shutdown()
-					kill := func(set map[int64]bool) func() {
-						return func() {
-							if set != nil {
-								set[1] = true
-							}
-							w.CancelRunning(1)
-						}
-					}
-					store.skipped, store.gone, store.kept = map[int64]bool{}, map[int64]bool{}, map[int64]bool{}
-					switch stop {
-					case "failure":
-						dl.fail = true
-					case "skip":
-						dl.during = kill(store.skipped)
-					case "delete":
-						dl.during = kill(store.gone)
-					case "keep":
-						dl.during = kill(store.kept)
-					case "cancel":
-						dl.during = kill(nil)
-					case "shutdown":
-						dl.during = shutdown
-					}
-					if _, err := w.RunOnce(ctx, 0); err != nil {
-						t.Fatalf("RunOnce: %v", err)
-					}
-					if len(store.markDownloaded) != 0 {
-						t.Errorf("recorded %+v, want nothing", store.markDownloaded)
-					}
-					if stop == "failure" && dl.calls != 2 {
-						t.Errorf("attempts = %d, want 2", dl.calls)
-					}
-					assertSeeded(t, e.dir, e.names...)
-					assertNothingOfTheDownload(t, w)
-				})
-			}
+			t.Run(fmt.Sprintf("%s/layout=%s", setup, layout), func(t *testing.T) {
+				run(t, setup, layout)
+			})
 		}
+	}
+}
+
+// checkStoppedReDownloadKeepsTheEarlierDownload is
+// TestWorkerStoppedReDownloadKeepsTheEarlierDownload in setup and layout,
+// for the re-download stopped as stop says (stopMidDownload).
+func checkStoppedReDownloadKeepsTheEarlierDownload(t *testing.T, setup, layout, stop string) {
+	t.Helper()
+	w, store, dl := setupWorker(t, setup, layout)
+	w.Cfg.MaxAttempts = 2
+	e := seedEarlier(t, w, store)
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	stopMidDownload(w, store, dl, stop, shutdown)
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.markDownloaded) != 0 {
+		t.Errorf("recorded %+v, want nothing", store.markDownloaded)
+	}
+	if stop == "failure" && dl.calls != 2 {
+		t.Errorf("attempts = %d, want 2", dl.calls)
+	}
+	assertSeeded(t, e.dir, e.names...)
+	assertNothingOfTheDownload(t, w)
+}
+
+// stopMidDownload makes the re-download dl stop as stop says: every attempt
+// fails ("failure"), or, mid-download, a Skip ("skip"), a delete that removes
+// the lesson's files ("delete") or keeps them ("keep"), a Cancel ("cancel"),
+// or a shutdown (shutdown, "shutdown") kills it.
+func stopMidDownload(w *Worker, store *fakeWorkerStore, dl *forceOverwriter, stop string, shutdown func()) {
+	kill := func(set map[int64]bool) func() {
+		return func() {
+			if set != nil {
+				set[1] = true
+			}
+			w.CancelRunning(1)
+		}
+	}
+	store.skipped, store.gone, store.kept = map[int64]bool{}, map[int64]bool{}, map[int64]bool{}
+	switch stop {
+	case "failure":
+		dl.fail = true
+	case "skip":
+		dl.during = kill(store.skipped)
+	case "delete":
+		dl.during = kill(store.gone)
+	case "keep":
+		dl.during = kill(store.kept)
+	case "cancel":
+		dl.during = kill(nil)
+	case "shutdown":
+		dl.during = shutdown
 	}
 }
 
@@ -237,60 +265,57 @@ func TestWorkerStoppedReDownloadKeepsTheEarlierDownload(t *testing.T) {
 // because the download does not bring back its f.pdf (owner ruling
 // 2026-09-24 (e)).
 func TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T) {
-	for _, setup := range setups {
-		for _, layout := range []string{"", LayoutPlexTV} {
-			if setup == "none" && layout == LayoutPlexTV {
-				continue
+	forEachSetupLayout(t, func(t *testing.T, setup, layout string) {
+		for _, recorded := range []bool{true, false} {
+			for _, stop := range []string{"skip", "keep", "delete", "unrecorded", "requeued"} {
+				t.Run(fmt.Sprintf("recorded=%v/%s", recorded, stop), func(t *testing.T) {
+					checkStopDuringThePlacementPutsTheEarlierFilesBack(t, setup, layout, recorded, stop)
+				})
 			}
-			for _, recorded := range []bool{true, false} {
-				for _, stop := range []string{"skip", "keep", "delete", "unrecorded", "requeued"} {
-					t.Run(fmt.Sprintf("%s/layout=%s/recorded=%v/%s", setup, layout, recorded, stop), func(t *testing.T) {
-						w, store, _ := setupWorker(t, setup, layout)
-						w.Cfg.MaxAttempts = 1
-						var e earlier
-						if recorded {
-							e = seedEarlier(t, w, store)
-						} else {
-							e = seedUnrecorded(t, w)
-						}
-						store.skipped, store.gone, store.kept = map[int64]bool{}, map[int64]bool{}, map[int64]bool{}
-						store.onConfirm = func() {
-							switch stop {
-							case "skip":
-								store.skipped[1] = true
-							case "keep":
-								store.kept[1] = true
-							case "delete":
-								store.gone[1] = true
-							case "unrecorded":
-								store.finishErr = errors.New("disk I/O error")
-							case "requeued":
-								// Another process requeued the job: it runs again, and
-								// this placement must not stand.
-								store.finishErr = fmt.Errorf("job 1 is queued: %w", database.ErrDownloadCanceled)
-							}
-						}
-						if _, err := w.RunOnce(context.Background(), 0); err != nil {
-							t.Fatalf("RunOnce: %v", err)
-						}
-						if len(store.markDownloaded) != 0 {
-							t.Errorf("recorded %+v, want nothing", store.markDownloaded)
-						}
-						if recorded && stop == "delete" {
-							for _, n := range e.names {
-								if strings.HasSuffix(n, "/") {
-									assertSeeded(t, e.dir, n)
-								} else {
-									assertExist(t, false, paths(e.dir, n)...)
-								}
-							}
-						} else {
-							assertSeeded(t, e.dir, e.names...)
-						}
-						assertNothingOfTheDownload(t, w)
-					})
-				}
-			}
+		}
+	})
+}
+
+// checkStopDuringThePlacementPutsTheEarlierFilesBack is
+// TestWorkerStopDuringThePlacementPutsTheEarlierFilesBack in setup and
+// layout, over the lesson's earlier download (recorded) or an entry no lesson
+// records, for the placement stopped as stop says (stopAtConfirm).
+func checkStopDuringThePlacementPutsTheEarlierFilesBack(t *testing.T, setup, layout string, recorded bool, stop string) {
+	t.Helper()
+	w, store, _ := setupWorker(t, setup, layout)
+	w.Cfg.MaxAttempts = 1
+	var e earlier
+	if recorded {
+		e = seedEarlier(t, w, store)
+	} else {
+		e = seedUnrecorded(t, w)
+	}
+	stopAtConfirm(store, stop)
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.markDownloaded) != 0 {
+		t.Errorf("recorded %+v, want nothing", store.markDownloaded)
+	}
+	if recorded && stop == "delete" {
+		assertOnlyTheFoldersPutBack(t, e)
+	} else {
+		assertSeeded(t, e.dir, e.names...)
+	}
+	assertNothingOfTheDownload(t, w)
+}
+
+// assertOnlyTheFoldersPutBack fails unless every folder of the earlier
+// download e is as it was and every file of it is gone: a delete of the
+// lesson's files removes the lesson's own entries the placement set aside,
+// and a folder the placement merged into had nothing set aside.
+func assertOnlyTheFoldersPutBack(t *testing.T, e earlier) {
+	t.Helper()
+	for _, n := range e.names {
+		if strings.HasSuffix(n, "/") {
+			assertSeeded(t, e.dir, n)
+		} else {
+			assertExist(t, false, paths(e.dir, n)...)
 		}
 	}
 }
@@ -324,80 +349,108 @@ func seedUnrecorded(t *testing.T, w *Worker) earlier {
 // its f.pdf, so it stays where it is and the log says why (owner ruling
 // 2026-09-24 (e)).
 func TestWorkerReDownloadReplacesOnlyTheLessonsFiles(t *testing.T) {
-	for _, setup := range setups {
-		for _, layout := range []string{"", LayoutPlexTV} {
-			if setup == "none" && layout == LayoutPlexTV {
-				continue
-			}
-			t.Run(fmt.Sprintf("%s/layout=%s", setup, layout), func(t *testing.T) {
-				w, store, _ := setupWorker(t, setup, layout)
-				var log bytes.Buffer
-				w.Log = &log
-				e := seedEarlier(t, w, store)
-				// Beside it: a file of the owner's, and (plex-tv) another lesson's
-				// episode and an nfo at the placed name that no lesson records.
-				unrelated := []string{"notes.txt"}
-				var unclaimed string
-				video := filepath.Join(e.dir, "05 - Lesson A.mp4")
-				if layout == LayoutPlexTV {
-					unrelated = append(unrelated, "Beginner Course - s01e06 - Lesson B.mp4")
-					unclaimed = "Beginner Course - s01e05 - Lesson A.nfo"
-					seedSeason(t, e.dir, unclaimed)
-					store.withFiles = append(store.withFiles, recordedRow(6, e.dir, unrelated[1]))
-					video = filepath.Join(e.dir, "Beginner Course - s01e05 - Lesson A.mp4")
-				}
-				seedSeason(t, e.dir, unrelated...)
+	forEachSetupLayout(t, checkReDownloadReplacesOnlyTheLessonsFiles)
+}
 
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				rec := onlyRecord(t, store)
-				if rec.outputDir != e.dir || rec.videoPath != video {
-					t.Errorf("recorded %q / %q, want %q / %q", rec.outputDir, rec.videoPath, e.dir, video)
-				}
-				if got, err := os.ReadFile(video); err != nil || string(got) != "new mp4" {
-					t.Errorf("placed video = %q, %v; want the new download", got, err)
-				}
-				assertContent(t, e.dir, unrelated...)
-				replaced := paths(e.dir, e.names...)
-				if layout == LayoutPlexTV {
-					// The old title's video is gone, its resources folder is kept;
-					// the nfo no lesson recorded was replaced by the episode nfo.
-					replaced = replaced[:1]
-					assertExist(t, false, replaced...)
-					assertSeeded(t, e.dir, e.names[1])
-					want := fmt.Sprintf("⚠ 100 left its previous folder %q where it was, no longer recorded: the new download did not bring back \"f.pdf\"", paths(e.dir, e.names[1])[0])
-					if !strings.Contains(log.String(), want) {
-						t.Errorf("log %q does not say %s", log.String(), want)
-					}
-				} else {
-					replaced = paths(e.dir, "05 - Lesson A.mp4", "05 - Lesson A.nfo")
-					assertSeeded(t, e.dir, "resources/")
-					if got, err := os.ReadFile(filepath.Join(e.dir, "resources", "new.pdf")); err != nil || string(got) != "new pdf" {
-						t.Errorf("resources/new.pdf = %q, %v; want the new download's", got, err)
-					}
-					if strings.Contains(log.String(), "resources") {
-						t.Errorf("log %q says something in resources/ was replaced", log.String())
-					}
-				}
-				for _, p := range replaced {
-					if want := fmt.Sprintf("↻ 100 replaced %q (the lesson's earlier download)", p); !strings.Contains(log.String(), want) {
-						t.Errorf("log %q does not say %s", log.String(), want)
-					}
-				}
-				if unclaimed != "" {
-					want := fmt.Sprintf("↻ 100 replaced %q (which no lesson recorded)", filepath.Join(e.dir, unclaimed))
-					if !strings.Contains(log.String(), want) {
-						t.Errorf("log %q does not say %s", log.String(), want)
-					}
-				}
-				for _, root := range []string{w.Cfg.DownloadsDir, w.Cfg.LibraryDir} {
-					if root != "" {
-						assertExist(t, false, filepath.Join(root, privateRootName, replacedFolderName(1)))
-					}
-				}
-				assertExist(t, false, w.privateDir(1))
-			})
+// checkReDownloadReplacesOnlyTheLessonsFiles is
+// TestWorkerReDownloadReplacesOnlyTheLessonsFiles in setup and layout.
+func checkReDownloadReplacesOnlyTheLessonsFiles(t *testing.T, setup, layout string) {
+	t.Helper()
+	w, store, _ := setupWorker(t, setup, layout)
+	var log bytes.Buffer
+	w.Log = &log
+	e := seedEarlier(t, w, store)
+	unrelated, unclaimed, video := seedBesideTheEarlierDownload(t, store, e, layout)
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	rec := onlyRecord(t, store)
+	if rec.outputDir != e.dir || rec.videoPath != video {
+		t.Errorf("recorded %q / %q, want %q / %q", rec.outputDir, rec.videoPath, e.dir, video)
+	}
+	if got, err := os.ReadFile(video); err != nil || string(got) != "new mp4" {
+		t.Errorf("placed video = %q, %v; want the new download", got, err)
+	}
+	assertContent(t, e.dir, unrelated...)
+	var replaced []string
+	if layout == LayoutPlexTV {
+		replaced = assertOldTitlesVideoGoneItsFolderKept(t, e, log.String())
+	} else {
+		replaced = assertResourcesMergedNothingInThemReplaced(t, e, log.String())
+	}
+	assertReplacedLogged(t, log.String(), replaced, e.dir, unclaimed)
+	assertNoReplacedArea(t, w)
+	assertExist(t, false, w.privateDir(1))
+}
+
+// seedBesideTheEarlierDownload writes, beside the earlier download e, a file
+// of the owner's and (plex-tv) another lesson's episode, recorded as lesson
+// 6's, and an nfo at the placed name that no lesson records (unclaimed). It
+// returns the entries that must stay as they are (unrelated), the unclaimed
+// nfo ("" in the default layout), and the path the re-download's video is
+// placed at.
+func seedBesideTheEarlierDownload(t *testing.T, store *fakeWorkerStore, e earlier, layout string) (unrelated []string, unclaimed, video string) {
+	t.Helper()
+	unrelated = []string{"notes.txt"}
+	video = filepath.Join(e.dir, "05 - Lesson A.mp4")
+	if layout == LayoutPlexTV {
+		unrelated = append(unrelated, "Beginner Course - s01e06 - Lesson B.mp4")
+		unclaimed = "Beginner Course - s01e05 - Lesson A.nfo"
+		seedSeason(t, e.dir, unclaimed)
+		store.withFiles = append(store.withFiles, recordedRow(6, e.dir, unrelated[1]))
+		video = filepath.Join(e.dir, "Beginner Course - s01e05 - Lesson A.mp4")
+	}
+	seedSeason(t, e.dir, unrelated...)
+	return unrelated, unclaimed, video
+}
+
+// assertOldTitlesVideoGoneItsFolderKept fails unless, in plex-tv, the earlier
+// download's video under its old title is gone and its resources folder,
+// whose f.pdf the re-download does not bring back, is kept, and the log says
+// why. It returns what was replaced: the old title's video.
+func assertOldTitlesVideoGoneItsFolderKept(t *testing.T, e earlier, log string) []string {
+	t.Helper()
+	replaced := paths(e.dir, e.names...)[:1]
+	assertExist(t, false, replaced...)
+	assertSeeded(t, e.dir, e.names[1])
+	want := fmt.Sprintf("⚠ 100 left its previous folder %q where it was, no longer recorded: the new download did not bring back \"f.pdf\"", paths(e.dir, e.names[1])[0])
+	if !strings.Contains(log, want) {
+		t.Errorf("log %q does not say %s", log, want)
+	}
+	return replaced
+}
+
+// assertResourcesMergedNothingInThemReplaced fails unless, in the default
+// layout, the earlier resources/ folder keeps its file beside the new
+// download's new.pdf, and the log says nothing in it was replaced. It
+// returns what was replaced: the earlier video and nfo.
+func assertResourcesMergedNothingInThemReplaced(t *testing.T, e earlier, log string) []string {
+	t.Helper()
+	assertSeeded(t, e.dir, "resources/")
+	if got, err := os.ReadFile(filepath.Join(e.dir, "resources", "new.pdf")); err != nil || string(got) != "new pdf" {
+		t.Errorf("resources/new.pdf = %q, %v; want the new download's", got, err)
+	}
+	if strings.Contains(log, "resources") {
+		t.Errorf("log %q says something in resources/ was replaced", log)
+	}
+	return paths(e.dir, "05 - Lesson A.mp4", "05 - Lesson A.nfo")
+}
+
+// assertReplacedLogged fails unless the log says each of replaced was
+// replaced as the lesson's earlier download, and the unclaimed entry in dir
+// (when there is one) as one no lesson recorded.
+func assertReplacedLogged(t *testing.T, log string, replaced []string, dir, unclaimed string) {
+	t.Helper()
+	for _, p := range replaced {
+		if want := fmt.Sprintf("↻ 100 replaced %q (the lesson's earlier download)", p); !strings.Contains(log, want) {
+			t.Errorf("log %q does not say %s", log, want)
+		}
+	}
+	if unclaimed != "" {
+		want := fmt.Sprintf("↻ 100 replaced %q (which no lesson recorded)", filepath.Join(dir, unclaimed))
+		if !strings.Contains(log, want) {
+			t.Errorf("log %q does not say %s", log, want)
 		}
 	}
 }
@@ -561,35 +614,44 @@ func TestWorkerShutdownAfterTheDownloadFinishedStillRecordsIt(t *testing.T) {
 func TestWorkerShutdownAfterResolveIsNotAFailure(t *testing.T) {
 	for _, where := range []string{"follow", "row", "claims"} {
 		t.Run(where, func(t *testing.T) {
-			w, store, dl, _, _ := plexWorker(t)
-			ctx, shutdown := context.WithCancel(context.Background())
-			defer shutdown()
-			w.Resolver = hookResolver{fakeResolver: w.Resolver.(fakeResolver), before: shutdown}
-			switch where {
-			case "follow":
-				store.getFollowErr = context.Canceled
-			case "row":
-				store.getLessonErr = context.Canceled
-			default:
-				store.withFilesErr = context.Canceled
-			}
-			sink := &recordingSink{}
-			w.Progress = sink
-			if _, err := w.RunOnce(ctx, 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 || len(dl.calls) != 0 {
-				t.Errorf("failed %v/%v, downloads %d; want no failure and no download", store.markFailed, store.markJobFailed, len(dl.calls))
-			}
-			if got := store.jobs[1].Status; got != database.JobRunning {
-				t.Errorf("job status = %q, want running", got)
-			}
-			assertEndsOnce(t, sink, 1)
-			for _, e := range sink.snapshot() {
-				if e.Kind == "lesson_skipped" && e.Err != msgShutdown {
-					t.Errorf("end reported as %q, want the shutdown sentence", e.Err)
-				}
-			}
+			checkShutdownAfterResolveIsNotAFailure(t, where)
 		})
+	}
+}
+
+// checkShutdownAfterResolveIsNotAFailure is
+// TestWorkerShutdownAfterResolveIsNotAFailure for the read that fails with
+// the dead context: the follow's, the row's, or the other lessons' files
+// (where).
+func checkShutdownAfterResolveIsNotAFailure(t *testing.T, where string) {
+	t.Helper()
+	w, store, dl, _, _ := plexWorker(t)
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	w.Resolver = hookResolver{fakeResolver: w.Resolver.(fakeResolver), before: shutdown}
+	switch where {
+	case "follow":
+		store.getFollowErr = context.Canceled
+	case "row":
+		store.getLessonErr = context.Canceled
+	default:
+		store.withFilesErr = context.Canceled
+	}
+	sink := &recordingSink{}
+	w.Progress = sink
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.markFailed) != 0 || len(store.markJobFailed) != 0 || len(dl.calls) != 0 {
+		t.Errorf("failed %v/%v, downloads %d; want no failure and no download", store.markFailed, store.markJobFailed, len(dl.calls))
+	}
+	if got := store.jobs[1].Status; got != database.JobRunning {
+		t.Errorf("job status = %q, want running", got)
+	}
+	assertEndsOnce(t, sink, 1)
+	for _, e := range sink.snapshot() {
+		if e.Kind == "lesson_skipped" && e.Err != msgShutdown {
+			t.Errorf("end reported as %q, want the shutdown sentence", e.Err)
+		}
 	}
 }

@@ -57,37 +57,46 @@ func TestWorkerKeepsWhatTheLessonFolderHeldBefore(t *testing.T) {
 	for _, lib := range []string{"none", "downloads", "separate"} {
 		for _, stop := range []string{"failure", "skip"} {
 			t.Run(lib+"/"+stop, func(t *testing.T) {
-				w, store, _, _, _ := plexWorker(t)
-				w.Cfg.Layout = ""
-				switch lib {
-				case "none":
-					w.Cfg.LibraryDir = ""
-				case "downloads":
-					w.Cfg.LibraryDir = w.Cfg.DownloadsDir
-				}
-				w.Cfg.MaxAttempts = 2
-				scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-				seedSeason(t, scratch, kept...)
-				dl := &scratchWriter{}
-				if stop == "skip" {
-					store.skipped = map[int64]bool{}
-					dl.during = func() {
-						store.skipped[1] = true // the Skip removed the job, then killed the download
-						w.CancelRunning(1)
-					}
-				}
-				w.Downloader = dl
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				if stop == "failure" && (dl.calls != 2 || len(store.markFailed) != 1) {
-					t.Errorf("attempts %d, failed %v; want 2 attempts and the lesson failed", dl.calls, store.markFailed)
-				}
-				assertContent(t, scratch, kept...)
-				assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"))
+				checkKeepsWhatTheLessonFolderHeldBefore(t, lib, stop, kept)
 			})
 		}
 	}
+}
+
+// checkKeepsWhatTheLessonFolderHeldBefore is
+// TestWorkerKeepsWhatTheLessonFolderHeldBefore with no library, the library
+// the downloads folder, or a separate one (lib), for a download that fails
+// every attempt or that a Skip stops (stop), the lesson folder holding kept.
+func checkKeepsWhatTheLessonFolderHeldBefore(t *testing.T, lib, stop string, kept []string) {
+	t.Helper()
+	w, store, _, _, _ := plexWorker(t)
+	w.Cfg.Layout = ""
+	switch lib {
+	case "none":
+		w.Cfg.LibraryDir = ""
+	case "downloads":
+		w.Cfg.LibraryDir = w.Cfg.DownloadsDir
+	}
+	w.Cfg.MaxAttempts = 2
+	scratch := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	seedSeason(t, scratch, kept...)
+	dl := &scratchWriter{}
+	if stop == "skip" {
+		store.skipped = map[int64]bool{}
+		dl.during = func() {
+			store.skipped[1] = true // the Skip removed the job, then killed the download
+			w.CancelRunning(1)
+		}
+	}
+	w.Downloader = dl
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if stop == "failure" && (dl.calls != 2 || len(store.markFailed) != 1) {
+		t.Errorf("attempts %d, failed %v; want 2 attempts and the lesson failed", dl.calls, store.markFailed)
+	}
+	assertContent(t, scratch, kept...)
+	assertExist(t, false, filepath.Join(scratch, "05 - Lesson A.f137.mp4.part"))
 }
 
 // findContent reports the path of a regular file under root whose content is

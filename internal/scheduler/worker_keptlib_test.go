@@ -70,50 +70,73 @@ func assertRefusedAs(t *testing.T, w *Worker, store *fakeWorkerStore, f failure)
 // earlier layout switch (a plex-tv row the default layout placed:
 // FinishDownload leaves its record as it is).
 func TestWorkerPlexTvRefusedMoveKeepsAFolderTheDefaultLayoutPlaced(t *testing.T) {
-	old := "Beginner Course - s01e05 - Old Title.nfo"
 	for _, how := range []string{"another lesson claims its name", "the placement fails"} {
 		for _, extra := range []bool{false, true} {
 			for _, recorded := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/owner's file=%v/recorded=%v", how, extra, recorded), func(t *testing.T) {
-					w, store, _, lib, season := plexWorker(t)
-					dir := filepath.Join(lib, "Beginner Course", "05 - Lesson A")
-					files := map[string]string{"05 - Lesson A.mp4": "old mp4", "05 - Lesson A.nfo": "old nfo"}
-					if extra {
-						files["notes.txt"] = "owner notes"
-					}
-					writeTree(t, dir, files)
-					prev := database.Lesson{
-						RailcontentID: 100, Status: database.StatusDownloaded,
-						Position:  sql.NullInt64{Int64: 5, Valid: true},
-						OutputDir: sql.NullString{String: dir, Valid: true},
-						VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
-					}
-					if recorded {
-						seedSeason(t, season, old)
-						prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, old))
-					}
-					store.lessons[100] = prev
-					store.withFiles = []database.Lesson{prev}
-					if how == "the placement fails" {
-						refuseIntoSeason(t, lib, season)
-					} else {
-						base := "Beginner Course - s01e05 - Lesson A"
-						seedSeason(t, season, base+".mp4")
-						store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
-					}
-
-					if _, err := w.RunOnce(context.Background(), 0); err != nil {
-						t.Fatalf("RunOnce: %v", err)
-					}
-					assertTree(t, dir, files)
-					assertKeptInLibrary(t, w, store)
-					if recorded {
-						assertContent(t, season, old)
-					}
+					checkPlexTvRefusedMoveKeepsADefaultLayoutFolder(t, how, extra, recorded)
 				})
 			}
 		}
 	}
+}
+
+// checkPlexTvRefusedMoveKeepsADefaultLayoutFolder is
+// TestWorkerPlexTvRefusedMoveKeepsAFolderTheDefaultLayoutPlaced for a move
+// refused as how says, the folder holding a file of the owner's (extra), the
+// row recording season-folder entries too (recorded).
+func checkPlexTvRefusedMoveKeepsADefaultLayoutFolder(t *testing.T, how string, extra, recorded bool) {
+	t.Helper()
+	old := "Beginner Course - s01e05 - Old Title.nfo"
+	w, store, _, lib, season := plexWorker(t)
+	dir := filepath.Join(lib, "Beginner Course", "05 - Lesson A")
+	files := map[string]string{"05 - Lesson A.mp4": "old mp4", "05 - Lesson A.nfo": "old nfo"}
+	if extra {
+		files["notes.txt"] = "owner notes"
+	}
+	writeTree(t, dir, files)
+	prev := lessonARowIn(dir)
+	if recorded {
+		seedSeason(t, season, old)
+		prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, old))
+	}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+	if how == "the placement fails" {
+		refuseIntoSeason(t, lib, season)
+	} else {
+		claimTheEpisodeAs200(t, store, season)
+	}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertTree(t, dir, files)
+	assertKeptInLibrary(t, w, store)
+	if recorded {
+		assertContent(t, season, old)
+	}
+}
+
+// lessonARowIn is lesson 100's row ("Lesson A", position 5, downloaded) as
+// the default layout records it in its lesson folder dir, its video there.
+func lessonARowIn(dir string) database.Lesson {
+	return database.Lesson{
+		RailcontentID: 100, Status: database.StatusDownloaded,
+		Position:  sql.NullInt64{Int64: 5, Valid: true},
+		OutputDir: sql.NullString{String: dir, Valid: true},
+		VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
+	}
+}
+
+// claimTheEpisodeAs200 puts the video at lesson 100's episode name in
+// season, recorded by lesson 200, so the plex-tv move of lesson 100 is
+// refused.
+func claimTheEpisodeAs200(t *testing.T, store *fakeWorkerStore, season string) {
+	t.Helper()
+	base := "Beginner Course - s01e05 - Lesson A"
+	seedSeason(t, season, base+".mp4")
+	store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
 }
 
 // TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeItCanNotName proves a legacy
@@ -298,56 +321,67 @@ func TestWorkerPlexTvRefusedMoveOfALegacyRowRecordsWhatItOwns(t *testing.T) {
 // files stayed behind in a folder the library setting no longer points at
 // (failLeftBehind, owner ruling 2026-09-24 (y)).
 func TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T) {
-	base := "Beginner Course - s01e05 - Lesson A"
-	names := []string{base + ".mp4", base + ".nfo"}
-	for _, c := range []struct {
-		where    string
-		recorded bool
-	}{
+	for _, c := range []seasonRowCase{
 		{"the downloads folder beside the library", true},
 		{"the downloads folder beside the library", false},
 		{dlMovedUp, false},
 		{dlMovedUp, true},
 	} {
 		t.Run(fmt.Sprintf("%s/recorded=%v", c.where, c.recorded), func(t *testing.T) {
-			w, store, _, lib, season := plexWorker(t)
-			w.Cfg.Layout = ""
-			var log bytes.Buffer
-			w.Log = &log
-			if c.where == dlMovedUp {
-				placeDownloads(t, w, lib, c.where)
-			}
-			rowSeason := movedUpSeason(w, c.where, season)
-			seedSeason(t, rowSeason, names...)
-			prev := legacyRow(100, "Lesson A", 5, rowSeason, names[0])
-			if c.recorded {
-				prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, names...))
-			}
-			store.lessons[100] = prev
-			store.withFiles = []database.Lesson{prev}
-			refuseFromJobInto(t, w, filepath.Join(lib, "Beginner Course", "05 - Lesson A"))
-
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			assertContent(t, rowSeason, names...)
-			if c.where == dlMovedUp {
-				assertRefusedAs(t, w, store, failLeftBehind)
-				return
-			}
-			if !c.recorded {
-				assertKeptInLibrary(t, w, store)
-				return
-			}
-			rec := onlyRecord(t, store)
-			want := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-			if rec.outputDir != want || rec.entries != nil {
-				t.Errorf("record = %+v, want the downloads folder %q and the library record left as it is (nil)", rec, want)
-			}
-			if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", want)) {
-				t.Errorf("log %q does not say where the lesson was kept", log.String())
-			}
+			checkDefaultLayoutRefusedPlacementOfASeasonFolderRow(t, c)
 		})
+	}
+}
+
+// seasonRowCase is where a season-folder row's library is (where), and
+// whether the row records its entries (recorded).
+type seasonRowCase struct {
+	where    string
+	recorded bool
+}
+
+// checkDefaultLayoutRefusedPlacementOfASeasonFolderRow is one case of
+// TestWorkerDefaultLayoutRefusedPlacementOfASeasonFolderRow.
+func checkDefaultLayoutRefusedPlacementOfASeasonFolderRow(t *testing.T, c seasonRowCase) {
+	t.Helper()
+	base := "Beginner Course - s01e05 - Lesson A"
+	names := []string{base + ".mp4", base + ".nfo"}
+	w, store, _, lib, season := plexWorker(t)
+	w.Cfg.Layout = ""
+	var log bytes.Buffer
+	w.Log = &log
+	if c.where == dlMovedUp {
+		placeDownloads(t, w, lib, c.where)
+	}
+	rowSeason := movedUpSeason(w, c.where, season)
+	seedSeason(t, rowSeason, names...)
+	prev := legacyRow(100, "Lesson A", 5, rowSeason, names[0])
+	if c.recorded {
+		prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(season, names...))
+	}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+	refuseFromJobInto(t, w, filepath.Join(lib, "Beginner Course", "05 - Lesson A"))
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, rowSeason, names...)
+	if c.where == dlMovedUp {
+		assertRefusedAs(t, w, store, failLeftBehind)
+		return
+	}
+	if !c.recorded {
+		assertKeptInLibrary(t, w, store)
+		return
+	}
+	rec := onlyRecord(t, store)
+	want := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	if rec.outputDir != want || rec.entries != nil {
+		t.Errorf("record = %+v, want the downloads folder %q and the library record left as it is (nil)", rec, want)
+	}
+	if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", want)) {
+		t.Errorf("log %q does not say where the lesson was kept", log.String())
 	}
 }
 
@@ -422,10 +456,7 @@ func placeDownloads(t *testing.T, w *Worker, lib, where string) string {
 // through a symlink), and when the recorded folder has been deleted since
 // (code round 5e L2: only the spelling half of recordsFolder can say so).
 func TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder(t *testing.T) {
-	for _, c := range []struct {
-		name, layout, where string
-		missing             bool // the recorded folder has been deleted
-	}{
+	for _, c := range []ownFolderFallbackCase{
 		{"plex-tv", LayoutPlexTV, dlIsLibrary, false},
 		{"plex-tv", LayoutPlexTV, dlInLibrary, false},
 		{"default", "", dlInLibrary, false},
@@ -436,68 +467,97 @@ func TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder(t *testin
 	} {
 		for _, how := range []string{"another lesson claims its place", "the placement fails"} {
 			t.Run(c.name+", "+c.where+"/"+how, func(t *testing.T) {
-				w, store, dl, lib, season := plexWorker(t)
-				w.Cfg.Layout = c.layout
-				var log bytes.Buffer
-				w.Log = &log
-				dir := placeDownloads(t, w, lib, c.where)
-				fallback := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
-				if !c.missing {
-					writeTree(t, dir, map[string]string{"05 - Lesson A.mp4": "old mp4", "notes.txt": "owner notes"})
-				}
-				prev := database.Lesson{
-					RailcontentID: 100, Status: database.StatusDownloaded,
-					Position:  sql.NullInt64{Int64: 5, Valid: true},
-					OutputDir: sql.NullString{String: dir, Valid: true},
-					VideoPath: sql.NullString{String: filepath.Join(dir, "05 - Lesson A.mp4"), Valid: true},
-				}
-				store.lessons[100] = prev
-				store.withFiles = []database.Lesson{prev}
-				// Where the library placement goes: the season folder, or the
-				// lesson's folder in the library proper.
-				target := season
-				if c.layout == "" {
-					target = filepath.Join(lib, "Beginner Course", "05 - Lesson A")
-				}
-				switch {
-				case how == "the placement fails":
-					refuseFromJobInto(t, w, target)
-				case c.layout == LayoutPlexTV:
-					base := "Beginner Course - s01e05 - Lesson A"
-					seedSeason(t, season, base+".mp4")
-					store.withFiles = append(store.withFiles, recordedRow(200, season, base+".mp4"))
-				default:
-					writeTree(t, target, map[string]string{"05 - Lesson A.mp4": "lesson 200"})
-					store.withFiles = append(store.withFiles, database.Lesson{
-						RailcontentID: 200, Status: database.StatusDownloaded,
-						OutputDir: sql.NullString{String: target, Valid: true},
-						VideoPath: sql.NullString{String: filepath.Join(target, "05 - Lesson A.mp4"), Valid: true},
-					})
-				}
-
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				if len(dl.calls) != 1 || len(store.markFailed) != 0 {
-					t.Fatalf("downloads %d, failed %v; want one download, recorded (log %q)", len(dl.calls), store.markFailed, log.String())
-				}
-				// Recorded as the downloads folder spells it; on disk, the
-				// lesson's own folder (the same one: see placeDownloads).
-				rec := onlyRecord(t, store)
-				if rec.outputDir != fallback || rec.videoPath != filepath.Join(fallback, "05 - Lesson A.mp4") {
-					t.Errorf("recorded %q, video %q; want the lesson's own folder %q", rec.outputDir, rec.videoPath, fallback)
-				}
-				if got, err := os.ReadFile(filepath.Join(dir, "05 - Lesson A.mp4")); err != nil || string(got) != "new mp4" {
-					t.Errorf("video = %q, %v; want the new download", got, err)
-				}
-				if got, err := os.ReadFile(filepath.Join(dir, "notes.txt")); !c.missing && (err != nil || string(got) != "owner notes") {
-					t.Errorf("notes.txt = %q, %v; want the owner's file kept", got, err)
-				}
-				if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", fallback)) {
-					t.Errorf("log %q does not say where the lesson was kept", log.String())
-				}
-				assertNoReplacedArea(t, w)
+				checkRefusedPlacementFallsBackIntoTheLessonsOwnFolder(t, c, how)
 			})
 		}
+	}
+}
+
+// ownFolderFallbackCase is a layout, and where the downloads folder is
+// against the library (placeDownloads), for a lesson whose row records the
+// downloads fallback as its folder.
+type ownFolderFallbackCase struct {
+	name, layout, where string
+	missing             bool // the recorded folder has been deleted
+}
+
+// checkRefusedPlacementFallsBackIntoTheLessonsOwnFolder is one case of
+// TestWorkerRefusedLibraryPlacementFallsBackIntoTheLessonsOwnFolder, the
+// library placement refused as how says.
+func checkRefusedPlacementFallsBackIntoTheLessonsOwnFolder(t *testing.T, c ownFolderFallbackCase, how string) {
+	t.Helper()
+	w, store, dl, lib, season := plexWorker(t)
+	w.Cfg.Layout = c.layout
+	var log bytes.Buffer
+	w.Log = &log
+	dir := placeDownloads(t, w, lib, c.where)
+	fallback := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	if !c.missing {
+		writeTree(t, dir, map[string]string{"05 - Lesson A.mp4": "old mp4", "notes.txt": "owner notes"})
+	}
+	prev := lessonARowIn(dir)
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+	failLibraryPlacement(t, w, store, how, c.layout, season, lessonATarget(lib, c.layout, season))
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(dl.calls) != 1 || len(store.markFailed) != 0 {
+		t.Fatalf("downloads %d, failed %v; want one download, recorded (log %q)", len(dl.calls), store.markFailed, log.String())
+	}
+	// Recorded as the downloads folder spells it; on disk, the
+	// lesson's own folder (the same one: see placeDownloads).
+	rec := onlyRecord(t, store)
+	if rec.outputDir != fallback || rec.videoPath != filepath.Join(fallback, "05 - Lesson A.mp4") {
+		t.Errorf("recorded %q, video %q; want the lesson's own folder %q", rec.outputDir, rec.videoPath, fallback)
+	}
+	assertNewVideoBesideTheOwnersNotes(t, dir, c.missing)
+	if !strings.Contains(log.String(), fmt.Sprintf("⚠ 100 is kept in downloads at %q", fallback)) {
+		t.Errorf("log %q does not say where the lesson was kept", log.String())
+	}
+	assertNoReplacedArea(t, w)
+}
+
+// lessonATarget is where lesson 100's library placement goes in layout: the
+// season folder season (plex-tv), or the lesson's folder in the library lib.
+func lessonATarget(lib, layout, season string) string {
+	if layout == "" {
+		return filepath.Join(lib, "Beginner Course", "05 - Lesson A")
+	}
+	return season
+}
+
+// failLibraryPlacement makes lesson 100's library placement at target (in
+// layout) fail as how says: its renames into target are refused ("the
+// placement fails"), or lesson 200 records what is at its place, the
+// episode's video in season (plex-tv) or the lesson folder target.
+func failLibraryPlacement(t *testing.T, w *Worker, store *fakeWorkerStore, how, layout, season, target string) {
+	t.Helper()
+	switch {
+	case how == "the placement fails":
+		refuseFromJobInto(t, w, target)
+	case layout == LayoutPlexTV:
+		claimTheEpisodeAs200(t, store, season)
+	default:
+		writeTree(t, target, map[string]string{"05 - Lesson A.mp4": "lesson 200"})
+		store.withFiles = append(store.withFiles, database.Lesson{
+			RailcontentID: 200, Status: database.StatusDownloaded,
+			OutputDir: sql.NullString{String: target, Valid: true},
+			VideoPath: sql.NullString{String: filepath.Join(target, "05 - Lesson A.mp4"), Valid: true},
+		})
+	}
+}
+
+// assertNewVideoBesideTheOwnersNotes fails unless the lesson folder dir holds
+// the new download's video and, unless the folder had been deleted
+// (missing), the owner's notes.txt as it was.
+func assertNewVideoBesideTheOwnersNotes(t *testing.T, dir string, missing bool) {
+	t.Helper()
+	if got, err := os.ReadFile(filepath.Join(dir, "05 - Lesson A.mp4")); err != nil || string(got) != "new mp4" {
+		t.Errorf("video = %q, %v; want the new download", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "notes.txt")); !missing && (err != nil || string(got) != "owner notes") {
+		t.Errorf("notes.txt = %q, %v; want the owner's file kept", got, err)
 	}
 }
