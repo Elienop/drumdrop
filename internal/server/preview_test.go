@@ -9,21 +9,34 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/musora"
+)
+
+// The session cookie stubAuth issues on /sessions and requires on /me.
+const (
+	stubSessionCookieName  = "musora_platform_backend_session"
+	stubSessionCookieValue = "tok"
 )
 
 // stubAuth points the musora auth endpoint (AuthBase) at a test server that
 // returns status for /me and /sessions, restoring the real base when the test
 // ends. It keeps the session handlers hermetic — Me/Login never touch the live
 // network. The session cookie name musora.Login looks for is set on the
-// /sessions response so a 200 yields a usable cookie.
+// /sessions response so a 200 yields a usable cookie, and /me answers status
+// only to a request carrying that cookie: without it, 401, as Musora answers
+// a request with no session.
 func stubAuth(t *testing.T, status int) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/sessions") {
-			http.SetCookie(w, &http.Cookie{Name: "musora_platform_backend_session", Value: "tok"})
+			http.SetCookie(w, &http.Cookie{Name: stubSessionCookieName, Value: stubSessionCookieValue})
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(`{"user":{"id":1}}`))
+			return
+		}
+		if c, err := r.Cookie(stubSessionCookieName); err != nil || c.Value != stubSessionCookieValue {
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		w.WriteHeader(status)
@@ -133,8 +146,22 @@ func TestPreviewInstructorUnknown(t *testing.T) {
 	}
 }
 
-func TestSessionGetConnected(t *testing.T) {
+// saveStubSession writes the stub's session into a throwaway config folder, as
+// musora.Login saves one: "name=value" in session.cookie, mode 0600. The
+// session GET must read it from there and send it to /me.
+func saveStubSession(t *testing.T) {
+	t.Helper()
 	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir()) // never read the real session.cookie
+	cookie := stubSessionCookieName + "=" + stubSessionCookieValue
+	if err := os.WriteFile(config.CookiePath(), []byte(cookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSessionGetConnected proves the saved session is sent, and that Musora
+// accepting it reads as connected: the stub's /me refuses a request without it.
+func TestSessionGetConnected(t *testing.T) {
+	saveStubSession(t)
 	stubAuth(t, http.StatusOK)
 	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
 
@@ -154,8 +181,10 @@ func TestSessionGetConnected(t *testing.T) {
 	}
 }
 
+// TestSessionGetDisconnected proves that Musora refusing the saved session
+// (a 401 from /me, even with the cookie sent) reads as disconnected.
 func TestSessionGetDisconnected(t *testing.T) {
-	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir()) // never read the real session.cookie
+	saveStubSession(t)
 	stubAuth(t, http.StatusUnauthorized)
 	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
 
