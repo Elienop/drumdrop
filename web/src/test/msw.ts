@@ -93,7 +93,9 @@ export function sendEvent(event: Partial<ProgressEvent> & Pick<ProgressEvent, "k
   es.onmessage?.({ data: JSON.stringify(full) } as MessageEvent)
 }
 
-globalThis.EventSource ??= MockEventSource as unknown as typeof EventSource
+// Installed unconditionally, like the stubs in jsdom-shims.ts, so every Node
+// runs the tests against this one (a test may still stub its own over it).
+globalThis.EventSource = MockEventSource as unknown as typeof EventSource
 
 // renderWithProviders wraps the UI in the providers the pages rely on:
 // QueryClientProvider (fresh, retry-off so error states settle deterministically),
