@@ -732,6 +732,32 @@ func TestShowFilesWhenAFetchFails(t *testing.T) {
 			t.Errorf("the next cycle left %v in the song's show, want its poster and nfo", got)
 		}
 	})
+	t.Run("no scheme", func(t *testing.T) {
+		// The error the real client gives an image URL with no scheme (Musora
+		// writing its URLs another way): not final, and not out of reach.
+		_, noScheme := musora.FetchJPEG(context.Background(), "cdn.sanity.io/images/p/d/header-4500x4500.png")
+		if noScheme == nil {
+			t.Fatal("FetchJPEG fetched a URL with no scheme")
+		}
+		w, store, res, img, lib := backfillWorker(t)
+		first, second := twoShows(t, w, store, res, lib)
+		img.errs = map[string]error{artHeader: noScheme}
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
+			t.Errorf("show folder holds %v, want the background only (no tvshow.nfo)", got)
+		}
+		if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
+			t.Errorf("the next show holds %v, want its poster and nfo", got)
+		}
+		if w.showOffline() {
+			t.Error("the show-file step was stopped for the cycle")
+		}
+		img.errs = nil
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
+			t.Errorf("show folder holds %v after a later cycle, want all three", got)
+		}
+	})
 	t.Run("Musora out of reach", func(t *testing.T) {
 		w, store, res, _, lib := backfillWorker(t)
 		twoShows(t, w, store, res, lib)

@@ -26,25 +26,38 @@ const maxImageBytes = 16 << 20
 
 // ErrImageMissing is an image that is not there to fetch: the server says it
 // is gone (404, 410), it is too large, it is an image that could not be had
-// as JPEG, or its URL is one FetchJPEG never fetches (not https, or no host).
-// Asking again will not change the answer.
+// as JPEG, or its URL is one FetchJPEG never fetches (empty, not a URL, a
+// scheme other than https, or no host name). Asking again will not change
+// the answer.
 var ErrImageMissing = errors.New("the image is not available")
 
 // ErrUnreachable is an image server that could not be reached at all (no
 // connection, a timeout): every other fetch would fail the same way now.
 var ErrUnreachable = errors.New("the image server could not be reached")
 
-// JPEGURL is the URL that serves the image at u as JPEG bytes: a Sanity CDN
+// JPEGURL is the URL that serves the image at u as JPEG bytes: a
+// protocol-relative URL ("//host/path") is read as https, and a Sanity CDN
 // image URL gets fm=jpg (Sanity converts on request); any other URL is
 // returned unchanged, as nothing is known about converting it.
 func JPEGURL(u string) string {
 	p, err := url.Parse(u)
-	if err != nil || p.Host != sanityImageHost || !strings.HasPrefix(p.Path, "/images/") {
+	if err != nil {
 		return u
 	}
-	q := p.Query()
-	q.Set("fm", "jpg")
-	p.RawQuery = q.Encode()
+	changed := false
+	if p.Scheme == "" && p.Host != "" {
+		p.Scheme = "https"
+		changed = true
+	}
+	if p.Host == sanityImageHost && strings.HasPrefix(p.Path, "/images/") {
+		q := p.Query()
+		q.Set("fm", "jpg")
+		p.RawQuery = q.Encode()
+		changed = true
+	}
+	if !changed {
+		return u
+	}
 	return p.String()
 }
 
@@ -131,14 +144,23 @@ func ShowArt(doc *Lesson) (poster, fanart string) {
 //   - ErrUnreachable: the server could not be reached (so no other fetch can
 //     be now);
 //   - ErrImageMissing: the image is not there, too large, or an image that
-//     is not JPEG, or u is not an https URL with a host (asking again gives
-//     the same; checked before any request, since the client reports such a
-//     URL as it reports a server out of reach);
-//   - anything else (another status, a page that is not an image): try again
-//     later.
+//     is not JPEG, or u is empty, not a URL, of a scheme other than https,
+//     or has no host name (asking again gives the same; checked before any
+//     request, since the client reports such a URL as it reports a server
+//     out of reach);
+//   - anything else (another status, a page that is not an image, a URL with
+//     no scheme at all, which Musora changing how it writes image URLs would
+//     give, and a later drumdrop may read): try again later.
 func FetchJPEG(ctx context.Context, u string) ([]byte, error) {
 	ju := JPEGURL(u)
-	if p, err := url.Parse(ju); err != nil || p.Scheme != "https" || p.Host == "" {
+	p, err := url.Parse(ju)
+	switch {
+	case u == "" || err != nil:
+		return nil, fmt.Errorf("%w: %q is not a URL of an image", ErrImageMissing, u)
+	case p.Scheme == "":
+		// Never wraps a *url.Error: that reads as a server out of reach.
+		return nil, fmt.Errorf("%q has no scheme: not fetched, asked again later", u)
+	case p.Scheme != "https" || p.Hostname() == "":
 		return nil, fmt.Errorf("%w: %q is not an https URL of an image", ErrImageMissing, u)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ju, nil)

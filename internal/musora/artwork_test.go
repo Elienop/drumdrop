@@ -89,7 +89,8 @@ func TestLessonDecodesShowFields(t *testing.T) {
 }
 
 // TestJPEGURL proves a Sanity image is asked for as JPEG (fm=jpg, any query
-// it had kept) and any other URL is left as it is.
+// it had kept), a protocol-relative URL as https, and any other URL is left
+// as it is.
 func TestJPEGURL(t *testing.T) {
 	for in, want := range map[string]string{
 		sanityImage("abc", "1920x1080", "png"):                   sanityImage("abc", "1920x1080", "png") + "?fm=jpg",
@@ -97,7 +98,10 @@ func TestJPEGURL(t *testing.T) {
 		sanityImage("abc", "1920x1080", "png") + "?fm=png":       sanityImage("abc", "1920x1080", "png") + "?fm=jpg",
 		"https://i.vimeocdn.com/video/1-d_640.jpg":               "https://i.vimeocdn.com/video/1-d_640.jpg",
 		"https://cdn.sanity.io/files/4032r8py/production_v2/a.x": "https://cdn.sanity.io/files/4032r8py/production_v2/a.x",
-		"": "",
+		"//cdn.sanity.io/images/p/d/abc-10x10.png":               "https://cdn.sanity.io/images/p/d/abc-10x10.png?fm=jpg",
+		"//i.vimeocdn.com/video/1-d_640.jpg":                     "https://i.vimeocdn.com/video/1-d_640.jpg",
+		"/images/p/d/abc-10x10.png":                              "/images/p/d/abc-10x10.png",
+		"":                                                       "",
 	} {
 		if got := JPEGURL(in); got != want {
 			t.Errorf("JPEGURL(%q) = %q, want %q", in, got, want)
@@ -239,9 +243,10 @@ func tlsImageServer(t *testing.T, h http.Handler) *httptest.Server {
 }
 
 // TestFetchJPEGRefusesAURLItNeverFetches pins that an image URL the client
-// can never fetch (not https, no host, not a URL) is a missing image, asked
-// for nowhere: never "could not be reached", which would stop the whole
-// show-file step, cycle after cycle, over one bad field.
+// can never fetch (empty, not https, no host name, not a URL) is a missing
+// image, asked for nowhere: never "could not be reached", which would stop
+// the whole show-file step, cycle after cycle, over one bad field. A host
+// with a port and no name is no host: the client would dial this machine.
 func TestFetchJPEGRefusesAURLItNeverFetches(t *testing.T) {
 	asked := 0
 	srv := tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +254,7 @@ func TestFetchJPEGRefusesAURLItNeverFetches(t *testing.T) {
 		_, _ = w.Write(jpegBytes)
 	}))
 	plain := "http" + strings.TrimPrefix(srv.URL, "https") + "/ok.jpg"
-	for _, u := range []string{"", "/images/p/d/x-10x10.png", "//cdn.sanity.io/images/p/d/x-10x10.png", "https:///x.jpg", plain, "ftp://cdn.sanity.io/x.jpg", "https://cdn.sanity.io/%zz"} {
+	for _, u := range []string{"", "https:///x.jpg", "https://:/x.jpg", "https://:443/x.jpg", "//:443/x.jpg", plain, "ftp://cdn.sanity.io/x.jpg", "https://cdn.sanity.io/%zz"} {
 		got, err := FetchJPEG(context.Background(), u)
 		var ue *neturl.Error
 		if got != nil || !errors.Is(err, ErrImageMissing) || errors.Is(err, ErrUnreachable) || errors.As(err, &ue) {
@@ -258,5 +263,41 @@ func TestFetchJPEGRefusesAURLItNeverFetches(t *testing.T) {
 	}
 	if asked != 0 {
 		t.Errorf("%d requests made, want none", asked)
+	}
+}
+
+// TestFetchJPEGAsksAgainForAURLWithNoScheme pins that an image URL with no
+// scheme at all (a path, or a host and path with no "//") is never fetched
+// and never final: it may be Musora changing how it writes image URLs, so
+// the error is one worth trying again later (the show gets no tvshow.nfo
+// yet), and not "could not be reached" either, which would stop every other
+// show's files.
+func TestFetchJPEGAsksAgainForAURLWithNoScheme(t *testing.T) {
+	asked := 0
+	tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		_, _ = w.Write(jpegBytes)
+	}))
+	for _, u := range []string{"/images/p/d/x-10x10.png", "cdn.sanity.io/images/p/d/x-10x10.png"} {
+		got, err := FetchJPEG(context.Background(), u)
+		var ue *neturl.Error
+		if got != nil || err == nil || errors.Is(err, ErrImageMissing) || errors.Is(err, ErrUnreachable) || errors.As(err, &ue) {
+			t.Errorf("FetchJPEG(%q) = %q, %v; want an error worth trying again", u, got, err)
+		}
+	}
+	if asked != 0 {
+		t.Errorf("%d requests made, want none", asked)
+	}
+}
+
+// TestFetchJPEGReadsAProtocolRelativeURLAsHTTPS proves a URL with a host and
+// no scheme ("//host/path") is fetched over https.
+func TestFetchJPEGReadsAProtocolRelativeURLAsHTTPS(t *testing.T) {
+	srv := tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(jpegBytes)
+	}))
+	u := strings.TrimPrefix(srv.URL, "https:") + "/ok.jpg"
+	if got, err := FetchJPEG(context.Background(), u); err != nil || string(got) != string(jpegBytes) {
+		t.Errorf("FetchJPEG(%q) = %q, %v; want the JPEG bytes", u, got, err)
 	}
 }
