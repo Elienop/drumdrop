@@ -35,7 +35,10 @@ func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, 
 	job, lesson, privateLesson := run.job, run.lesson, run.privateLesson
 	id := job.RailcontentID
 	// The download is complete: a shutdown that began meanwhile does not stop
-	// it being placed and recorded (both are local and short).
+	// it being placed and recorded (both are local). The show's own files are
+	// the exception: the placement of a new show's first episode asks Musora
+	// for the show (Resolve, which a shutdown does not stop: up to its 30 s
+	// timeout, BACKLOG D160) and fetches its images (which a shutdown does).
 	claims, err := w.claims(context.WithoutCancel(ctx))
 	if err != nil {
 		return 0, false, fmt.Errorf("not placed: %w", err)
