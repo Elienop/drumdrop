@@ -57,14 +57,16 @@ func TestRunReportsAFailedCommand(t *testing.T) {
 		name  string
 		args  []string
 		setup func(t *testing.T)
-		want  string // the error, or for a flag error the flag it names
+		want  string // the error, or the start of a flag error
 	}{
 		{"login", []string{"login"}, stubRefusedLogin, "login failed: Invalid credentials"},
 		{"whoami", []string{"whoami"}, nil, "not logged in — run `drumdrop login` first"},
 		{"follow", []string{"follow"}, nil, "follow: provide a lesson/course id or URL, or @slug / --instructor slug"},
 		{"unfollow", []string{"unfollow"}, nil, "unfollow: provide a follow id (see `drumdrop follows`)"},
-		{"sync", []string{"sync", "--limit=x"}, nil, "-limit"},
-		{"daemon", []string{"daemon", "--once=maybe"}, nil, "-once"},
+		// Only a flag the command defines gives "invalid value": --limit is
+		// sync's alone, --once daemon's alone.
+		{"sync", []string{"sync", "--limit=x"}, nil, `invalid value "x" for flag -limit`},
+		{"daemon", []string{"daemon", "--once=maybe"}, nil, `invalid boolean value "maybe" for -once`},
 		{"serve", []string{"serve", "--listen", "0.0.0.0:0"}, noAPIToken,
 			`refusing to bind "0.0.0.0:0" without an API token: set DRUMDROP_API_TOKEN or listen on loopback`},
 		{"download", []string{"not-an-id"}, nil, "could not parse a content id from: not-an-id"},
