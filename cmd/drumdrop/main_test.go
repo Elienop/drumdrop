@@ -65,8 +65,8 @@ func TestRunHelpPrintsUsage(t *testing.T) {
 // "✖ " and exits 1. The default case is a download, so a command whose case
 // is missing becomes a download of its name; each case therefore expects an
 // error the download does not give for the same arguments. None of them
-// reaches the network or the real config folder. sync is pinned in
-// TestRunReportsASucceededCommand instead: every sync flag is a download flag
+// reaches the network or the real config folder. sync is pinned by
+// TestRunSyncDryRunSucceeds instead: every sync flag is a download flag
 // too, and Go's flag errors do not name the flag set, so a sync flag error
 // reads word for word like the download's.
 func TestRunReportsAFailedCommand(t *testing.T) {
@@ -159,9 +159,9 @@ func failIfMusoraAsked(t *testing.T) {
 }
 
 // TestRunReportsASucceededCommand proves a command that succeeds exits 0 with
-// nothing on run's stdout or stderr, and that logout, follows and sync reach
-// their own commands: logout removes the saved session and credentials,
-// follows and sync open the database.
+// nothing on run's stdout or stderr, and that logout and follows reach their
+// own commands: logout removes the saved session and credentials, follows
+// opens the database. (sync: TestRunSyncDryRunSucceeds.)
 func TestRunReportsASucceededCommand(t *testing.T) {
 	t.Run("logout", func(t *testing.T) {
 		dir := t.TempDir()
@@ -191,21 +191,24 @@ func TestRunReportsASucceededCommand(t *testing.T) {
 			t.Errorf("follows opened no database in the config folder: %v", err)
 		}
 	})
-	t.Run("sync", func(t *testing.T) {
-		// A dry run over a new database has no follow to expand, so it asks
-		// Musora nothing, and it downloads nothing; --out keeps even the
-		// downloads folder it would resolve out of the package directory.
-		// Without the sync case this is a download of "sync", which fails:
-		// "could not parse a content id from: sync".
-		failIfMusoraAsked(t)
-		code, stdout, stderr, dir := runArgs(t, "sync", "--dry-run", "--out", t.TempDir())
-		if code != 0 || stdout != "" || stderr != "" {
-			t.Fatalf("run(sync --dry-run) = %d, stdout %q, stderr %q; want 0, nothing, nothing", code, stdout, stderr)
-		}
-		if _, err := os.Stat(filepath.Join(dir, "drumdrop.db")); err != nil {
-			t.Errorf("sync opened no database in the config folder: %v", err)
-		}
-	})
+}
+
+// TestRunSyncDryRunSucceeds proves sync reaches its own command, as
+// TestRunReportsASucceededCommand does for logout and follows: exit 0 with
+// nothing on run's stdout or stderr, and the database opened. A dry run over a
+// new database has no follow to expand, so it asks Musora nothing, and it
+// downloads nothing; --out keeps even the downloads folder it would resolve
+// out of the package directory. Without the sync case this is a download of
+// "sync", which fails: "could not parse a content id from: sync".
+func TestRunSyncDryRunSucceeds(t *testing.T) {
+	failIfMusoraAsked(t)
+	code, stdout, stderr, dir := runArgs(t, "sync", "--dry-run", "--out", t.TempDir())
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("run(sync --dry-run) = %d, stdout %q, stderr %q; want 0, nothing, nothing", code, stdout, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "drumdrop.db")); err != nil {
+		t.Errorf("sync opened no database in the config folder: %v", err)
+	}
 }
 
 // TestRunCommandHelpExitsZero pins a command's own -h or --help: its flag set
