@@ -709,12 +709,25 @@ func withOwnNFO(cands []string, listing map[string]bool) []string {
 // subtitleExts are the subtitle formats yt-dlp writes next to a lesson video.
 var subtitleExts = map[string]bool{"vtt": true, "srt": true, "ass": true, "ssa": true, "ttml": true, "lrc": true, "json3": true, "srv1": true, "srv2": true, "srv3": true}
 
+// EpisodeImageSuffix ends the name the plex-tv move gives an episode's image,
+// "<episode base>.jpg": the name Plex reads as the episode's thumbnail. Before
+// it the move kept the download's "<base>-poster.jpg" (musora.PosterSuffix),
+// which Plex does not read.
+const EpisodeImageSuffix = ".jpg"
+
 // EpisodeEntry reports whether name, an entry of a season folder whose
 // entries are listing (name -> isDir), is one of the entries the plex-tv move
-// gives the episode base: the grammar legacyEpisodeEntry documents. It says
-// nothing about whose the entry is; a caller that acts on it must know that
-// from a record.
+// gives the episode base: the grammar legacyEpisodeEntry documents, and the
+// episode's image "<base>.jpg" (EpisodeImageSuffix). It says nothing about
+// whose the entry is; a caller that acts on it must know that from a record.
+//
+// The legacy grammar does not know "<base>.jpg": no lesson placed before the
+// record existed has one, and it is the name Plex documents for an episode's
+// image, so a file there that no record names may be one the owner put there.
 func EpisodeEntry(base, name string, isDir bool, listing map[string]bool) bool {
+	if !isDir && name == base+EpisodeImageSuffix {
+		return true
+	}
 	return legacyEpisodeEntry(base, name, isDir, listing)
 }
 
@@ -740,7 +753,7 @@ func legacyEpisodeEntry(base, name string, isDir bool, listing map[string]bool) 
 		return rest == " resources" || rest == " play-along" || rest == " sheet-music"
 	}
 	switch rest {
-	case ".mp4", ".nfo", "-poster.jpg":
+	case ".mp4", ".nfo", musora.PosterSuffix:
 		return true
 	}
 	if label, ok := strings.CutPrefix(rest, " ["); ok {

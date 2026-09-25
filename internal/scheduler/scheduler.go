@@ -35,6 +35,13 @@ type Downloader interface {
 	Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error
 }
 
+// ImageFetcher downloads an image as JPEG bytes, for a plex-tv show's
+// poster.jpg and fanart.jpg (musora.FetchJPEG, whose errors say whether to
+// ask again).
+type ImageFetcher interface {
+	FetchJPEG(ctx context.Context, url string) ([]byte, error)
+}
+
 // Expander turns one follow into the railcontent ids of the lessons under it.
 // Node follows expand via the catalog walk; instructor follows via the
 // instructor-lessons query.

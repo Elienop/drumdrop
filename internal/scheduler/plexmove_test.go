@@ -45,6 +45,8 @@ func scratchLesson(t *testing.T, tmp string, index int, title string, suffixes [
 // entries it placed (what the worker records), that it destroys none of the
 // season folder's other entries (a same-episode look-alike included, recorded
 // or not), and that a delete planned from that record removes exactly those.
+// The song's one image is "<episode base>.jpg", shared by both versions as
+// the nfo is (owner ruling #78).
 func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
@@ -69,7 +71,7 @@ func TestPlexTVMoveRecordsExactlyWhatItPlaced(t *testing.T) {
 	want := paths(season,
 		"Songs - s01e05 - Even Flow [Drumless].mp4", "Songs - s01e05 - Even Flow [Original].mp4",
 		"Songs - s01e05 - Even Flow play-along", "Songs - s01e05 - Even Flow resources",
-		"Songs - s01e05 - Even Flow sheet-music", "Songs - s01e05 - Even Flow-poster.jpg",
+		"Songs - s01e05 - Even Flow sheet-music", "Songs - s01e05 - Even Flow.jpg",
 		"Songs - s01e05 - Even Flow.nfo")
 	if !reflect.DeepEqual(sorted(res.placed), sorted(want)) || len(res.kept) != 0 {
 		t.Errorf("placed %v kept %v, want exactly %v", res.placed, res.kept, want)

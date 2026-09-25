@@ -319,7 +319,8 @@ func cmdSync(argv []string) error {
 // it with fakes. Dry-run reports what would be downloaded but enqueues and
 // downloads nothing (a queued job would otherwise be drained later by a daemon).
 // A real run plans (records + enqueues new lessons, deduped) then drains the
-// queue, downloading up to limit NEW lessons.
+// queue, downloading up to limit NEW lessons, and then gives the plex-tv shows
+// their missing own files (scheduler.Worker.EnsureShowFiles).
 func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.Worker, dryRun bool, limit int, w io.Writer) error {
 	if dryRun {
 		enqueued, err := planner.PlanDryRun(ctx)
@@ -344,6 +345,8 @@ func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.
 		fmt.Fprintf(w, "\nSync interrupted — queued %d, processed %d\n", planned, processed)
 		return errors.New("sync interrupted: a download in progress was stopped; it starts over the next time daemon or serve starts")
 	}
+	// As a daemon cycle does: the plex-tv shows' missing own files.
+	worker.EnsureShowFiles(ctx)
 	fmt.Fprintf(w, "\nSync complete — queued %d, downloaded %d\n", planned, processed)
 	return nil
 }

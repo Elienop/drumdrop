@@ -48,6 +48,9 @@ type plexLibrary struct {
 	episodeNFO []byte
 	// jobID names the folder replaced entries are set aside in (asideArea).
 	jobID int64
+	// showFiles, when set, are the show-level files (tvshow.nfo, poster.jpg,
+	// fanart.jpg) to create in the show folder before the episode is placed.
+	showFiles *showFiles
 }
 
 // plexMoveResult says where a plex-tv move left the lesson.
@@ -92,7 +95,8 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 // folder src into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
 // from its "NN - Title" base to the episode base
 // "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>" while preserving the suffix
-// (".mp4", ".en.vtt", ".nfo", "-poster.jpg", " [Drumless].mp4"); each subfolder
+// (".mp4", ".en.vtt", ".nfo", " [Drumless].mp4"; the image "-poster.jpg"
+// becomes ".jpg", episodeSuffix); each subfolder
 // becomes "<episodeBase> <folder>". Files end up FLAT in the season folder,
 // which is shared across the show's episodes. A song's version files keep one
 // episode base, so Plex merges them as one episode with several versions.
@@ -228,8 +232,18 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		notes = append(notes, err)
 	}
 
-	// 4. Place every entry, or none.
-	placed, stuck, err := placeSteps(seasonRoot, src.dir, steps)
+	// The show's own files go in before the episode, so Plex, which picks
+	// local artwork only when it first matches a show, finds them with it.
+	// They are the show's, not the lesson's: never recorded, never undone.
+	if lib.showFiles != nil {
+		if err := lib.showFiles.write(libraryDir, musora.Sanitize(show)); err != nil {
+			notes = append(notes, err)
+		}
+	}
+
+	// 4. Place every entry, or none: the video(s) last, so the episode's
+	// image, nfo and captions are there when Plex finds the video.
+	placed, stuck, err := placeSteps(seasonRoot, src.dir, videosLast(steps, src.base))
 	if err != nil {
 		return fail(err, stuck)
 	}
@@ -262,6 +276,22 @@ func writeEpisodeNFO(src *scratchDir, episodeNFO []byte) error {
 		return nil
 	}
 	return writeScratchNFO(src.dir, src.base+".nfo", episodeNFO)
+}
+
+// videosLast is steps with the lesson's video(s) (isLessonVideoName, by the
+// name in the scratch folder, whose base is base) moved to the end, every
+// other step keeping its order.
+func videosLast(steps []plexMoveStep, base string) []plexMoveStep {
+	out := make([]plexMoveStep, 0, len(steps))
+	var videos []plexMoveStep
+	for _, st := range steps {
+		if !st.dir && isLessonVideoName(st.name, base) {
+			videos = append(videos, st)
+			continue
+		}
+		out = append(out, st)
+	}
+	return append(out, videos...)
 }
 
 // stepDsts is every step's destination, in order (nil for no steps).
@@ -298,6 +328,12 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 			ours[dst] = true
 			continue
 		}
+		if s.replacedImage(p) {
+			if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
+				return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
+			}
+			continue
+		}
 		if atEpisodeBase(p, s.seasonDir, s.plan.episodeBase, s.listing) {
 			stays = append(stays, p)
 			continue
@@ -311,6 +347,26 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 		}
 	}
 	return ours, kept, stays, nil
+}
+
+// replacedImage reports whether p, an entry the lesson's record names, is
+// the episode's image under the name earlier versions gave it,
+// "<base>-poster.jpg", while this move places the image as "<base>.jpg": the
+// download brought the image back, so the old one goes like any replaced
+// entry (removed once the download is recorded, put back by an undo), and the
+// episode keeps one image, never none (owner ruling 2026-09-24 (j)).
+func (s seasonPrevious) replacedImage(p string) bool {
+	season := filepath.Clean(s.seasonDir)
+	if filepath.Dir(p) != season || filepath.Base(p) != s.plan.episodeBase+musora.PosterSuffix {
+		return false
+	}
+	image := filepath.Join(season, s.plan.episodeBase+library.EpisodeImageSuffix)
+	for _, st := range s.plan.steps {
+		if !st.dir && st.dst == image {
+			return true
+		}
+	}
+	return false
 }
 
 // setAsidePreviousLessonFolder is the end of step 2 of moveToLibraryPlexTV:
@@ -578,7 +634,8 @@ type plexMoveStep struct {
 // planPlexTVMove lists the scratch lesson folder in name order and names each
 // entry's destination in the season folder, without writing anything:
 //   - a file keeps its suffix, with the scratch base swapped for the episode
-//     base (".nfo", "-poster.jpg", a song's " [Original].mp4");
+//     base (".nfo", a song's " [Original].mp4"), except the image
+//     "-poster.jpg", which becomes ".jpg" (episodeSuffix);
 //   - a folder becomes "<episodeBase> <folder>" (e.g. "<episodeBase> resources").
 //
 // Any name is fine, brackets included: the lesson records exactly what it
@@ -625,7 +682,13 @@ func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title strin
 			// yt-dlp fragments and strays are never chosen as the video.
 			en.video = isLessonVideoName(name, scratch.base)
 		}
+		// The base is fitted to the download's own suffixes, before the image's
+		// is shortened (episodeSuffix), so it is the base earlier versions
+		// gave the same lesson.
 		longest = max(longest, len(en.suffix))
+		if !en.step.dir {
+			en.suffix = episodeSuffix(en.suffix)
+		}
 		list = append(list, en)
 	}
 
@@ -642,6 +705,19 @@ func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title strin
 		plan.steps = append(plan.steps, en.step)
 	}
 	return plan, nil
+}
+
+// episodeSuffix is the suffix the plex-tv move gives a downloaded file whose
+// name ends in suffix after the lesson's base: the same, except the image,
+// "<base>-poster.jpg", which becomes "<episode base>.jpg", the name Plex reads
+// as the episode's image. It is the one place that names the image: a song's
+// versions ("<base> [Drumless].mp4", "<base> [Original].mp4") share the one
+// "<base>.jpg", as they share "<base>.nfo".
+func episodeSuffix(suffix string) string {
+	if suffix == musora.PosterSuffix {
+		return library.EpisodeImageSuffix
+	}
+	return suffix
 }
 
 // fitEpisodeBase is plexEpisodeBase, with the title cut short (at a rune

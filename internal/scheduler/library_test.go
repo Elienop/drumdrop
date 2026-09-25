@@ -347,6 +347,16 @@ var plexFiles = map[string]string{
 	".en.vtt":     "WEBVTT",
 }
 
+// plexSuffix is the suffix the plex-tv move gives a downloaded file's suffix:
+// the same, but the image "-poster.jpg" becomes ".jpg", the name Plex reads
+// for an episode's image (owner ruling #78).
+func plexSuffix(suffix string) string {
+	if suffix == "-poster.jpg" {
+		return ".jpg"
+	}
+	return suffix
+}
+
 // TestMoveToLibraryPlexTV proves that moveToLibraryPlexTV flattens the scratch
 // "NN - Title" lesson into <lib>/<Show>/Season 01/ with every file renamed to the
 // episode base "<Show> - s01eNN - Title<suffix>", content intact, the scratch dir
@@ -371,16 +381,17 @@ func TestMoveToLibraryPlexTV(t *testing.T) {
 	}
 	// Every file is flat in the season folder under the episode base, content intact.
 	for suffix, body := range plexFiles {
-		p := filepath.Join(wantSeason, base+suffix)
+		p := filepath.Join(wantSeason, base+plexSuffix(suffix))
 		got, err := os.ReadFile(p)
 		if err != nil {
-			t.Errorf("missing moved file %s: %v", base+suffix, err)
+			t.Errorf("missing moved file %s: %v", base+plexSuffix(suffix), err)
 			continue
 		}
 		if string(got) != body {
-			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+			t.Errorf("%s content = %q, want %q", base+plexSuffix(suffix), got, body)
 		}
 	}
+	assertExist(t, false, filepath.Join(wantSeason, base+"-poster.jpg"))
 	// The scratch lesson dir is gone.
 	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
 		t.Errorf("scratch lesson dir still present (stat err = %v), want removed", err)
@@ -405,13 +416,13 @@ func TestMoveToLibraryPlexTVCrossFsFallback(t *testing.T) {
 		t.Errorf("videoPath = %q, want %q", videoPath, filepath.Join(seasonDir, base+".mp4"))
 	}
 	for suffix, body := range plexFiles {
-		got, err := os.ReadFile(filepath.Join(seasonDir, base+suffix))
+		got, err := os.ReadFile(filepath.Join(seasonDir, base+plexSuffix(suffix)))
 		if err != nil {
-			t.Errorf("missing copied file %s: %v", base+suffix, err)
+			t.Errorf("missing copied file %s: %v", base+plexSuffix(suffix), err)
 			continue
 		}
 		if string(got) != body {
-			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+			t.Errorf("%s content = %q, want %q", base+plexSuffix(suffix), got, body)
 		}
 	}
 	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {

@@ -1,0 +1,760 @@
+package scheduler
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/elienop/drumdrop/internal/database"
+	"github.com/elienop/drumdrop/internal/musora"
+)
+
+// Sanity-shaped image URLs (their names carry their size, as Sanity's do).
+const (
+	artHeader = "https://cdn.sanity.io/images/p/d/header-4500x4500.png"
+	artThumb  = "https://cdn.sanity.io/images/p/d/thumb-1920x1080.png"
+	artCoach  = "https://cdn.sanity.io/images/p/d/coach-800x1200.png"
+	artSquare = "https://cdn.sanity.io/images/p/d/song-1500x1500.jpg"
+)
+
+// fakeImages serves every URL as "jpeg:<url>", or the error errs names for
+// it, and records each fetch.
+type fakeImages struct {
+	mu    sync.Mutex
+	errs  map[string]error
+	calls []string
+}
+
+func (f *fakeImages) FetchJPEG(_ context.Context, u string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, u)
+	if err := f.errs[u]; err != nil {
+		return nil, err
+	}
+	return []byte("jpeg:" + u), nil
+}
+
+func (f *fakeImages) fetched() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+// countingResolver answers from docs (nil for an unknown id), or errs, and
+// records each id asked for.
+type countingResolver struct {
+	mu    sync.Mutex
+	docs  map[int]*musora.Lesson
+	errs  map[int]error
+	calls []int
+}
+
+func (r *countingResolver) Resolve(id int, _ string) (*musora.Lesson, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, id)
+	if err := r.errs[id]; err != nil {
+		return nil, err
+	}
+	return r.docs[id], nil
+}
+
+func (r *countingResolver) asked() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int(nil), r.calls...)
+}
+
+// courseDoc is a guided course: a square header, a wide thumbnail, and an
+// instructor with a coach card.
+func courseDoc(id int, title string) *musora.Lesson {
+	return &musora.Lesson{
+		ID: id, Title: title, Description: "<p>A course.</p>", Brand: "drumeo", PublishedOn: "2024-01-02T00:00:00Z",
+		Thumbnail: artThumb, HeaderImageURL: artHeader,
+		Instructors: []musora.Instructor{{Name: "Coach", CoachCardImage: artCoach}},
+	}
+}
+
+// readFile is the content of path, or "" when it can not be read.
+func readFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// showFileNames is every entry of the show folder dir that is not a season
+// folder, sorted.
+func showFileNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "Season ") {
+			out = append(out, e.Name())
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestSlotsOf pins which names fill a show's slots (owner ruling #78, 3):
+// every name Plex reads for the poster (poster, folder, show; .jpg, .jpeg,
+// .png, .tbn) and for the background (fanart, art, backdrop, background; any
+// extension), and tvshow.nfo, without regard to case.
+func TestSlotsOf(t *testing.T) {
+	for _, tc := range []struct {
+		names []string
+		want  showSlots
+	}{
+		{nil, showSlots{}},
+		{[]string{"Season 01", "poster.jpg"}, showSlots{poster: true}},
+		{[]string{"Folder.PNG"}, showSlots{poster: true}},
+		{[]string{"show.tbn"}, showSlots{poster: true}},
+		{[]string{"poster.jpeg", "fanart.jpg", "tvshow.nfo"}, showSlots{poster: true, fanart: true, nfo: true}},
+		{[]string{"BACKDROP.jpeg"}, showSlots{fanart: true}},
+		{[]string{"art.webp"}, showSlots{fanart: true}},
+		{[]string{"background.png"}, showSlots{fanart: true}},
+		{[]string{"TVShow.NFO"}, showSlots{nfo: true}},
+		// Not those slots: another extension, another stem, no extension.
+		{[]string{"poster.webp", "poster", "posters.jpg", "fanart", "banner.jpg", "tvshow.nfo.bak", "movie.nfo"}, showSlots{}},
+	} {
+		if got := slotsOf(tc.names); got != tc.want {
+			t.Errorf("slotsOf(%q) = %+v, want %+v", tc.names, got, tc.want)
+		}
+	}
+}
+
+// TestCreateOnlyNeverReplacesAndNeverLeavesAPart proves a show file is
+// created whole or not at all: its bytes go to a hidden file first, which is
+// renamed into place only if nothing is there (an entry that appears at the
+// name meanwhile is kept), and a failed write leaves nothing behind.
+func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
+	open := func(t *testing.T) (*os.Root, string) {
+		dir := t.TempDir()
+		r, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { r.Close() })
+		return r, dir
+	}
+	onlyNames := func(t *testing.T, dir string, want ...string) {
+		t.Helper()
+		entries, _ := os.ReadDir(dir)
+		var got []string
+		for _, e := range entries {
+			got = append(got, e.Name())
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s holds %q, want %q", dir, got, want)
+		}
+	}
+
+	t.Run("created through a hidden file", func(t *testing.T) {
+		r, dir := open(t)
+		var renamed []string
+		stubRename(t, func(oldpath, newpath string) error {
+			// The file is whole before it takes its name, and nothing is at
+			// the name yet: a crash can only ever leave the hidden file.
+			if readFile(oldpath) != "image" {
+				t.Errorf("renamed %s holding %q, want the whole file", oldpath, readFile(oldpath))
+			}
+			renamed = append(renamed, filepath.Base(oldpath)+" -> "+filepath.Base(newpath))
+			return renameNoReplace(oldpath, newpath)
+		})
+		created, err := createOnly(r, "poster.jpg", []byte("image"))
+		if !created || err != nil {
+			t.Fatalf("createOnly = %v, %v; want created", created, err)
+		}
+		if want := []string{".poster.jpg.drumdrop-part -> poster.jpg"}; !reflect.DeepEqual(renamed, want) {
+			t.Errorf("renames %q, want %q", renamed, want)
+		}
+		if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
+			t.Errorf("poster.jpg = %q", got)
+		}
+		onlyNames(t, dir, "poster.jpg")
+	})
+	t.Run("an existing entry is kept", func(t *testing.T) {
+		r, dir := open(t)
+		seedSeason(t, dir, "poster.jpg")
+		created, err := createOnly(r, "poster.jpg", []byte("image"))
+		if created || err != nil {
+			t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
+		}
+		assertContent(t, dir, "poster.jpg")
+		onlyNames(t, dir, "poster.jpg")
+	})
+	t.Run("an entry that appears meanwhile is kept", func(t *testing.T) {
+		r, dir := open(t)
+		stubRename(t, func(oldpath, newpath string) error {
+			seedSeason(t, dir, "poster.jpg") // the owner's, just before the rename
+			return renameNoReplace(oldpath, newpath)
+		})
+		created, err := createOnly(r, "poster.jpg", []byte("image"))
+		if created || err != nil {
+			t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
+		}
+		assertContent(t, dir, "poster.jpg")
+		onlyNames(t, dir, "poster.jpg")
+	})
+	t.Run("a failed rename leaves nothing", func(t *testing.T) {
+		r, dir := open(t)
+		stubRename(t, func(string, string) error { return errors.New("injected") })
+		created, err := createOnly(r, "poster.jpg", []byte("image"))
+		if created || err == nil {
+			t.Errorf("createOnly = %v, %v; want the failure", created, err)
+		}
+		onlyNames(t, dir)
+	})
+	t.Run("a leftover part is replaced", func(t *testing.T) {
+		r, dir := open(t)
+		seedSeason(t, dir, ".poster.jpg.drumdrop-part") // a crash's
+		if created, err := createOnly(r, "poster.jpg", []byte("image")); !created || err != nil {
+			t.Fatalf("createOnly = %v, %v; want created", created, err)
+		}
+		onlyNames(t, dir, "poster.jpg")
+		if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
+			t.Errorf("poster.jpg = %q", got)
+		}
+	})
+}
+
+// artWorker is plexWorker (lesson 100 "Lesson A", episode 5 of the node
+// follow "Beginner Course", 4242) with the show's course on Musora and an
+// image server: lesson 100 is in a pack of its own ("Some Pack"), which is
+// not the show.
+func artWorker(t *testing.T) (w *Worker, store *fakeWorkerStore, dl *fakeDownloader, res *countingResolver, img *fakeImages, lib, season string) {
+	t.Helper()
+	w, store, dl, lib, season = plexWorker(t)
+	lessonA := lesson(100, "Lesson A")
+	lessonA.ParentContentData = []musora.ParentContent{{ID: 55, Title: "Some Pack"}}
+	res = &countingResolver{docs: map[int]*musora.Lesson{100: lessonA, 4242: courseDoc(4242, "Beginner Course (on Musora)"), 55: courseDoc(55, "Some Pack")}}
+	img = &fakeImages{}
+	w.Resolver, w.Images = res, img
+	return w, store, dl, res, img, lib, season
+}
+
+// withPoster makes each download also write its image and captions.
+func withPoster(dl *fakeDownloader) {
+	dl.afterWrite = func(dir string) {
+		base := filepath.Base(dir)
+		for _, n := range []string{base + "-poster.jpg", base + ".en.vtt"} {
+			_ = os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644)
+		}
+	}
+}
+
+// TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo pins invariant 1 of the
+// show-artwork change: Plex picks local artwork only when it first matches a
+// show or an episode, so the show's tvshow.nfo, poster.jpg and fanart.jpg,
+// and the episode's image, nfo and captions, are all in place before the
+// episode's video is. The show's files come from the followed node (not the
+// lesson's pack), are never recorded as the lesson's, and the episode image
+// is "<episode base>.jpg". For a song, both versions come after the one
+// image and nfo they share.
+func TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo(t *testing.T) {
+	for _, song := range []bool{false, true} {
+		t.Run(fmt.Sprintf("song=%v", song), func(t *testing.T) {
+			w, store, dl, res, _, lib, season := artWorker(t)
+			if song {
+				res.docs[100].Soundslice = []musora.SoundsliceRef{{Slug: "1"}}
+			}
+			withPoster(dl)
+			show := filepath.Join(lib, "Beginner Course")
+			base := filepath.Join(season, sameTitleBase)
+			videos := 0
+			stubRename(t, func(oldpath, newpath string) error {
+				if strings.HasSuffix(newpath, ".mp4") {
+					videos++
+					before := []string{filepath.Join(show, "tvshow.nfo"), filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), base + ".jpg", base + ".nfo"}
+					if !song {
+						before = append(before, base+".en.vtt")
+					}
+					for _, p := range before {
+						if _, err := os.Lstat(p); err != nil {
+							t.Errorf("%s placed before %s", filepath.Base(newpath), p)
+						}
+					}
+				}
+				return renameNoReplace(oldpath, newpath)
+			})
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if want := map[bool]int{false: 1, true: 2}[song]; videos != want {
+				t.Fatalf("%d videos placed, want %d", videos, want)
+			}
+			if got := readFile(filepath.Join(show, "poster.jpg")); got != "jpeg:"+artHeader {
+				t.Errorf("poster.jpg = %q, want the course's square header", got)
+			}
+			if got := readFile(filepath.Join(show, "fanart.jpg")); got != "jpeg:"+artThumb {
+				t.Errorf("fanart.jpg = %q, want the course's thumbnail", got)
+			}
+			nfo := readFile(filepath.Join(show, "tvshow.nfo"))
+			for _, want := range []string{"<tvshow>", "<title>Beginner Course</title>", "<plot>A course.</plot>", `<uniqueid type="musora" default="true">4242</uniqueid>`} {
+				if !strings.Contains(nfo, want) {
+					t.Errorf("tvshow.nfo lacks %s:\n%s", want, nfo)
+				}
+			}
+			assertExist(t, false, base+"-poster.jpg")
+			rec := onlyRecord(t, store)
+			if !slices.Contains(rec.entries, "Beginner Course/Season 01/"+sameTitleBase+".jpg") {
+				t.Errorf("record %v does not name the episode image", rec.entries)
+			}
+			for _, e := range rec.entries {
+				if !strings.HasPrefix(e, "Beginner Course/Season 01/") {
+					t.Errorf("record names %q, a show-level file", e)
+				}
+			}
+		})
+	}
+}
+
+// TestPlexTVShowCostsNothingOnceItHasItsFiles pins invariant 2's cost: the
+// show's files are fetched once, for its first episode; its next episode and
+// every later cycle ask Musora and its image server nothing.
+func TestPlexTVShowCostsNothingOnceItHasItsFiles(t *testing.T) {
+	w, store, _, res, img, _, season := artWorker(t)
+	store.queue = append(store.queue, queuedJob(2, nodeFollow().ID, 101))
+	store.lessons[101] = database.Lesson{RailcontentID: 101, Position: sql.NullInt64{Int64: 6, Valid: true}}
+	res.docs[101] = lesson(101, "Lesson B")
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	store.withFiles = []database.Lesson{recordedRow(100, season, sameTitleBase+".mp4")}
+	w.EnsureShowFiles(context.Background())
+
+	var course []int
+	for _, id := range res.asked() {
+		if id != 100 && id != 101 {
+			course = append(course, id)
+		}
+	}
+	if !reflect.DeepEqual(course, []int{4242}) {
+		t.Errorf("the show's course asked for %v, want once", course)
+	}
+	if got, want := img.fetched(), []string{artHeader, artThumb}; !reflect.DeepEqual(got, want) {
+		t.Errorf("fetched %v, want %v once", got, want)
+	}
+}
+
+// backfillWorker is a plex-tv worker over a fake store, with nothing queued,
+// for the cycle's show-file step.
+func backfillWorker(t *testing.T) (w *Worker, store *fakeWorkerStore, res *countingResolver, img *fakeImages, lib string) {
+	t.Helper()
+	store = newFakeWorkerStore()
+	store.follows[nodeFollow().ID] = nodeFollow()
+	store.follows[instructorFollow().ID] = instructorFollow()
+	res = &countingResolver{docs: map[int]*musora.Lesson{}}
+	img = &fakeImages{}
+	w = newTestWorker(t, store, res, newFakeDownloader(), func(time.Duration) {})
+	w.Images = img
+	lib = filepath.Join(t.TempDir(), "lib")
+	w.Cfg.LibraryDir = lib
+	w.Cfg.Layout = LayoutPlexTV
+	return w, store, res, img, lib
+}
+
+// inFollow is row filed under follow id.
+func inFollow(row database.Lesson, id int64) database.Lesson {
+	row.FollowID = sql.NullInt64{Int64: id, Valid: true}
+	return row
+}
+
+// TestEnsureShowFilesFillsTheShowsAlreadyInTheLibrary pins invariant 2: the
+// cycle's show-file step gives every show folder its lessons file episodes
+// in, under today's library, the files it is missing, by plexShow's own
+// branches (a node follow's show is the node; an instructor follow's is the
+// lesson's course, or for a lesson in no course the instructor, whose coach
+// card is the poster and who has no background), a recorded row and a
+// legacy row alike. It creates no folder, and once every show has its files
+// it asks nothing.
+func TestEnsureShowFilesFillsTheShowsAlreadyInTheLibrary(t *testing.T) {
+	w, store, res, img, lib := backfillWorker(t)
+	node := filepath.Join(lib, "Beginner Course", "Season 01")
+	course := filepath.Join(lib, "Groove Course", "Season 01")
+	instructor := filepath.Join(lib, "Mike Johnston", "Season 01")
+	for _, d := range []string{node, course, instructor} {
+		seedSeason(t, d)
+	}
+	elsewhere := filepath.Join(w.Cfg.DownloadsDir, "Beginner Course", "05 - Lesson A")
+	store.withFiles = []database.Lesson{
+		inFollow(recordedRow(100, node, "Beginner Course - s01e05 - Lesson A.mp4"), nodeFollow().ID),
+		inFollow(legacyRow(200, "Groove", 1, course, "Groove Course - s01e01 - Groove.mp4"), instructorFollow().ID),
+		inFollow(legacyRow(300, "Solo", 1, instructor, "Mike Johnston - s01e01 - Solo.mp4"), instructorFollow().ID),
+		inFollow(database.Lesson{RailcontentID: 400, OutputDir: sql.NullString{String: elsewhere, Valid: true}}, nodeFollow().ID),
+		recordedRow(500, filepath.Join(lib, "Gone Show", "Season 01"), "Gone Show - s01e01 - X.mp4"),
+	}
+	res.docs[4242] = courseDoc(4242, "Beginner Course")
+	groove := lesson(200, "Groove")
+	groove.ParentContentData = []musora.ParentContent{{ID: 77, Title: "Groove Course"}}
+	res.docs[200] = groove
+	res.docs[77] = &musora.Lesson{ID: 77, Title: "Groove Course", Thumbnail: artThumb, Instructors: []musora.Instructor{{Name: "Mike Johnston", CoachCardImage: artCoach}}}
+	solo := lesson(300, "Solo")
+	solo.Instructors = []musora.Instructor{{Name: "Someone Else", Slug: "someone-else", CoachCardImage: artSquare}, {Name: "Mike Johnston", Slug: "mike-johnston", CoachCardImage: artCoach, Biography: "<p>Founder.</p>"}}
+	res.docs[300] = solo
+
+	w.EnsureShowFiles(context.Background())
+
+	for dir, want := range map[string]map[string]string{
+		filepath.Join(lib, "Beginner Course"): {"poster.jpg": "jpeg:" + artHeader, "fanart.jpg": "jpeg:" + artThumb},
+		filepath.Join(lib, "Groove Course"):   {"poster.jpg": "jpeg:" + artCoach, "fanart.jpg": "jpeg:" + artThumb},
+		filepath.Join(lib, "Mike Johnston"):   {"poster.jpg": "jpeg:" + artCoach},
+	} {
+		names := []string{"tvshow.nfo"}
+		for n := range want {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		if got := showFileNames(t, dir); !reflect.DeepEqual(got, names) {
+			t.Errorf("%s holds %v, want %v", dir, got, names)
+		}
+		for n, body := range want {
+			if got := readFile(filepath.Join(dir, n)); got != body {
+				t.Errorf("%s/%s = %q, want %q", dir, n, got, body)
+			}
+		}
+	}
+	for dir, title := range map[string]string{"Beginner Course": "Beginner Course", "Groove Course": "Groove Course", "Mike Johnston": "Mike Johnston"} {
+		if nfo := readFile(filepath.Join(lib, dir, "tvshow.nfo")); !strings.Contains(nfo, "<title>"+title+"</title>") {
+			t.Errorf("%s/tvshow.nfo = %s, want titled %q", dir, nfo, title)
+		}
+	}
+	if nfo := readFile(filepath.Join(lib, "Mike Johnston", "tvshow.nfo")); !strings.Contains(nfo, "<plot>Founder.</plot>") {
+		t.Errorf("the instructor's tvshow.nfo lacks their biography:\n%s", nfo)
+	}
+	assertExist(t, false, filepath.Join(lib, "Gone Show"), filepath.Join(filepath.Dir(elsewhere), "poster.jpg"))
+	if got, want := slices.Sorted(slices.Values(res.asked())), []int{77, 200, 300, 4242}; !reflect.DeepEqual(got, want) {
+		t.Errorf("asked Musora for %v, want %v", got, want)
+	}
+
+	// Done: the next cycle costs nothing.
+	asked, fetched := len(res.asked()), len(img.fetched())
+	w.EnsureShowFiles(context.Background())
+	if len(res.asked()) != asked || len(img.fetched()) != fetched {
+		t.Errorf("a cycle over complete shows asked %v and fetched %v more", res.asked()[asked:], img.fetched()[fetched:])
+	}
+}
+
+// TestEnsureShowFilesWritesOnlyIntoARealShowFolder pins invariant 3's
+// placement: the step never creates a folder (a library that is not mounted
+// gets nothing), and never writes through a show folder that is a symlink,
+// even one that leads to another folder of the library.
+func TestEnsureShowFilesWritesOnlyIntoARealShowFolder(t *testing.T) {
+	t.Run("no library", func(t *testing.T) {
+		w, store, res, _, lib := backfillWorker(t)
+		store.withFiles = []database.Lesson{inFollow(recordedRow(100, filepath.Join(lib, "Beginner Course", "Season 01"), "x.mp4"), nodeFollow().ID)}
+		res.docs[4242] = courseDoc(4242, "Beginner Course")
+		w.EnsureShowFiles(context.Background())
+		assertExist(t, false, lib)
+		if len(res.asked()) != 0 {
+			t.Errorf("asked Musora for %v with no library", res.asked())
+		}
+	})
+	t.Run("symlinked show folder", func(t *testing.T) {
+		w, store, res, _, lib := backfillWorker(t)
+		other := filepath.Join(lib, "Other")
+		seedSeason(t, filepath.Join(other, "Season 01"))
+		if err := os.Symlink(other, filepath.Join(lib, "Beginner Course")); err != nil {
+			t.Skip("no symlinks here:", err)
+		}
+		store.withFiles = []database.Lesson{inFollow(recordedRow(100, filepath.Join(lib, "Beginner Course", "Season 01"), "x.mp4"), nodeFollow().ID)}
+		res.docs[4242] = courseDoc(4242, "Beginner Course")
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, other); len(got) != 0 {
+			t.Errorf("wrote %v through the symlink", got)
+		}
+	})
+}
+
+// TestShowFilesLeaveTheOwnersAlone pins ruling #78, 3: a slot the owner filled
+// under any name Plex reads for it is left as it is and gets nothing more,
+// and an owner's tvshow.nfo marks the show done: nothing is asked or written.
+func TestShowFilesLeaveTheOwnersAlone(t *testing.T) {
+	t.Run("images", func(t *testing.T) {
+		w, store, res, img, lib := backfillWorker(t)
+		show := filepath.Join(lib, "Beginner Course")
+		seedSeason(t, show, "Folder.PNG", "BACKDROP.jpeg")
+		store.withFiles = []database.Lesson{inFollow(recordedRow(100, filepath.Join(show, "Season 01"), "x.mp4"), nodeFollow().ID)}
+		res.docs[4242] = courseDoc(4242, "Beginner Course")
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, show); !reflect.DeepEqual(got, []string{"BACKDROP.jpeg", "Folder.PNG", "tvshow.nfo"}) {
+			t.Errorf("show folder holds %v, want the owner's images and the nfo", got)
+		}
+		assertContent(t, show, "Folder.PNG", "BACKDROP.jpeg")
+		if len(img.fetched()) != 0 {
+			t.Errorf("fetched %v for filled slots", img.fetched())
+		}
+	})
+	t.Run("nfo", func(t *testing.T) {
+		w, store, res, img, lib := backfillWorker(t)
+		show := filepath.Join(lib, "Beginner Course")
+		seedSeason(t, show, "tvshow.nfo")
+		store.withFiles = []database.Lesson{inFollow(recordedRow(100, filepath.Join(show, "Season 01"), "x.mp4"), nodeFollow().ID)}
+		res.docs[4242] = courseDoc(4242, "Beginner Course")
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, show); !reflect.DeepEqual(got, []string{"tvshow.nfo"}) {
+			t.Errorf("show folder holds %v, want the owner's nfo only", got)
+		}
+		assertContent(t, show, "tvshow.nfo")
+		if len(res.asked()) != 0 || len(img.fetched()) != 0 {
+			t.Errorf("asked %v, fetched %v for a show with its nfo", res.asked(), img.fetched())
+		}
+	})
+}
+
+// twoShows files lesson 100 in "Beginner Course" (node 4242) and lesson 101 in
+// "Second Course" (node 5555), both courses on Musora with their own images.
+func twoShows(t *testing.T, w *Worker, store *fakeWorkerStore, res *countingResolver, lib string) (first, second string) {
+	t.Helper()
+	second5555 := database.Follow{ID: 3, Kind: "node", RailcontentID: sql.NullInt64{Int64: 5555, Valid: true}, Title: "Second Course"}
+	store.follows[3] = second5555
+	first, second = filepath.Join(lib, "Beginner Course"), filepath.Join(lib, "Second Course")
+	store.withFiles = []database.Lesson{
+		inFollow(recordedRow(100, filepath.Join(first, "Season 01"), "a.mp4"), nodeFollow().ID),
+		inFollow(recordedRow(101, filepath.Join(second, "Season 01"), "b.mp4"), 3),
+	}
+	seedSeason(t, filepath.Join(first, "Season 01"))
+	seedSeason(t, filepath.Join(second, "Season 01"))
+	res.docs[4242] = courseDoc(4242, "Beginner Course")
+	res.docs[5555] = &musora.Lesson{ID: 5555, Thumbnail: artSquare, Type: "song"}
+	return first, second
+}
+
+// TestShowFilesWhenAFetchFails pins invariant 7: an image that is gone
+// leaves its slot empty and the show is done; one that failed for now leaves
+// the nfo out, so the next cycle fetches it (and only it); Musora or its image
+// server out of reach stops the step until the next cycle, writing nothing
+// and leaving no part of a file.
+func TestShowFilesWhenAFetchFails(t *testing.T) {
+	t.Run("gone", func(t *testing.T) {
+		w, store, res, img, lib := backfillWorker(t)
+		first, _ := twoShows(t, w, store, res, lib)
+		img.errs = map[string]error{artHeader: fmt.Errorf("%w: GET 404", musora.ErrImageMissing)}
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "tvshow.nfo"}) {
+			t.Errorf("show folder holds %v, want the background and the nfo", got)
+		}
+	})
+	t.Run("for now", func(t *testing.T) {
+		w, store, res, img, lib := backfillWorker(t)
+		first, _ := twoShows(t, w, store, res, lib)
+		img.errs = map[string]error{artHeader: errors.New("GET 503")}
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
+			t.Errorf("show folder holds %v, want the background only", got)
+		}
+		img.errs = nil
+		before := len(img.fetched())
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
+			t.Errorf("show folder holds %v after a retry, want all three", got)
+		}
+		if got := img.fetched()[before:]; !reflect.DeepEqual(got, []string{artHeader}) {
+			t.Errorf("the retry fetched %v, want the poster only", got)
+		}
+	})
+	t.Run("out of reach", func(t *testing.T) {
+		w, store, res, img, lib := backfillWorker(t)
+		first, second := twoShows(t, w, store, res, lib)
+		img.errs = map[string]error{artHeader: fmt.Errorf("%w: dial tcp: timeout", musora.ErrUnreachable)}
+		w.EnsureShowFiles(context.Background())
+		for _, dir := range []string{first, second} {
+			if got := showFileNames(t, dir); len(got) != 0 {
+				t.Errorf("%s holds %v, want nothing", dir, got)
+			}
+		}
+		if slices.Contains(res.asked(), 5555) || slices.Contains(img.fetched(), artSquare) {
+			t.Errorf("asked %v, fetched %v: the step went on", res.asked(), img.fetched())
+		}
+		img.errs = nil
+		w.EnsureShowFiles(context.Background())
+		if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
+			t.Errorf("the next cycle left %v in the song's show, want its poster and nfo", got)
+		}
+	})
+	t.Run("Musora out of reach", func(t *testing.T) {
+		w, store, res, _, lib := backfillWorker(t)
+		twoShows(t, w, store, res, lib)
+		res.errs = map[int]error{4242: &url.Error{Op: "Post", URL: "https://sanity", Err: errors.New("no route")}}
+		w.EnsureShowFiles(context.Background())
+		if slices.Contains(res.asked(), 5555) {
+			t.Errorf("asked %v: the step went on", res.asked())
+		}
+	})
+}
+
+// TestPlacementOutOfReachStopsTheShowFilesForTheCycle proves a placement that
+// could not reach the image server stops every other show-file fetch of the
+// cycle (the later placements', and the cycle's own step), so an outage
+// costs one timeout, not one per show; the next cycle tries again.
+func TestPlacementOutOfReachStopsTheShowFilesForTheCycle(t *testing.T) {
+	w, store, _, res, img, lib, _ := artWorker(t)
+	store.follows[3] = database.Follow{ID: 3, Kind: "node", RailcontentID: sql.NullInt64{Int64: 5555, Valid: true}, Title: "Second Course"}
+	store.queue = append(store.queue, queuedJob(2, 3, 101))
+	store.lessons[101] = database.Lesson{RailcontentID: 101, Position: sql.NullInt64{Int64: 1, Valid: true}}
+	res.docs[101] = lesson(101, "Lesson B")
+	res.docs[5555] = &musora.Lesson{ID: 5555, Thumbnail: artSquare, Type: "song"}
+	img.errs = map[string]error{artHeader: fmt.Errorf("%w: timeout", musora.ErrUnreachable)}
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	store.withFiles = []database.Lesson{inFollow(recordedRow(101, filepath.Join(lib, "Second Course", "Season 01"), "b.mp4"), 3)}
+	w.EnsureShowFiles(context.Background())
+	if got := img.fetched(); !reflect.DeepEqual(got, []string{artHeader}) {
+		t.Errorf("fetched %v in the cycle, want the one that failed only", got)
+	}
+	assertExist(t, true, filepath.Join(lib, "Second Course", "Season 01", "Second Course - s01e01 - Lesson B.mp4"))
+	assertExist(t, false, filepath.Join(lib, "Beginner Course", "tvshow.nfo"), filepath.Join(lib, "Second Course", "tvshow.nfo"))
+
+	img.errs = nil
+	w.EnsureShowFiles(context.Background())
+	assertExist(t, true, filepath.Join(lib, "Second Course", "poster.jpg"), filepath.Join(lib, "Second Course", "tvshow.nfo"))
+}
+
+// TestShowDocFollowsPlexShow proves the show's files come from the document
+// the show is named after, by plexShow's branches: a node follow's node
+// (never the lesson's own course, and the lesson itself when it is the node),
+// an instructor follow's course, or for a lesson in no course the followed
+// instructor's own entry (not merely the first), and for a lesson with no
+// follow its course, or the lesson itself.
+func TestShowDocFollowsPlexShow(t *testing.T) {
+	inPack := lesson(100, "Lesson A")
+	inPack.ParentContentData = []musora.ParentContent{{ID: 55, Title: "Some Pack"}}
+	noCourse := lesson(300, "Solo")
+	noCourse.Instructors = []musora.Instructor{{Name: "Someone Else", Slug: "someone-else", CoachCardImage: artSquare}, {Name: "Mike Johnston", Slug: "mike-johnston", CoachCardImage: artCoach}}
+	docs := map[int]*musora.Lesson{4242: courseDoc(4242, "Node"), 55: courseDoc(55, "Pack")}
+	for _, tc := range []struct {
+		name   string
+		f      database.Follow
+		lesson *musora.Lesson
+		asked  []int
+		doc    int // the document's id, or 0 for the instructor's entry
+		poster string
+	}{
+		{"node follow", nodeFollow(), inPack, []int{4242}, 4242, artHeader},
+		{"node follow of the lesson itself", database.Follow{Kind: "node", RailcontentID: sql.NullInt64{Int64: 100, Valid: true}, Title: "Lesson A"}, inPack, nil, 100, ""},
+		{"instructor follow, lesson in a course", instructorFollow(), inPack, []int{55}, 55, artHeader},
+		{"instructor follow, lesson in no course", instructorFollow(), noCourse, nil, 0, artCoach},
+		{"no follow, lesson in a course", database.Follow{}, inPack, []int{55}, 55, artHeader},
+		{"no follow, lesson in no course", database.Follow{}, noCourse, nil, 300, artSquare},
+	} {
+		res := &countingResolver{docs: docs}
+		w := &Worker{Resolver: res}
+		doc, err := w.showDoc(tc.f, tc.lesson)
+		if err != nil || doc == nil {
+			t.Errorf("%s: showDoc = %v, %v", tc.name, doc, err)
+			continue
+		}
+		if !reflect.DeepEqual(res.asked(), tc.asked) || doc.ID != tc.doc {
+			t.Errorf("%s: asked %v for document %d, want %v for %d", tc.name, res.asked(), doc.ID, tc.asked, tc.doc)
+		}
+		if poster, _ := musora.ShowArt(doc); poster != tc.poster {
+			t.Errorf("%s: poster %q, want %q", tc.name, poster, tc.poster)
+		}
+	}
+}
+
+// TestEnsureShowFilesAsksOnceAboutAShowItCanNotName proves a show folder none
+// of whose lessons leads to a show of its name (a course renamed on Musora)
+// gets nothing, since nothing proves what it is, and is not asked about again
+// in the same process.
+func TestEnsureShowFilesAsksOnceAboutAShowItCanNotName(t *testing.T) {
+	w, store, res, _, lib := backfillWorker(t)
+	old := filepath.Join(lib, "Old Name", "Season 01")
+	seedSeason(t, old)
+	store.withFiles = []database.Lesson{inFollow(legacyRow(200, "Groove", 1, old, "Old Name - s01e01 - Groove.mp4"), instructorFollow().ID)}
+	renamed := lesson(200, "Groove")
+	renamed.ParentContentData = []musora.ParentContent{{ID: 77, Title: "New Name"}}
+	res.docs[200] = renamed
+	var log bytes.Buffer
+	w.Log = &log
+	w.EnsureShowFiles(context.Background())
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, filepath.Dir(old)); len(got) != 0 {
+		t.Errorf("wrote %v into a show it could not name", got)
+	}
+	if !reflect.DeepEqual(res.asked(), []int{200}) {
+		t.Errorf("asked %v, want lesson 200 once", res.asked())
+	}
+	if !strings.Contains(log.String(), "not asked again") {
+		t.Errorf("log %q does not say so", log.String())
+	}
+}
+
+// TestNoShowFilesInTheDefaultLayout proves the default layout is unchanged:
+// no show files, from a placement or from the cycle's step, and its image
+// keeps its "-poster.jpg" name.
+func TestNoShowFilesInTheDefaultLayout(t *testing.T) {
+	w, s, dl, f, _ := realWorker(t, "")
+	withPoster(dl)
+	img := &fakeImages{}
+	w.Images = img
+	ctx := context.Background()
+	if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.RunOnce(ctx, 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	w.EnsureShowFiles(ctx)
+	course := filepath.Join(w.Cfg.LibraryDir, "Beginner Course")
+	if got := showFileNames(t, course); !reflect.DeepEqual(got, []string{"05 - Lesson A"}) {
+		t.Errorf("course folder holds %v, want the lesson folder only", got)
+	}
+	assertExist(t, true, filepath.Join(course, "05 - Lesson A", "05 - Lesson A-poster.jpg"))
+	if len(img.fetched()) != 0 {
+		t.Errorf("fetched %v in the default layout", img.fetched())
+	}
+}
+
+// showStepStore is fakeDaemonStore recording the show-file step's read.
+type showStepStore struct{ *fakeDaemonStore }
+
+func (s showStepStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	s.record("with-files")
+	return nil, nil
+}
+
+// TestDaemonCycleEndsWithTheShowFileStep proves each daemon cycle runs the
+// show-file step once its drain is done, so shows no download of the cycle
+// placed into get their files without a restart; and a paused daemon skips
+// it, as it skips the queue.
+func TestDaemonCycleEndsWithTheShowFileStep(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		store := newFakeDaemonStore()
+		d := newTestDaemon(t, store)
+		wrapped := showStepStore{store}
+		d.Store, d.Planner.Store, d.Worker.Store = wrapped, wrapped, wrapped
+		d.Worker.Cfg.LibraryDir, d.Worker.Cfg.Layout, d.Worker.Images = t.TempDir(), LayoutPlexTV, &fakeImages{}
+		if paused {
+			d.Pause()
+		}
+		if err := d.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		ops := store.snapshotOps()
+		last := len(ops) - 1
+		stepRan := last >= 0 && ops[last] == "with-files" && slices.Contains(ops[:last], "drain-empty")
+		if stepRan == paused {
+			t.Errorf("paused=%v: ops %v, want the show-file step last %v", paused, ops, map[bool]string{false: "", true: "skipped"}[paused])
+		}
+	}
+}

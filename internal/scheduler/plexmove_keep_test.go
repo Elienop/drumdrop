@@ -125,7 +125,9 @@ func TestPlexTVMoveSetsNothingAsideUnlessItCanSetAll(t *testing.T) {
 // TestPlexTVUndoThatCannotRenameBackKeepsTheEntry proves an entry the move
 // renamed into the season folder and could not rename back (its only copy) is
 // still owned by the lesson after the undo, so the library never holds an
-// untracked only copy.
+// untracked only copy. The videos are placed last, so every entry placed
+// before [Original] failed is stuck: the image, the nfo, the resources and
+// [Drumless].
 func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "lib")
@@ -143,10 +145,12 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("its only copy is left at %q", stuck)) {
 		t.Errorf("err = %v, want the stuck entry named", err)
 	}
-	if res.seasonDir != "" || !res.known || !reflect.DeepEqual(res.kept, []string{stuck}) {
-		t.Errorf("result %+v, want the stuck entry still owned", res)
+	// The undo goes newest first.
+	all := paths(season, episodeBase+" [Drumless].mp4", episodeBase+" resources", episodeBase+".nfo", episodeBase+".jpg")
+	if res.seasonDir != "" || !res.known || !reflect.DeepEqual(res.kept, all) {
+		t.Errorf("result %+v, want the stuck entries still owned", res)
 	}
-	assertExist(t, true, stuck)
+	assertExist(t, true, all...)
 }
 
 // TestPlexTVUndoThatCannotRemoveACopyKeepsIt proves copies the undo could not

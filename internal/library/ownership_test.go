@@ -331,6 +331,41 @@ func TestLegacyEpisodeEntry(t *testing.T) {
 	}
 }
 
+// TestEpisodeEntryKnowsTheImageTheLegacyGrammarDoesNot pins the episode's
+// image name "<base>.jpg" (owner ruling #78): EpisodeEntry, which only ever
+// reads entries a record gives the lesson (ruling (j)), knows it, look-alikes
+// excepted; the legacy grammar does not, since no lesson placed before the
+// record has one, so a legacy lesson's delete never takes a "<base>.jpg" the
+// owner may have put there.
+func TestEpisodeEntryKnowsTheImageTheLegacyGrammarDoesNot(t *testing.T) {
+	base := "S - s01e05 - Five"
+	if !EpisodeEntry(base, base+".jpg", false, nil) {
+		t.Errorf("EpisodeEntry(%q) = false, want the episode's image", base+".jpg")
+	}
+	for _, name := range []string{base + ".5.jpg", base + "-Part Fill.jpg", base + " [Live].jpg", base + ".JPG"} {
+		if EpisodeEntry(base, name, false, nil) {
+			t.Errorf("EpisodeEntry(%q) = true, want another lesson's name", name)
+		}
+	}
+	if EpisodeEntry(base, base+".jpg", true, nil) {
+		t.Errorf("a folder named like the image read as the image")
+	}
+	if legacyEpisodeEntry(base, base+".jpg", false, nil) {
+		t.Errorf("legacyEpisodeEntry(%q) = true, want the legacy grammar to leave it", base+".jpg")
+	}
+
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e05 - Five.jpg")
+	row := legacyRow(1, "Five", 5, season, "Show - s01e05 - Five.mp4")
+	got, err := plan(t, libraryOf(season), row, []database.Lesson{row})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if want := sorted(paths(season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")); !reflect.DeepEqual(sorted(got.Remove), want) {
+		t.Errorf("a legacy row owns %v, want %v (never the unrecorded image)", got.Remove, want)
+	}
+}
+
 // TestLegacyEpisodeEntryLeavesASongOfAnotherLesson covers a song whose title
 // extends a legacy lesson's ("Five [Live]" beside "Five"): its version files
 // "<Five> [Live] [Drumless].mp4" read as "Five" plus a label, but the "[Live]"

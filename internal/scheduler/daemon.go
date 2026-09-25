@@ -79,7 +79,8 @@ func (d *Daemon) progress() ProgressSink {
 	return d.Progress
 }
 
-// RunOnce runs one full cycle: plan, then drain. It plans first so any newly
+// RunOnce runs one full cycle: plan, drain, then the plex-tv shows' own files
+// (Worker.EnsureShowFiles). It plans first so any newly
 // discovered lessons are queued before the worker drains, letting a single cycle
 // download brand-new content. It logs a one-line summary (planned, processed) and
 // returns the first fatal error encountered (a planner or worker store failure);
@@ -92,6 +93,12 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 
 	planned, perr := d.Planner.Plan(ctx, 0)
 	processed, werr := d.Worker.RunOnce(ctx, 0)
+	// The shows no download of this cycle placed into get their missing own
+	// files (plex-tv only; a no-op once every show has them). A pause stops
+	// it like it stops the queue.
+	if werr == nil && ctx.Err() == nil && !d.IsPaused() {
+		d.Worker.EnsureShowFiles(ctx)
+	}
 
 	fmt.Fprintf(d.log(), "cycle: planned %d, processed %d\n", planned, processed)
 	d.progress().Emit(ProgressEvent{
