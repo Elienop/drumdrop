@@ -169,12 +169,22 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 
 	t.Run("created through a hidden file", func(t *testing.T) {
 		r, dir := open(t)
-		var renamed []string
+		var renamed, flushed []string
+		origSync := syncFile
+		syncFile = func(f *os.File) error {
+			flushed = append(flushed, filepath.Base(f.Name()))
+			return origSync(f)
+		}
+		t.Cleanup(func() { syncFile = origSync })
 		stubRename(t, func(oldpath, newpath string) error {
-			// The file is whole before it takes its name, and nothing is at
-			// the name yet: a crash can only ever leave the hidden file.
+			// The file is whole, and on disk, before it takes its name, and
+			// nothing is at the name yet: a crash can only ever leave the
+			// hidden file.
 			if readFile(oldpath) != "image" {
 				t.Errorf("renamed %s holding %q, want the whole file", oldpath, readFile(oldpath))
+			}
+			if !slices.Contains(flushed, filepath.Base(oldpath)) {
+				t.Errorf("renamed %s before it was flushed (flushed %v)", oldpath, flushed)
 			}
 			renamed = append(renamed, filepath.Base(oldpath)+" -> "+filepath.Base(newpath))
 			return renameNoReplace(oldpath, newpath)
