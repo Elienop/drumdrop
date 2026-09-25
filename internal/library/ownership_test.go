@@ -474,3 +474,23 @@ func TestHoldsAndIsLessonFolder(t *testing.T) {
 		}
 	}
 }
+
+// TestClaimantsTriesEveryNameOfAnUnsettledLegacyEpisode is the same rule where
+// deletes and moves read it: the subtitle that only the middle of lesson 2's
+// candidate names ("…Five [Live]", "…Five", "…Six") matches is lesson 2's, so
+// it stays out of lesson 1's reach.
+func TestClaimantsTriesEveryNameOfAnUnsettledLegacyEpisode(t *testing.T) {
+	root := t.TempDir()
+	season := filepath.Join(root, "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Five.en.vtt", "Show - s01e04 - Four.mp4")
+	self := legacyRow(1, "Four", 4, season, "Show - s01e04 - Four.mp4")
+	other := legacyRow(2, "Six", 5, season, "Show - s01e05 - Five [Live].mp4")
+	c, err := NewClaims(root, []database.Lesson{self, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := c.Claimants(filepath.Join(season, "Show - s01e05 - Five.en.vtt"), 1, true)
+	if err != nil || !reflect.DeepEqual(ids, []int{2}) {
+		t.Errorf("Claimants = %v, %v; want [2]", ids, err)
+	}
+}

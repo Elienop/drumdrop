@@ -256,3 +256,18 @@ func TestLeftBehindReadsNothingWithTheSettingUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestLeftBehindTriesEveryNameOfAnUnsettledLegacyEpisode pins that an unsettled
+// legacy name counts a file under any of its candidate names. Titled "Six",
+// episode 5, video "…Five [Live].mp4" and no .nfo, the row's names are the
+// stem, "…Five" and the title's "…Six" (legacyEpisodeBases); the subtitle left
+// behind matches only the middle one, so trying only the first or only the
+// last name would read it as moved.
+func TestLeftBehindTriesEveryNameOfAnUnsettledLegacyEpisode(t *testing.T) {
+	_, lib, oldSeason := movedLibrary(t)
+	seedSeason(t, oldSeason, "Show - s01e05 - Five.en.vtt")
+	row := legacyRow(100, "Six", 5, oldSeason, "Show - s01e05 - Five [Live].mp4")
+	if dir, left, err := leftBehind(t, lib, row); !left || err != nil {
+		t.Errorf("LeftBehind = %q, %v, %v; want true (the middle name's subtitle is still there)", dir, left, err)
+	}
+}
