@@ -163,28 +163,7 @@ func TestFetchJPEG(t *testing.T) {
 	var ua string
 	srv := tlsImageServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua = r.Header.Get("User-Agent")
-		switch r.URL.Path {
-		case "/max.jpg", "/big.jpg":
-			// 16 MiB, the cap, by value: far above any image of Musora's.
-			body := make([]byte, 16<<20+map[bool]int{true: 1}[r.URL.Path == "/big.jpg"])
-			copy(body, jpegBytes)
-			_, _ = w.Write(body)
-		case "/ok.jpg":
-			w.Header().Set("Content-Type", "image/jpeg")
-			_, _ = w.Write(jpegBytes)
-		case "/png.jpg":
-			w.Header().Set("Content-Type", "image/png")
-			_, _ = w.Write([]byte("\x89PNG\r\n"))
-		case "/page.jpg":
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte("<html>maintenance</html>"))
-		case "/gone.jpg":
-			http.Error(w, "gone", http.StatusGone)
-		case "/busy.jpg":
-			http.Error(w, "busy", http.StatusServiceUnavailable)
-		default:
-			http.NotFound(w, r)
-		}
+		serveFetchJPEGCase(w, r)
 	}))
 	ctx := context.Background()
 
@@ -206,17 +185,7 @@ func TestFetchJPEG(t *testing.T) {
 		"/page.jpg":    nil,
 		"/busy.jpg":    nil,
 	} {
-		got, err := FetchJPEG(ctx, srv.URL+path)
-		if err == nil || got != nil {
-			t.Errorf("%s: %q, %v; want an error and no bytes", path, got, err)
-			continue
-		}
-		if want != nil && !errors.Is(err, want) {
-			t.Errorf("%s: err = %v, want %v", path, err, want)
-		}
-		if want == nil && (errors.Is(err, ErrImageMissing) || errors.Is(err, ErrUnreachable)) {
-			t.Errorf("%s: err = %v, want one worth trying again", path, err)
-		}
+		checkFetchJPEGFails(t, srv.URL, path, want)
 	}
 
 	down := httptest.NewTLSServer(http.NotFoundHandler())
@@ -224,6 +193,50 @@ func TestFetchJPEG(t *testing.T) {
 	down.Close()
 	if _, err := FetchJPEG(ctx, url); !errors.Is(err, ErrUnreachable) {
 		t.Errorf("closed server: err = %v, want ErrUnreachable", err)
+	}
+}
+
+// serveFetchJPEGCase answers each path TestFetchJPEG asks for.
+func serveFetchJPEGCase(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/max.jpg", "/big.jpg":
+		// 16 MiB, the cap, by value: far above any image of Musora's.
+		body := make([]byte, 16<<20+map[bool]int{true: 1}[r.URL.Path == "/big.jpg"])
+		copy(body, jpegBytes)
+		_, _ = w.Write(body)
+	case "/ok.jpg":
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(jpegBytes)
+	case "/png.jpg":
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("\x89PNG\r\n"))
+	case "/page.jpg":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html>maintenance</html>"))
+	case "/gone.jpg":
+		http.Error(w, "gone", http.StatusGone)
+	case "/busy.jpg":
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// checkFetchJPEGFails pins that FetchJPEG of path on the server at base
+// fails with no bytes: with want (ErrImageMissing) when it is given, else
+// with an error worth trying again (neither missing nor unreachable).
+func checkFetchJPEGFails(t *testing.T, base, path string, want error) {
+	t.Helper()
+	got, err := FetchJPEG(context.Background(), base+path)
+	if err == nil || got != nil {
+		t.Errorf("%s: %q, %v; want an error and no bytes", path, got, err)
+		return
+	}
+	if want != nil && !errors.Is(err, want) {
+		t.Errorf("%s: err = %v, want %v", path, err, want)
+	}
+	if want == nil && (errors.Is(err, ErrImageMissing) || errors.Is(err, ErrUnreachable)) {
+		t.Errorf("%s: err = %v, want one worth trying again", path, err)
 	}
 }
 
