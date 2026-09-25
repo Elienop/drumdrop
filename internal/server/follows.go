@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -13,8 +15,10 @@ import (
 
 // createFollowRequest is the POST /api/follows body. kind selects the follow
 // type; node follows take an id or url (parsed by engine.ExtractID), instructor
-// follows take a slug. brand and quality are optional and default to the CLI's
-// defaults (drumeo / best).
+// follows take a name, slug or coach-page link in slug (normalised by
+// musora.NormalizeInstructor). brand and quality are optional and default to
+// the CLI's defaults (drumeo / best); an instructor link's brand fills an empty
+// brand.
 type createFollowRequest struct {
 	Kind    string `json:"kind"`
 	ID      string `json:"id"`
@@ -31,7 +35,7 @@ type createFollowRequest struct {
 func (s *Server) handleListFollows(w http.ResponseWriter, r *http.Request) {
 	follows, err := s.store.ListFollows(r.Context())
 	if err != nil {
-		writeStoreErr(w, err, "follows not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTOs(follows))
@@ -46,7 +50,7 @@ func (s *Server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.store.GetFollow(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeLoadErr(w, err, msgNoSuchFollow)
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTO(f))
@@ -64,12 +68,12 @@ func (s *Server) handleFollowLessons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeLoadErr(w, err, msgNoSuchFollow)
 		return
 	}
 	lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lessons not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	if status := r.URL.Query().Get("status"); status != "" {
@@ -101,43 +105,53 @@ func validQuality(q string) bool {
 func (s *Server) handleCreateFollow(w http.ResponseWriter, r *http.Request) {
 	var req createFollowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 
-	brand := req.Brand
-	if brand == "" {
-		brand = "drumeo"
-	}
 	quality := req.Quality
 	if quality == "" {
 		quality = "best"
 	}
 	if !validQuality(quality) {
-		writeErr(w, http.StatusBadRequest, "quality must be one of: best, 2160, 1440, 1080, 720, 480")
+		writeErr(w, http.StatusBadRequest, msgBadQuality)
 		return
 	}
 
+	// The brand is stored with the follow and its lessons, and an instructor
+	// follow's every sync queries by it: one Musora doesn't have is refused
+	// here, not left to fail each sync. An instructor follow settles its brand
+	// with its input (a pasted link names one), so it's checked there.
 	switch req.Kind {
 	case "node":
+		brand, err := musora.NodeBrand(req.Brand)
+		if err != nil {
+			writeLookupErr(w, "add follow", err, msgAddUnreachable)
+			return
+		}
 		s.createNodeFollow(w, r, req, brand, quality)
 	case "instructor":
-		s.createInstructorFollow(w, r, req, brand, quality)
+		s.createInstructorFollow(w, r, req, quality)
 	default:
-		writeErr(w, http.StatusBadRequest, "kind must be node or instructor")
+		writeErr(w, http.StatusBadRequest, msgBadKind)
 	}
 }
 
 // createNodeFollow handles a node follow: parse the id from id|url, resolve a
-// best-effort title, then AddNodeFollow.
+// best-effort title, then AddNodeFollow. A coach-page link is refused: its
+// number is the instructor's, not a lesson's or course's.
 func (s *Server) createNodeFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, brand, quality string) {
 	target := req.ID
 	if target == "" {
 		target = req.URL
 	}
+	if musora.IsCoachLink(target) {
+		writeErr(w, http.StatusBadRequest, msgCoachLinkAsNode)
+		return
+	}
 	id := engine.ExtractID(target)
 	if id == 0 {
-		writeErr(w, http.StatusBadRequest, "could not parse a content id from id or url")
+		writeErr(w, http.StatusBadRequest, msgNoContentID)
 		return
 	}
 
@@ -155,38 +169,49 @@ func (s *Server) createNodeFollow(w http.ResponseWriter, r *http.Request, req cr
 	s.writeFollowResult(w, f, err)
 }
 
-// createInstructorFollow handles an instructor follow: validate the slug,
-// resolve the instructor's display name, then AddInstructorFollow.
-func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, brand, quality string) {
+// createInstructorFollow handles an instructor follow: normalise what was typed
+// and settle the brand exactly as the preview does (musora.NormalizeInstructor),
+// resolve the instructor's display name, then AddInstructorFollow with the
+// normalised slug. Musora not answering is a 502; input or a brand that can't
+// be used, or an instructor Musora doesn't have, is a 400.
+func (s *Server) createInstructorFollow(w http.ResponseWriter, r *http.Request, req createFollowRequest, quality string) {
 	if req.Slug == "" {
-		writeErr(w, http.StatusBadRequest, "slug is required for an instructor follow")
+		writeErr(w, http.StatusBadRequest, msgSlugRequired)
 		return
 	}
-	id, name, ok, err := musora.ResolveInstructorID(req.Slug)
+	slug, brand, err := musora.NormalizeInstructor(req.Slug, req.Brand)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "could not resolve instructor")
+		writeLookupErr(w, "add follow", err, msgAddUnreachable)
+		return
+	}
+	id, name, ok, err := musora.ResolveInstructorID(slug, brand)
+	if err != nil {
+		writeLookupErr(w, "add follow: look up instructor", err, msgAddUnreachable)
 		return
 	}
 	if !ok || id == "" {
-		writeErr(w, http.StatusBadRequest, "no instructor found for that slug")
+		writeErr(w, http.StatusBadRequest, msgNoInstructor)
 		return
 	}
 
-	f, err := s.store.AddInstructorFollow(r.Context(), req.Slug, name, brand, quality)
+	f, err := s.store.AddInstructorFollow(r.Context(), slug, name, brand, quality)
 	s.writeFollowResult(w, f, err)
 }
 
 // writeFollowResult finishes a create: ErrAlreadyFollowing → 200 with the
-// existing row (idempotent), a nil error → 201 with the new row, any other
-// error → 500.
+// existing row (idempotent), a nil error → 201 with the new row, and a sync
+// started now, whose planning queues the new follow's lessons (owner ruling
+// 2026-09-24 (m)), any other error → 500, its detail logged.
 func (s *Server) writeFollowResult(w http.ResponseWriter, f database.Follow, err error) {
 	switch {
 	case err == nil:
+		s.kick()
 		writeJSON(w, http.StatusCreated, followDTO(f))
 	case errors.Is(err, database.ErrAlreadyFollowing):
 		writeJSON(w, http.StatusOK, followDTO(f))
 	default:
-		writeErr(w, http.StatusInternalServerError, "could not create follow")
+		fmt.Fprintf(logOut, "drumdrop: add follow: %v\n", err)
+		writeErr(w, http.StatusInternalServerError, msgFollowNotAdded)
 	}
 }
 
@@ -196,8 +221,8 @@ func (s *Server) writeFollowResult(w http.ResponseWriter, f database.Follow, err
 // — and the change is forward-only (existing lessons are untouched; the new
 // quality governs lessons enqueued from now on). The quality is validated
 // against the allowed preset set (400 on anything else, reusing validQuality so
-// it matches create). It reads the follow first so an unknown id maps cleanly to
-// 404. A malformed body is a 400; a non-integer id is a 400.
+// it matches create). An unknown id is a 404 (UpdateFollowQuality answers a
+// wrapped sql.ErrNoRows). A malformed body is a 400; a non-integer id is a 400.
 func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
@@ -206,98 +231,211 @@ func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 
 	var req updateFollowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 	if !validQuality(req.Quality) {
-		writeErr(w, http.StatusBadRequest, "quality must be one of: best, 2160, 1440, 1080, 720, 480")
+		writeErr(w, http.StatusBadRequest, msgBadQuality)
 		return
 	}
 
-	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "follow not found")
-		return
-	}
 	if err := s.store.UpdateFollowQuality(r.Context(), id, req.Quality); err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeStoreErr(w, err, msgEditGone)
 		return
 	}
 	f, err := s.store.GetFollow(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeStoreErr(w, err, msgEditGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, followDTO(f))
 }
 
 // handleDeleteFollow serves DELETE /api/follows/{id}: 204 on success, 404 if no
-// follow has that id, 400 for a non-integer id. It reads the follow first so an
-// unknown id maps cleanly to 404 (RemoveFollowCascade's own miss error is not a
-// wrapped sql.ErrNoRows).
+// follow has that id (also when another request removed it meanwhile), 400 for
+// a non-integer id.
 //
-// Order of operations:
-//  1. Cancel the follow's running job(s) so a live download actually stops
-//     (mirrors handleCancelJob: deps.CancelRunning kills the yt-dlp process; the
-//     worker finalizes the job/lesson asynchronously). nil-safe when no worker.
-//  2. With ?files=true, remove the follow's downloaded lessons' files (the
-//     downloads copy AND the library mirror) BEFORE the rows are deleted, since
-//     the lesson rows carry the on-disk paths. Default (?files absent/false)
-//     keeps the files — delete is opt-in.
-//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx).
+// Without ?files=true (the default: delete is opt-in) the files stay: one
+// transaction removes the jobs of the follow's lessons, the lessons and the
+// follow (RemoveFollowCascade), then the running downloads are killed; what
+// they wrote is kept, as asked. Jobs the follow queued for another follow's
+// lessons are left alone.
 //
-// The cancel→files→cascade ordering is best-effort: the worker's async
-// canceled/skipped finalization may still be in flight, so a file delete can
-// race a worker still writing the lesson dir, and the cascade's job delete makes
-// the worker's later MarkJobCanceled a benign 0-row no-op. The handler does not
-// block on the worker (mirroring handleCancelJob).
+// With ?files=true:
+//  0. Refuse, changing nothing, when a lesson's own files are still in a
+//     season folder the library folder setting no longer points at (409), or
+//     which files are whose can't be read (500) (refuseUpFront): no download
+//     is stopped, and no queued job is dropped.
+//  1. Mark every lesson of the follow deleting and remove their queued,
+//     running and canceled jobs (BeginFollowDelete), then kill the running
+//     downloads (deps.CancelRunning, nil-safe when no worker is attached).
+//     From here on no download that was under way can record anything, and no
+//     new one can start for those lessons; what a stopped download wrote is
+//     removed by the worker. The delete runs to the end even if the client
+//     goes away, renews its hold on the lessons while it runs, and always
+//     ends it (holdDelete).
+//  2. Remove the files of every lesson that records any (whatever its
+//     status), following each lesson's record exactly as the lesson delete
+//     does, and tombstone each lesson whose files are all gone. If a lesson's
+//     files could not all be removed, that lesson records only what is left,
+//     the follow and every lesson row are kept, the detail is logged, and the
+//     client gets a fixed 500: deleting the rows would leave those files
+//     tracked by nothing. If any lesson's files are still in a season folder
+//     the library folder setting no longer points at, nothing is removed and
+//     the answer is a 409 (deleteFollowFiles).
+//  3. Cascade-delete the follow's jobs + lessons + the follow row (one tx). It
+//     refuses (409) if a lesson records files again by then (one the planner
+//     found after step 1 and downloaded meanwhile), and answers 404 if another
+//     request removed the follow meanwhile.
 func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
 		return
 	}
 	if _, err := s.store.GetFollow(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "follow not found")
+		writeStoreErr(w, err, msgFollowGone)
 		return
 	}
 
-	// 1. Cancel any running job(s) for this follow so a live download stops. No
-	// by-follow jobs query exists, so list running jobs and filter by follow_id.
-	if s.deps.CancelRunning != nil {
-		running, err := s.store.ListJobsByStatus(r.Context(), database.JobRunning)
-		if err != nil {
-			writeStoreErr(w, err, "follow not found")
-			return
-		}
-		for _, j := range running {
-			if j.FollowID.Valid && j.FollowID.Int64 == id {
-				s.deps.CancelRunning(j.ID)
-			}
-		}
-	}
-
-	// 2. With ?files=true, remove the downloaded lessons' files before the rows go.
-	if deleteFilesRequested(r) {
-		lessons, err := s.store.ListLessonsByFollow(r.Context(), id)
-		if err != nil {
-			writeStoreErr(w, err, "follow not found")
-			return
-		}
-		for _, l := range lessons {
-			if l.Status == database.StatusDownloaded && l.OutputDir.Valid {
-				// Best-effort: use the RAW stored container path (not the host-mapped
-				// DTO). A failure is logged-by-being-ignored — file cleanup must not
-				// block removing the follow records.
-				_ = removeLessonFiles(s.cfg.Layout, s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
-			}
-		}
-	}
-
-	// 3. Cascade-delete jobs + lessons + the follow.
-	if err := s.store.RemoveFollowCascade(r.Context(), id); err != nil {
-		writeErr(w, http.StatusInternalServerError, "could not delete follow")
+	if !deleteFilesRequested(r) {
+		s.removeFollowKeepingFiles(w, r, id)
 		return
 	}
+
+	// 0. Refuse what can be known before anything is stopped.
+	before, err := s.store.ListLessonsByFollow(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, msgFollowGone)
+		return
+	}
+	switch err := s.refuseUpFront(r.Context(), before...); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgFollowNoClaimsUpFront)
+		return
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgFollowLeftBehind)
+		return
+	}
+
+	// 1. Stop every download of this follow's lessons, for good.
+	lessons, running, err := s.store.BeginFollowDelete(r.Context(), id)
+	if errors.Is(err, database.ErrLessonDeleting) {
+		writeErr(w, http.StatusConflict, msgFollowDeleting)
+		return
+	}
+	if err != nil {
+		writeStoreErr(w, err, msgFollowGone)
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	ids := make([]int, 0, len(lessons))
+	for _, l := range lessons {
+		ids = append(ids, l.RailcontentID)
+	}
+	hold := s.holdDelete(ctx, ids...)
+	defer s.endDelete(ctx, hold)
+	s.killRunning(running)
+
+	// 2. Remove every lesson's files, then its paths.
+	if !s.deleteFollowFiles(ctx, w, hold, lessons) {
+		return
+	}
+	// 3. Cascade, unless a lesson records files again by now.
+	running, err = s.store.RemoveFilelessFollowCascade(ctx, id)
+	switch {
+	case errors.Is(err, database.ErrFollowHasFiles):
+		writeErr(w, http.StatusConflict, msgFollowNewFiles)
+		return
+	case isNotFound(err):
+		writeErr(w, http.StatusNotFound, msgFollowGoneLate)
+		return
+	case err != nil:
+		fmt.Fprintf(logOut, "drumdrop: remove follow %d: %v\n", id, err)
+		writeErr(w, http.StatusInternalServerError, msgFollowNotSaved)
+		return
+	}
+	s.killRunning(running)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeFollowKeepingFiles removes follow id and its lessons' rows, keeping
+// every file, and kills the downloads it stopped.
+func (s *Server) removeFollowKeepingFiles(w http.ResponseWriter, r *http.Request, id int64) {
+	running, err := s.store.RemoveFollowCascade(r.Context(), id)
+	switch {
+	case errors.Is(err, database.ErrLessonDeleting):
+		writeErr(w, http.StatusConflict, msgFollowDeleting)
+		return
+	case isNotFound(err):
+		writeErr(w, http.StatusNotFound, msgFollowGone)
+		return
+	case err != nil:
+		fmt.Fprintf(logOut, "drumdrop: remove follow %d: %v\n", id, err)
+		writeErr(w, http.StatusInternalServerError, msgFollowNotRemoved)
+		return
+	}
+	s.killRunning(running)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteFollowFiles removes the files of every lesson that has any
+// (Lesson.HasFiles), and tombstones each one whose files are all gone. When
+// any lesson's own files are still in a season folder the library folder
+// setting no longer points at (leftBehind), it removes nothing at all and
+// answers 409: the refusal is known before the first removal, so the follow
+// and every lesson stay exactly as they were, rather than half deleted, and
+// the owner moves the files and removes it again. (handleDeleteFollow asks
+// the same before it begins; this is the check once the lessons are held.) The
+// lessons are as BeginFollowDelete read them, and nothing can change them
+// meanwhile: no download can record for a lesson being deleted. It writes the
+// error response and returns false when any lesson's files could not all be
+// removed (that lesson records what is left) or a store step failed.
+func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, hold *deleteHold, lessons []database.Lesson) bool {
+	c, err := s.claims(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
+		return false
+	}
+	switch err := leftBehind(c, lessons...); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
+		return false
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgFollowLeftBehind)
+		return false
+	}
+	kept, changed := 0, 0
+	for _, l := range lessons {
+		if !l.HasFiles() {
+			continue // no files recorded: the cascade removes the row
+		}
+		switch err := s.deleteLessonFiles(ctx, c, hold, l); {
+		case errors.Is(err, errFilesKept):
+			kept++
+		case errors.Is(err, database.ErrLessonChanged):
+			changed++
+		case errors.Is(err, errRecordNotUpdated):
+			writeErr(w, http.StatusInternalServerError, msgFollowNotSaved)
+			return false
+		case err != nil:
+			// The lesson's row is gone: another request removed the follow.
+			writeStoreErr(w, err, msgFollowGoneLate)
+			return false
+		default:
+			// Its files are gone: it claims nothing any more, so the next
+			// lesson's ownership checks must not count it.
+			c.Forget(l.RailcontentID)
+		}
+	}
+	switch {
+	case kept > 0:
+		writeErr(w, http.StatusInternalServerError, msgFollowFilesKept)
+		return false
+	case changed > 0:
+		writeErr(w, http.StatusConflict, msgFollowLessonChanged)
+		return false
+	}
+	return true
 }
 
 // deleteFilesRequested reports whether the request asked to also delete on-disk
@@ -326,7 +464,7 @@ func pathInt64(w http.ResponseWriter, r *http.Request, name string) (int64, bool
 	raw := r.PathValue(name)
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadPathNumber(name))
 		return 0, false
 	}
 	return id, true

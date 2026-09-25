@@ -1,6 +1,7 @@
 package musora
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -66,8 +67,8 @@ func TestValidateSlugRejectsInjection(t *testing.T) {
 		"a/b",                    // slash
 	}
 	for _, s := range bad {
-		if err := validateSlug(s); err == nil {
-			t.Fatalf("validateSlug(%q) accepted an invalid slug", s)
+		if err := validateSlug(s); !errors.Is(err, ErrBadSlug) {
+			t.Fatalf("validateSlug(%q) = %v, want ErrBadSlug", s, err)
 		}
 	}
 	good := []string{"aaron-edgar", "jared-falk", "mike2", "a", "0", "drum-set-101"}
@@ -80,13 +81,13 @@ func TestValidateSlugRejectsInjection(t *testing.T) {
 
 func TestValidateBrandAllowlist(t *testing.T) {
 	for _, b := range []string{"drumeo", "pianote", "guitareo", "singeo", "playbass"} {
-		if err := validateBrand(b); err != nil {
-			t.Fatalf("validateBrand(%q) rejected an allowed brand: %v", b, err)
+		if err := ValidateBrand(b); err != nil {
+			t.Fatalf("ValidateBrand(%q) rejected an allowed brand: %v", b, err)
 		}
 	}
 	for _, b := range []string{"", "Drumeo", "evil'brand", "drumeo'][0]", "rockstar"} {
-		if err := validateBrand(b); err == nil {
-			t.Fatalf("validateBrand(%q) accepted a disallowed brand", b)
+		if err := ValidateBrand(b); !errors.Is(err, ErrBadBrand) {
+			t.Fatalf("ValidateBrand(%q) = %v, want ErrBadBrand", b, err)
 		}
 	}
 }

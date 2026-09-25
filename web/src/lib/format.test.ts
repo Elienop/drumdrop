@@ -1,4 +1,13 @@
-import { formatBytes, formatRelativeTime, formatDuration } from "./format"
+import { brandName, countOf, formatBytes, formatRelativeTime, formatDuration } from "./format"
+
+describe("countOf", () => {
+  it("names one of a thing in the singular, and every other count in the plural", () => {
+    expect(countOf(1, "lesson", "lessons")).toBe("1 lesson")
+    expect(countOf(0, "lesson", "lessons")).toBe("0 lessons")
+    expect(countOf(2, "lesson", "lessons")).toBe("2 lessons")
+    expect(countOf(40, "lesson", "lessons")).toBe("40 lessons")
+  })
+})
 
 describe("formatBytes", () => {
   it("handles null and zero", () => {
@@ -32,5 +41,23 @@ describe("formatDuration", () => {
   it("formats seconds and minutes", () => {
     expect(formatDuration(45)).toBe("45s")
     expect(formatDuration(125)).toBe("2m 5s")
+  })
+})
+
+describe("brandName", () => {
+  it("names Musora's brands as Musora does", () => {
+    expect(brandName("drumeo")).toBe("Drumeo")
+    expect(brandName("pianote")).toBe("Pianote")
+    expect(brandName("guitareo")).toBe("Guitareo")
+    expect(brandName("singeo")).toBe("Singeo")
+  })
+  it("shows any other brand as sent, playbass included (its casing is unconfirmed)", () => {
+    expect(brandName("playbass")).toBe("playbass")
+    expect(brandName("")).toBe("")
+    // Only the lookup's own entries count: an object literal's
+    // `names[brand] ?? brand` would give Object's own functions for these.
+    for (const key of ["constructor", "__proto__", "toString", "valueOf"]) {
+      expect(brandName(key)).toBe(key)
+    }
   })
 })

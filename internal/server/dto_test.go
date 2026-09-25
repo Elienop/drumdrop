@@ -246,3 +246,28 @@ func TestSliceMappers_EmptyAndNil(t *testing.T) {
 		t.Errorf("jobDTOs(nil) = %v, want non-nil empty slice", got)
 	}
 }
+
+// TestLessonDTO_HasFiles pins has_files on the wire: always present, true
+// exactly when a delete of the lesson would have files to act on (the store's
+// own predicate, database.Lesson.HasFiles), whatever the status. A skipped or
+// failed lesson that still records files says so; an empty record does not.
+func TestLessonDTO_HasFiles(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		l    database.Lesson
+		want string
+	}{
+		{"nothing recorded", database.Lesson{Status: database.StatusPending}, "false"},
+		{"own folder, skipped", database.Lesson{Status: database.StatusSkipped, OutputDir: sql.NullString{String: "/dl/C/01 - A", Valid: true}}, "true"},
+		{"record only, failed", database.Lesson{Status: database.StatusFailed, LibraryEntries: database.EncodeLibraryEntries([]string{"S/Season 01/a.mp4"})}, "true"},
+		{"empty record", database.Lesson{Status: database.StatusSkipped, LibraryEntries: database.EncodeLibraryEntries([]string{})}, "false"},
+		{"damaged record", database.Lesson{LibraryEntries: sql.NullString{String: "not json", Valid: true}}, "true"},
+	} {
+		if got := string(jsonField(t, lessonDTO(c.l))["has_files"]); got != c.want {
+			t.Errorf("%s: has_files = %q, want %s", c.name, got, c.want)
+		}
+		if got := lessonDTO(c.l).HasFiles; got != c.l.HasFiles() {
+			t.Errorf("%s: has_files = %v, the store's predicate says %v", c.name, got, c.l.HasFiles())
+		}
+	}
+}

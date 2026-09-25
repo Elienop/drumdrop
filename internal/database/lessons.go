@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -37,13 +38,28 @@ type Lesson struct {
 	FirstSeenAt         sql.NullTime   `json:"first_seen_at"`
 	DownloadedAt        sql.NullTime   `json:"downloaded_at"`
 	UpdatedAt           sql.NullTime   `json:"updated_at"`
+	// LibraryEntries is the raw library_entries column: a JSON array of the
+	// entries the plex-tv move placed in a season folder for this lesson, each
+	// relative to the library folder, or NULL when there is no record. Read it
+	// through PlacedEntries.
+	LibraryEntries sql.NullString `json:"library_entries"`
+	// Deleting is true while a delete holds the lesson's files (its lease,
+	// deleting_until, is in the future; see BeginLessonDelete): no job may be
+	// enqueued or retried for it meanwhile. It is read, never written.
+	Deleting bool `json:"deleting"`
 }
+
+// deletingSQL is Lesson.Deleting as a condition on the lessons table: a delete
+// holds the lesson's files while its lease has not run out. Every check of "is
+// this lesson being deleted" uses it, so a lease that lapsed (a delete that
+// died mid-way) stops blocking the lesson everywhere at once, with no sweep.
+const deletingSQL = `(deleting_until IS NOT NULL AND deleting_until > datetime('now'))`
 
 // lessonColumns is the canonical column list for SELECTs, kept in one place so
 // every scan path agrees with scanLesson's field order.
 const lessonColumns = `railcontent_id, title, parent_railcontent_id, brand, position, status,
 	quality, output_dir, video_path, bytes, error, follow_id,
-	first_seen_at, downloaded_at, updated_at`
+	first_seen_at, downloaded_at, updated_at, library_entries, ` + deletingSQL
 
 // scanLesson reads one lessons row in lessonColumns order from any *sql.Row or
 // *sql.Rows (both satisfy this Scan signature).
@@ -54,25 +70,74 @@ func scanLesson(row interface {
 	err := row.Scan(
 		&l.RailcontentID, &l.Title, &l.ParentRailcontentID, &l.Brand, &l.Position, &l.Status,
 		&l.Quality, &l.OutputDir, &l.VideoPath, &l.Bytes, &l.Error, &l.FollowID,
-		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt,
+		&l.FirstSeenAt, &l.DownloadedAt, &l.UpdatedAt, &l.LibraryEntries, &l.Deleting,
 	)
 	return l, err
 }
 
+// getLessonTx reads lesson id inside tx (a wrapped sql.ErrNoRows if unknown).
+func getLessonTx(ctx context.Context, tx *sql.Tx, id int) (Lesson, error) {
+	l, err := scanLesson(tx.QueryRowContext(ctx,
+		`SELECT `+lessonColumns+` FROM lessons WHERE railcontent_id = ?`, id,
+	))
+	if err != nil {
+		return Lesson{}, fmt.Errorf("get lesson %d: %w", id, err)
+	}
+	return l, nil
+}
+
+// lessonDeletingTx returns ErrLessonDeleting while a delete holds lesson id's
+// files (an unknown id is not being deleted).
+func lessonDeletingTx(ctx context.Context, tx *sql.Tx, id int) error {
+	var deleting bool
+	err := tx.QueryRowContext(ctx,
+		`SELECT `+deletingSQL+` FROM lessons WHERE railcontent_id = ?`, id,
+	).Scan(&deleting)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("check lesson %d: %w", id, err)
+	case deleting:
+		return fmt.Errorf("lesson %d: %w", id, ErrLessonDeleting)
+	}
+	return nil
+}
+
 // UpsertLesson records (or refreshes) a lesson's descriptive fields keyed on its
-// railcontent_id. On conflict it updates only title, parent, and updated_at — it
-// deliberately does NOT touch status, download metadata, or follow_id. This is
-// half of the dedup mechanism: a re-sync that re-discovers an already-downloaded
-// lesson must never downgrade it back to pending and trigger a redundant
-// re-download. Leaving follow_id untouched is first-follow-wins: the lesson stays
-// attributed to the follow that first discovered it even if a later follow also
-// covers it. New rows take the table default status='pending'.
+// railcontent_id. On conflict it updates only title, parent, position and
+// updated_at, and only when one of the stored fields changes (owner ruling
+// 2026-09-24 (r)): a sync that finds the lesson as it was writes nothing, so its
+// updated_at, and so its place in the Lessons page's All tab (ListLessons), stay
+// as they were. That holds for a lesson two follows list too (a course follow
+// and an instructor follow, say), since each field a conflict writes has one
+// value per sync (below): title is written by every follow that lists the
+// lesson, with the same value, and parent and position by one follow only. It
+// deliberately does NOT touch status, download
+// metadata, or follow_id. This is half of the dedup mechanism: a re-sync that
+// re-discovers an already-downloaded lesson must never downgrade it back to
+// pending and trigger a redundant re-download. Leaving follow_id untouched is
+// first-follow-wins: the lesson stays attributed to the follow that first
+// discovered it even if a later follow also covers it. New rows take the table
+// default status='pending'.
+//
+// parent is written only by the follow the lesson is attributed to (its stored
+// follow_id, NULL matching NULL), like follow_id and position: the planner
+// gives each follow's lessons that follow's own node id, or NULL for an
+// instructor, so two follows would otherwise write two values every sync and
+// each would count as a change. A change the attributed follow brings is still
+// written and stamped. A lesson whose follow was removed (follow_id set NULL)
+// keeps its last parent, as it keeps its follow_id: another follow listing it
+// writes neither. So does a row that predates follow_id (migration 002, NULL
+// since): the planner always passes a follow id, so none matches it. Nothing
+// reads parent to place or delete files.
 //
 // position is the lesson's sequence within its follow (the "NN - " folder
 // prefix). On conflict it is first-write-wins via COALESCE(lessons.position,
 // excluded.position): a lesson shared by two follows keeps the first number, and
-// a prior NULL is filled in by a later numbered upsert. (title stays
-// last-write-wins.)
+// a prior NULL is filled in by a later numbered upsert. title stays
+// last-write-wins: each follow's expansion reads the lesson document's own
+// title field, so two follows write the same one.
 func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title string, parent sql.NullInt64, brand string, position sql.NullInt64, followID sql.NullInt64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
@@ -80,9 +145,15 @@ func (s *Store) UpsertLesson(ctx context.Context, railcontentID int, title strin
 			 VALUES(?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(railcontent_id) DO UPDATE SET
 			     title                 = excluded.title,
-			     parent_railcontent_id = excluded.parent_railcontent_id,
+			     parent_railcontent_id = CASE WHEN lessons.follow_id IS excluded.follow_id
+			                                  THEN excluded.parent_railcontent_id
+			                                  ELSE lessons.parent_railcontent_id END,
 			     position              = COALESCE(lessons.position, excluded.position),
-			     updated_at            = CURRENT_TIMESTAMP`,
+			     updated_at            = CURRENT_TIMESTAMP
+			 WHERE lessons.title IS NOT excluded.title
+			    OR (lessons.follow_id IS excluded.follow_id
+			        AND lessons.parent_railcontent_id IS NOT excluded.parent_railcontent_id)
+			    OR (lessons.position IS NULL AND excluded.position IS NOT NULL)`,
 			railcontentID, title, parent, brand, position, followID,
 		)
 		if err != nil {
@@ -122,13 +193,16 @@ func (s *Store) IsDownloaded(ctx context.Context, id int) (bool, error) {
 // ShouldSkipEnqueue reports whether the planner must NOT enqueue a download job
 // for the lesson with the given railcontent_id: true when its status is
 // 'downloaded' (already have it) OR 'skipped' (intentionally passed over, e.g.
-// locked/missing content — re-enqueuing would loop forever). A 'failed' lesson
-// is deliberately NOT skipped so it is retried. An unknown id is not an error:
-// it reports false, so a never-seen lesson enqueues normally.
+// locked/missing content — re-enqueuing would loop forever), or while a delete
+// is removing its files. A 'failed' lesson is deliberately NOT skipped so it is
+// retried; a failed re-download of a lesson that still records files leaves it
+// 'downloaded' (FailDownload), so it is not retried until the owner asks. An
+// unknown id is not an error: it reports false, so a never-seen lesson
+// enqueues normally.
 func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND status IN (?, ?)`,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ? AND (status IN (?, ?) OR `+deletingSQL+`)`,
 		id, StatusDownloaded, StatusSkipped,
 	).Scan(&n)
 	if err != nil {
@@ -137,67 +211,18 @@ func (s *Store) ShouldSkipEnqueue(ctx context.Context, id int) (bool, error) {
 	return n > 0, nil
 }
 
-// MarkDownloading transitions a lesson to status='downloading'. It returns an
-// error if no lesson row matched so the caller learns the id was unknown.
-func (s *Store) MarkDownloading(ctx context.Context, id int) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusDownloading, id,
-	)
-}
-
-// MarkDownloaded records a successful download: it sets status='downloaded',
-// stores the quality/paths/byte count, stamps downloaded_at, and clears any
-// prior error. It returns an error if no lesson row matched.
-func (s *Store) MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?,
-		        quality = ?,
-		        output_dir = ?,
-		        video_path = ?,
-		        bytes = ?,
-		        error = NULL,
-		        downloaded_at = CURRENT_TIMESTAMP,
-		        updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusDownloaded, quality, outputDir, videoPath, bytes, id,
-	)
-}
-
-// MarkFailed records a failed download attempt: status='failed' with the error
-// message. It returns an error if no lesson row matched.
-func (s *Store) MarkFailed(ctx context.Context, id int, errMsg string) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusFailed, errMsg, id,
-	)
-}
-
-// MarkSkipped records that a lesson was intentionally skipped (e.g. locked or
-// missing content): status='skipped' with the reason recorded in error. It
-// returns an error if no lesson row matched.
-func (s *Store) MarkSkipped(ctx context.Context, id int, reason string) error {
-	return s.updateStatus(ctx,
-		`UPDATE lessons
-		    SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
-		  WHERE railcontent_id = ?`,
-		StatusSkipped, reason, id,
-	)
-}
-
-// UnskipLesson is the inverse of MarkSkipped: a guarded UPDATE that resets a
+// UnskipLesson is the inverse of SkipLesson: a guarded UPDATE that resets a
 // skipped lesson back to pending and clears its error, ONLY while it is still
-// skipped. Like MarkJobCanceled it tolerates zero rows as a benign no-op and
-// returns nil — an already-pending/terminal lesson (or an unknown id) is left
-// untouched rather than erroring. It executes directly rather than through
-// updateStatus (which treats 0 rows as "no such lesson").
+// skipped. It tolerates zero rows as a benign no-op and returns nil — an already-pending/terminal lesson (or an unknown id) is left
+// untouched rather than erroring: it runs its own UPDATE, so zero rows is not
+// "no such lesson". Like SkipLesson, it refuses with ErrLessonDeleting while a
+// delete holds the lesson: the delete's tombstone would skip it again once
+// the files are gone.
 func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := lessonDeletingTx(ctx, tx, id); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE lessons
 			    SET status = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
@@ -209,57 +234,6 @@ func (s *Store) UnskipLesson(ctx context.Context, id int) error {
 		}
 		// Zero rows affected (not skipped, or unknown id) is intentional: only a
 		// skipped lesson is reset here, and any other state is a no-op.
-		return nil
-	})
-}
-
-// UpdateLessonDeleted tombstone-skips a lesson whose files have just been
-// removed: it sets status='skipped', error='deleted', and clears the now-stale
-// download metadata (output_dir/video_path/bytes) so the row no longer claims a
-// path that's gone. It is a tombstone, not a row delete, because the follow is
-// still active and the next sync would otherwise re-discover and re-download the
-// lesson — ShouldSkipEnqueue already skips 'skipped', and UnskipLesson can bring
-// it back later. Like UnskipLesson it executes directly (not via updateStatus)
-// and tolerates zero rows as a benign no-op, so an unknown id is not an error
-// (the API handler reads the lesson first for the 404).
-func (s *Store) UpdateLessonDeleted(ctx context.Context, id int) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`UPDATE lessons
-			    SET status = ?,
-			        error = 'deleted',
-			        output_dir = NULL,
-			        video_path = NULL,
-			        bytes = NULL,
-			        updated_at = CURRENT_TIMESTAMP
-			  WHERE railcontent_id = ?`,
-			StatusSkipped, id,
-		)
-		if err != nil {
-			return fmt.Errorf("mark lesson %d deleted: %w", id, err)
-		}
-		// Zero rows (unknown id) is intentional: the handler reads the lesson
-		// first, so a miss here is a benign no-op rather than an error.
-		return nil
-	})
-}
-
-// updateStatus runs a status-mutating UPDATE through withTx and fails if it
-// touched zero rows (the lesson id was unknown). All Mark* helpers funnel
-// through here so the "no such lesson" behavior is defined in exactly one place.
-func (s *Store) updateStatus(ctx context.Context, query string, args ...any) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("update lesson status: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected updating lesson status: %w", err)
-		}
-		if n == 0 {
-			return fmt.Errorf("no lesson matched the status update")
-		}
 		return nil
 	})
 }
@@ -296,9 +270,13 @@ func (s *Store) ListLessonsByFollow(ctx context.Context, followID int64) ([]Less
 const defaultLessonListLimit = 100
 
 // ListLessons returns a page of lessons ordered by updated_at DESC then
-// railcontent_id (most recently touched first, stable within the same
-// timestamp). A limit <= 0 falls back to defaultLessonListLimit; offset pages
-// through the result.
+// railcontent_id (most recently changed first, stable within the same
+// timestamp): a lesson moves up when it is first seen, when a download or
+// API write sets its status (some of those stamp even when nothing changed:
+// BACKLOG D130), and when a sync changes its title, parent or position; never
+// for a sync that finds it as it was, even when two follows list it
+// (UpsertLesson). A limit <= 0 falls back to defaultLessonListLimit; offset
+// pages through the result.
 func (s *Store) ListLessons(ctx context.Context, limit, offset int) ([]Lesson, error) {
 	if limit <= 0 {
 		limit = defaultLessonListLimit

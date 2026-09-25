@@ -101,18 +101,26 @@ func (s *fakeDaemonStore) GetLesson(ctx context.Context, id int) (database.Lesso
 	return database.Lesson{}, nil
 }
 func (s *fakeDaemonStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
-func (s *fakeDaemonStore) MarkJobDone(ctx context.Context, id int64) error {
+func (s *fakeDaemonStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	return nil, nil
+}
+func (s *fakeDaemonStore) StartDownload(ctx context.Context, jobID int64, id int) error { return nil }
+func (s *fakeDaemonStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
+	return nil
+}
+func (s *fakeDaemonStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
 	s.record("job-done")
 	return nil
 }
-func (s *fakeDaemonStore) MarkJobFailed(ctx context.Context, id int64, m string) error { return nil }
-func (s *fakeDaemonStore) MarkJobCanceled(ctx context.Context, id int64) error         { return nil }
-func (s *fakeDaemonStore) MarkDownloading(ctx context.Context, id int) error           { return nil }
-func (s *fakeDaemonStore) MarkDownloaded(ctx context.Context, id int, q, o, v string, b int64) error {
+func (s *fakeDaemonStore) FailDownload(ctx context.Context, jobID int64, id int, lm, km, jm string, onDisk bool) error {
 	return nil
 }
-func (s *fakeDaemonStore) MarkFailed(ctx context.Context, id int, m string) error  { return nil }
-func (s *fakeDaemonStore) MarkSkipped(ctx context.Context, id int, r string) error { return nil }
+func (s *fakeDaemonStore) NotReturnedDownload(ctx context.Context, jobID int64, id int, r, km string, onDisk bool) error {
+	return nil
+}
+func (s *fakeDaemonStore) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
+	return nil
+}
 
 // --- planner-side ---
 
@@ -177,17 +185,17 @@ func (daemonDownloader) Download(_ context.Context, l *musora.Lesson, o musora.D
 	return nil
 }
 
-func newTestDaemon(store *fakeDaemonStore) *Daemon {
+func newTestDaemon(t *testing.T, store *fakeDaemonStore) *Daemon {
 	planner := &Planner{Store: store, Expander: &daemonExpander{}, PermIDs: "perm"}
 	worker := NewWorker(store, daemonResolver{}, daemonDownloader{}, DefaultConfig(), "perm", nil)
-	worker.Cfg.DownloadsDir = "/dl"
+	worker.Cfg.DownloadsDir = t.TempDir()
 	worker.sleep = func(time.Duration) {} // no real delays
 	return &Daemon{Store: store, Planner: planner, Worker: worker}
 }
 
 func TestDaemonRunOncePlansThenDrains(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	if err := d.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -233,7 +241,7 @@ func TestDaemonRunOncePlansThenDrains(t *testing.T) {
 func TestDaemonRunOncePlanErrorIsFatal(t *testing.T) {
 	store := newFakeDaemonStore()
 	store.planErr = errors.New("db down")
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	if err := d.RunOnce(context.Background()); err == nil {
 		t.Fatal("RunOnce: want a fatal error from a failed plan, got nil")
@@ -242,7 +250,7 @@ func TestDaemonRunOncePlanErrorIsFatal(t *testing.T) {
 
 func TestDaemonRunReclaimsOnceAndStopsOnCancel(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -271,16 +279,16 @@ func TestDaemonRunReclaimsOnceAndStopsOnCancel(t *testing.T) {
 		t.Errorf("RequeueStaleRunning called %d times, want exactly 1 (startup only)", reclaims)
 	}
 
-	// requeue must be the very first recorded op (before any plan/drain).
+	// requeue must be the very first recorded op, before any plan/drain.
 	ops := store.snapshotOps()
-	if len(ops) == 0 || ops[0] != "requeue" {
-		t.Errorf("first op = %v, want %q first: %v", firstOp(ops), "requeue", ops)
+	if len(ops) < 1 || ops[0] != "requeue" {
+		t.Errorf("first ops = %v, want requeue first", ops)
 	}
 }
 
 func TestDaemonRunDrivesMultipleCyclesBeforeCancel(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -318,7 +326,7 @@ func TestDaemonRunContinuesAfterCycleError(t *testing.T) {
 	// ticking until the context is cancelled, then returns nil.
 	store := newFakeDaemonStore()
 	store.planErr = errors.New("transient plan failure")
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -359,7 +367,7 @@ func TestDaemonRunKickTriggersExtraCycle(t *testing.T) {
 	// ticker cannot account for the second cycle, so the only way planRuns
 	// reaches 2 is the kick.
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	kick := make(chan struct{}, 1)
 	d.Kick = kick
 
@@ -399,7 +407,7 @@ func TestDaemonPauseSkipsCyclesThenResumes(t *testing.T) {
 	// dropped while paused, so no Plan/drain happens. Resuming lets the next tick
 	// (or kick) run a cycle again.
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	d.Pause()
 	if !d.IsPaused() {
 		t.Fatal("IsPaused() = false after Pause(), want true")
@@ -465,11 +473,4 @@ func containsOp(ops []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func firstOp(ops []string) string {
-	if len(ops) == 0 {
-		return "<none>"
-	}
-	return ops[0]
 }

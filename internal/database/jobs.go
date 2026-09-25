@@ -16,7 +16,8 @@ var ErrJobNotActive = errors.New("job not active")
 // ErrJobNotTerminal is returned by RetryJob when the target job exists but is
 // not in a retryable terminal status (only failed or canceled jobs can be
 // retried). The API layer maps it to 409 Conflict, distinct from the
-// sql.ErrNoRows 404 returned for an unknown id.
+// sql.ErrNoRows 404 returned for an unknown id. (RetryJob returns
+// ErrLessonDeleting while the job's lesson is being deleted.)
 var ErrJobNotTerminal = errors.New("job not terminal")
 
 // Job status values. These mirror the jobs.status CHECK in
@@ -76,9 +77,13 @@ func scanJob(row interface {
 // followID is the follow that spawned the job; pass an invalid sql.NullInt64 to
 // leave it NULL. It returns (existingID, false, nil) when a queued-or-running
 // job already covers the lesson (no insert happens) and (newID, true, nil) when
-// a fresh job was inserted.
+// a fresh job was inserted. While a delete is removing the lesson's files it
+// inserts nothing and returns ErrLessonDeleting.
 func (s *Store) EnqueueJob(ctx context.Context, followID sql.NullInt64, railcontentID int) (id int64, created bool, err error) {
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := lessonDeletingTx(ctx, tx, railcontentID); err != nil {
+			return err
+		}
 		// Atomic dedup: an active (queued or running) job for this lesson means
 		// the work is already outstanding, so reuse it instead of inserting a
 		// duplicate. Lowest id wins for a stable, deterministic result.
@@ -184,27 +189,18 @@ func (s *Store) ClaimNextJob(ctx context.Context) (Job, bool, error) {
 // place the running transition lives; ClaimNextJob and MarkJobRunning both go
 // through it.
 //
-// guardStatus narrows the WHERE clause: a non-empty value requires the row to
-// still be in that status for the UPDATE to fire (ClaimNextJob passes JobQueued
-// so a row another worker already moved out of 'queued' is left untouched). An
-// empty guardStatus matches the row by id alone, which is what MarkJobRunning
-// needs to re-stamp an already-running job on a retry.
+// guardStatus is the status the row must still be in for the UPDATE to fire:
+// ClaimNextJob passes JobQueued, so a row another worker already moved out of
+// 'queued' is left untouched; MarkJobRunning passes JobRunning, so a job
+// canceled between two attempts is never re-marked running.
 func markRunningTx(ctx context.Context, tx *sql.Tx, id int64, guardStatus string) (int64, error) {
-	const setClause = `UPDATE jobs
+	res, err := tx.ExecContext(ctx,
+		`UPDATE jobs
 		    SET status = ?,
 		        started_at = CURRENT_TIMESTAMP,
 		        attempts = attempts + 1
-		  WHERE id = ?`
-
-	var (
-		res sql.Result
-		err error
-	)
-	if guardStatus == "" {
-		res, err = tx.ExecContext(ctx, setClause, JobRunning, id)
-	} else {
-		res, err = tx.ExecContext(ctx, setClause+` AND status = ?`, JobRunning, id, guardStatus)
-	}
+		  WHERE id = ? AND status = ?`,
+		JobRunning, id, guardStatus)
 	if err != nil {
 		return 0, err
 	}
@@ -375,50 +371,29 @@ func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	return j, nil
 }
 
-// MarkJobRunning re-stamps an already-claimed job for a retry: status='running',
-// started_at=CURRENT_TIMESTAMP, attempts incremented. The FIRST attempts
-// increment is performed by ClaimNextJob when the job is taken off the queue
-// (attempts 0 -> 1); MarkJobRunning is only called for subsequent retries, so in
-// the production flow it runs against an already-running job and pushes attempts
-// to 2 or higher. It returns an error if no job row matched.
+// MarkJobRunning re-stamps an already-claimed job for a retry: started_at =
+// CURRENT_TIMESTAMP, attempts incremented. The FIRST attempts increment is
+// performed by ClaimNextJob when the job is taken off the queue (attempts 0 ->
+// 1); MarkJobRunning is only called for subsequent retries, so in the
+// production flow it runs against an already-running job and pushes attempts to
+// 2 or higher.
 //
-// It shares markRunningTx with ClaimNextJob but passes an empty guard so the
-// re-stamp matches by id alone, independent of the job's current status. The
-// "Job" suffix disambiguates from the lessons store's status mutators
-// (MarkDownloading/MarkFailed/…), which share the same *Store receiver.
+// It shares markRunningTx with ClaimNextJob, guarded to a job that is still
+// running: one canceled (or removed) between two attempts is left as it is and
+// ErrDownloadCanceled is returned, and the worker's next guarded write stops
+// the download. The "Job" suffix disambiguates from the lessons store's status
+// mutators, which share the same *Store receiver.
 func (s *Store) MarkJobRunning(ctx context.Context, id int64) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		n, err := markRunningTx(ctx, tx, id, "")
+		n, err := markRunningTx(ctx, tx, id, JobRunning)
 		if err != nil {
 			return fmt.Errorf("mark job %d running: %w", id, err)
 		}
 		if n == 0 {
-			return fmt.Errorf("no job matched the status update")
+			return fmt.Errorf("job %d is no longer running: %w", id, ErrDownloadCanceled)
 		}
 		return nil
 	})
-}
-
-// MarkJobDone transitions a job to status='done' and stamps finished_at. It
-// returns an error if no job row matched.
-func (s *Store) MarkJobDone(ctx context.Context, id int64) error {
-	return s.updateJob(ctx,
-		`UPDATE jobs
-		    SET status = ?, finished_at = CURRENT_TIMESTAMP
-		  WHERE id = ?`,
-		JobDone, id,
-	)
-}
-
-// MarkJobFailed transitions a job to status='failed', records the error
-// message, and stamps finished_at. It returns an error if no job row matched.
-func (s *Store) MarkJobFailed(ctx context.Context, id int64, errMsg string) error {
-	return s.updateJob(ctx,
-		`UPDATE jobs
-		    SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP
-		  WHERE id = ?`,
-		JobFailed, errMsg, id,
-	)
 }
 
 // CancelJob moves a queued or running job to status='canceled' and stamps
@@ -459,30 +434,6 @@ func (s *Store) CancelJob(ctx context.Context, id int64) error {
 	})
 }
 
-// MarkJobCanceled is the worker-side cancel: a guarded UPDATE that moves a job
-// to status='canceled' and stamps finished_at ONLY while it is still running.
-// Unlike CancelJob (the API path, which distinguishes 404/409), this tolerates
-// zero rows as a benign no-op and returns nil — the server may already have
-// canceled the job (queued/running -> canceled) before the worker reaches its
-// cancel branch, and the worker must not error on that lost race. It executes
-// directly rather than through updateJob (which treats 0 rows as an error).
-func (s *Store) MarkJobCanceled(ctx context.Context, id int64) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`UPDATE jobs
-			    SET status = ?, finished_at = CURRENT_TIMESTAMP
-			  WHERE id = ? AND status = ?`,
-			JobCanceled, id, JobRunning,
-		)
-		if err != nil {
-			return fmt.Errorf("mark job %d canceled: %w", id, err)
-		}
-		// Zero rows affected (queued, terminal, or unknown id) is intentional:
-		// only a running job is canceled here, and any other state is a no-op.
-		return nil
-	})
-}
-
 // RetryJob requeues a failed or canceled job so the worker downloads it again.
 // In one transaction it resets the job (status='queued', attempts=0,
 // started_at/finished_at/error cleared) AND resets its lesson back to
@@ -502,6 +453,9 @@ func (s *Store) RetryJob(ctx context.Context, id int64) error {
 		if err != nil {
 			return fmt.Errorf("retry job %d: %w", id, err)
 		}
+		if err := lessonDeletingTx(ctx, tx, j.RailcontentID); err != nil {
+			return err
+		}
 
 		res, err := tx.ExecContext(ctx,
 			`UPDATE jobs
@@ -518,7 +472,8 @@ func (s *Store) RetryJob(ctx context.Context, id int64) error {
 			return fmt.Errorf("rows affected retrying job %d: %w", id, err)
 		}
 		if n == 0 {
-			// Row exists but the guard excluded it: it is queued or running.
+			// The row exists but the guard excluded it: it is queued,
+			// running or done (only a failed or canceled job is retried).
 			return fmt.Errorf("retry job %d (status %q): %w", id, j.Status, ErrJobNotTerminal)
 		}
 
@@ -533,26 +488,6 @@ func (s *Store) RetryJob(ctx context.Context, id int64) error {
 			StatusPending, j.RailcontentID,
 		); err != nil {
 			return fmt.Errorf("reset lesson %d for retry: %w", j.RailcontentID, err)
-		}
-		return nil
-	})
-}
-
-// updateJob runs a status-mutating UPDATE through withTx and fails if it
-// touched zero rows (the job id was unknown). All Mark* helpers funnel through
-// here so the "no such job" behavior is defined in exactly one place.
-func (s *Store) updateJob(ctx context.Context, query string, args ...any) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("update job status: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected updating job status: %w", err)
-		}
-		if n == 0 {
-			return fmt.Errorf("no job matched the status update")
 		}
 		return nil
 	})

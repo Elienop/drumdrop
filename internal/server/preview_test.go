@@ -185,31 +185,3 @@ func TestSessionLoginSuccess(t *testing.T) {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
-
-func TestSessionLoginFailure(t *testing.T) {
-	stubAuth(t, http.StatusUnauthorized)
-	t.Setenv("HOME", t.TempDir())
-	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
-
-	body := `{"email":"a@b.com","password":"wrong"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusUnauthorized, rec.Body.String())
-	}
-}
-
-func TestSessionLoginMissingCreds(t *testing.T) {
-	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
-
-	body := `{"email":"","password":""}`
-	req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-}

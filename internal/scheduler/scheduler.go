@@ -59,14 +59,27 @@ type Store interface {
 	ClaimNextJob(ctx context.Context) (database.Job, bool, error)
 	GetFollow(ctx context.Context, id int64) (database.Follow, error)
 	GetLesson(ctx context.Context, id int) (database.Lesson, error)
+	ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error)
 	MarkJobRunning(ctx context.Context, id int64) error
-	MarkJobDone(ctx context.Context, id int64) error
-	MarkJobFailed(ctx context.Context, id int64, errMsg string) error
-	MarkJobCanceled(ctx context.Context, id int64) error
-	MarkDownloading(ctx context.Context, id int) error
-	MarkDownloaded(ctx context.Context, id int, quality, outputDir, videoPath string, bytes int64) error
-	MarkFailed(ctx context.Context, id int, errMsg string) error
-	MarkSkipped(ctx context.Context, id int, reason string) error
+	// The worker's writes about a job land only while the job and its lesson
+	// still exist (database.ErrDownloadAbandoned otherwise, joined with
+	// database.ErrLessonDeleted when the delete removes the lesson's files),
+	// so nothing a download does can land after a delete removed them; and a
+	// download only starts or goes on while its job is running
+	// (database.ErrDownloadCanceled otherwise).
+	StartDownload(ctx context.Context, jobID int64, id int) error
+	ConfirmDownload(ctx context.Context, jobID int64, id int) error
+	FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error
+	// FailDownload stores lessonMsg under the lesson (whose menu offers
+	// Download), or keptMsg when the lesson still records files from an
+	// earlier download and onDisk says they are all on disk (it stays
+	// 'downloaded'), and jobMsg on the job (shown in the Queue beside
+	// Retry); NotReturnedDownload stores reason in both (so it names no
+	// button), or keptMsg under a lesson kept the same way.
+	// CancelDownload's onDisk decides the same.
+	FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error
+	NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error
+	CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
 }
 
@@ -79,11 +92,11 @@ var _ Store = (*database.Store)(nil)
 type Config struct {
 	// DownloadsDir is the root under which per-follow folders are created.
 	DownloadsDir string
-	// LibraryDir, when non-empty, is the root the Worker MOVES each finished
-	// lesson folder into (single location) at the lesson's path relative to
-	// DownloadsDir — os.Rename on the same filesystem, copy-tree + remove-source
-	// across filesystems. The downloads dir is then pure scratch. Empty disables
-	// the move: the lesson stays in DownloadsDir.
+	// LibraryDir, when non-empty, is the root the Worker PLACES each finished
+	// lesson into (single location) at the lesson's path relative to
+	// DownloadsDir: a rename on the same filesystem, a copy across filesystems.
+	// Empty places it in DownloadsDir itself. Either way a download is written
+	// in its job's private folder under DownloadsDir first (see private.go).
 	LibraryDir string
 	// Layout selects the library destination layout (lower-cased upstream). ""
 	// or "default" keeps today's per-lesson-subfolder layout; "plex-tv" emits

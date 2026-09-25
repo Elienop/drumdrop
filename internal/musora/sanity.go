@@ -38,7 +38,7 @@ var (
 	rePermIDs = regexp.MustCompile(`(array::intersects\([^,]+,\s*)\[[\d,\s]*\]`)
 	// rePermIDValid is a defense-in-depth allowlist for the permission-id list
 	// substituted into the GROQ array literal: one or more comma-separated
-	// integers (mirrors validateSlug/validateBrand).
+	// integers (mirrors validateSlug/ValidateBrand).
 	rePermIDValid = regexp.MustCompile(`^[0-9]+(,[0-9]+)*$`)
 	// httpClient carries a request timeout so a hung GROQ/auth endpoint cannot
 	// block a handler-driven call (preview/session) — or the planner/downloader —

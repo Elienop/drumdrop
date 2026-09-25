@@ -24,7 +24,18 @@ export interface LessonDTO {
   quality: string | null
   output_dir: string | null
   video_path: string | null
+  // has_files is true exactly when deleting the lesson would have files to act
+  // on (its downloads folder or library entries are on record), whatever its
+  // status. The server owns that predicate; output_dir alone does not say it.
+  has_files: boolean
+  // deleting is true while a delete of this lesson is in progress (always
+  // present). The row then shows that and offers no action that would race
+  // the delete.
+  deleting: boolean
   bytes: number | null
+  // error is the failure of a failed lesson, the reason given for a skipped
+  // one ("deleted" for a lesson whose files were deleted), or on a downloaded
+  // one why a re-download failed while the earlier download was kept.
   error: string | null
   follow_id: number | null
   first_seen_at: string | null
@@ -56,6 +67,13 @@ export interface PreviewResponse {
   title: string
   lesson_count: number
   kind: "node" | "instructor"
+  // Instructor only (omitted for node): the slug the follow will use, which
+  // the server normalises from what was typed ("Jared Falk" → "jared-falk").
+  slug?: string
+  // Instructor only (omitted for node): the brand the follow will use, once a
+  // pasted coach link's brand and the Brand field are reconciled ("pianote"
+  // for a pianote link with Brand left empty). lesson_count is counted in it.
+  brand?: string
 }
 
 export interface SessionResponse {

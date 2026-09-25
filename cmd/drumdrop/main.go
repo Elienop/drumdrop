@@ -21,8 +21,10 @@ Options:
 
 Follows (incremental, deduped archival):
   drumdrop follow <id|url>        follow a node (course/series/lesson)
-  drumdrop follow @<slug>         follow an instructor (or --instructor <slug>)
-                                  flags: --brand (default drumeo), --quality (default best)
+  drumdrop follow @<slug>         follow an instructor (or --instructor <slug>); a
+                                  name ("@Jared Falk", quoted) or a coach-page link
+                                  works too. Flags: --brand (default drumeo, or
+                                  the link's), --quality (default best)
   drumdrop unfollow <followId>    stop following (id from 'drumdrop follows')
   drumdrop follows                list everything you follow
   drumdrop sync [options]         one-shot: download every not-yet-downloaded

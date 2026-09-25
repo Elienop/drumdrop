@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 
@@ -32,11 +33,6 @@ type Config struct {
 	// lessons stay in downloads and output_dir is the downloads path. There is no
 	// host-path mapping for the library — Plex owns the path.
 	LibraryDir string
-	// Layout mirrors scheduler.Config.Layout (lower-cased): "" = default,
-	// "plex-tv" = Plex TV-Shows naming. The delete-files path needs it to decide
-	// whether output_dir is a per-lesson folder (RemoveAll) or a shared season
-	// folder (remove only the target episode's files).
-	Layout string
 }
 
 // Deps bundles the engine handles the write/sync handlers need beyond the
@@ -49,8 +45,10 @@ type Deps struct {
 	// sync would enqueue without touching the queue.
 	Planner *scheduler.Planner
 	// Kick is the buffered channel the daemon's Run select drains for an immediate
-	// out-of-band cycle. POST /api/sync does a non-blocking send on it. Nil when
-	// no daemon is attached (e.g. tests of read-only endpoints).
+	// out-of-band cycle. POST /api/sync and Resume send on it, and so does every
+	// press that queues a download or can (Download, Retry, Un-skip, and adding
+	// a follow), without blocking (Server.kick). Nil when no daemon is attached
+	// (e.g. tests of read-only endpoints).
 	Kick chan<- struct{}
 	// CancelRunning kills the in-flight download for a running job, returning true
 	// when the job was found in this process's worker registry (the worker then
@@ -156,11 +154,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // handleReadyz is the readiness probe: it pings the database and reports ok on
 // success or 503 on failure. The raw ping error is not echoed (it can carry
-// driver/SQL internals); callers see a clean "database unavailable" message.
+// driver/SQL internals); callers see a fixed sentence (msgDatabaseDown) and the log gets the detail.
 // Unauthenticated.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Ping(r.Context()); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "database unavailable")
+		fmt.Fprintf(logOut, "drumdrop: readyz: %v\n", err)
+		writeErr(w, http.StatusServiceUnavailable, msgDatabaseDown)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

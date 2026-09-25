@@ -2,6 +2,9 @@ package engine
 
 import (
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/scheduler"
@@ -47,7 +50,7 @@ func TestPermissionIDs(t *testing.T) {
 func TestConfigDefaults(t *testing.T) {
 	t.Setenv("DRUMDROP_DOWNLOADS_DIR", "/tmp/dd")
 
-	cfg := Config("", "", false)
+	cfg := mustConfig(t, "", "", false)
 	if cfg.DownloadsDir != "/tmp/dd" {
 		t.Errorf("DownloadsDir = %q, want /tmp/dd (from env fallback)", cfg.DownloadsDir)
 	}
@@ -65,11 +68,11 @@ func TestConfigDefaults(t *testing.T) {
 	}
 
 	t.Setenv("DRUMDROP_AUDIO_LANG", "es")
-	if cfg := Config("", "", false); cfg.AudioLang != "es" {
+	if cfg := mustConfig(t, "", "", false); cfg.AudioLang != "es" {
 		t.Errorf("AudioLang = %q, want es (from DRUMDROP_AUDIO_LANG)", cfg.AudioLang)
 	}
 
-	cfg = Config("/explicit/out", "best", true)
+	cfg = mustConfig(t, "/explicit/out", "best", true)
 	if cfg.DownloadsDir != "/explicit/out" {
 		t.Errorf("DownloadsDir = %q, want /explicit/out (out wins over env)", cfg.DownloadsDir)
 	}
@@ -93,7 +96,7 @@ func TestAdaptersSatisfyInterfaces(t *testing.T) {
 // the same store, permission ids, log, and config, with the daemon composing the
 // returned planner and worker.
 func TestBuildWires(t *testing.T) {
-	cfg := Config("/tmp/x", "best", false)
+	cfg := mustConfig(t, "/tmp/x", "best", false)
 	var log io.Writer = io.Discard
 
 	sink := buildTestSink{}
@@ -134,3 +137,57 @@ func TestBuildWires(t *testing.T) {
 type buildTestSink struct{}
 
 func (buildTestSink) Emit(scheduler.ProgressEvent) {}
+
+func mustConfig(t *testing.T, out, quality string, resourcesOnly bool) scheduler.Config {
+	t.Helper()
+	cfg, err := Config(out, quality, resourcesOnly)
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	return cfg
+}
+
+// TestConfigRefusesALibraryThatIsTheDownloadsFolder proves every command
+// (they all build their config here) refuses to start when
+// DRUMDROP_LIBRARY_DIR is the downloads folder reached by another path, where
+// a library move would delete a lesson's only copy. The same path spelled the
+// same way is allowed: every move is then a no-op.
+func TestConfigRefusesALibraryThatIsTheDownloadsFolder(t *testing.T) {
+	downloads := filepath.Join(t.TempDir(), "dl")
+	if err := os.Mkdir(downloads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "lib")
+	if err := os.Symlink(downloads, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DRUMDROP_LIBRARY_DIR", alias)
+	if _, err := Config(downloads, "", false); err == nil || !strings.Contains(err.Error(), "is the downloads folder") {
+		t.Errorf("Config(library aliasing downloads) err = %v, want the refusal", err)
+	}
+	t.Setenv("DRUMDROP_LIBRARY_DIR", downloads)
+	if _, err := Config(downloads, "", false); err != nil {
+		t.Errorf("Config(library == downloads, same path) = %v, want nil", err)
+	}
+}
+
+// TestConfigMakesTheRootsAbsolute proves a relative downloads or library
+// folder (the ./downloads default, or DRUMDROP_LIBRARY_DIR=lib) is resolved
+// once against the working directory, so every path recorded from it is
+// absolute and a later command run from elsewhere still finds the lessons.
+func TestConfigMakesTheRootsAbsolute(t *testing.T) {
+	tmp := t.TempDir()
+	t.Chdir(tmp)
+	t.Setenv("DRUMDROP_LIBRARY_DIR", "lib")
+	cfg := mustConfig(t, "downloads", "", false)
+	if want := filepath.Join(tmp, "downloads"); cfg.DownloadsDir != want {
+		t.Errorf("DownloadsDir = %q, want %q", cfg.DownloadsDir, want)
+	}
+	if want := filepath.Join(tmp, "lib"); cfg.LibraryDir != want {
+		t.Errorf("LibraryDir = %q, want %q", cfg.LibraryDir, want)
+	}
+	t.Setenv("DRUMDROP_LIBRARY_DIR", "")
+	if cfg := mustConfig(t, "downloads", "", false); cfg.LibraryDir != "" {
+		t.Errorf("unset library = %q, want it left unset", cfg.LibraryDir)
+	}
+}

@@ -3,8 +3,11 @@ package scheduler
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // Planner discovers newly available lessons across every follow and enqueues a
@@ -96,7 +99,9 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 		}
 
 		// A node follow links its lessons to itself via railcontent_id; an
-		// instructor follow has no node parent, so parent stays NULL.
+		// instructor follow has no node parent, so parent stays NULL. The
+		// store writes it only for a lesson this follow is attributed to
+		// (UpsertLesson), so a lesson two follows list keeps one parent.
 		var parent sql.NullInt64
 		if f.Kind == "node" && f.RailcontentID.Valid {
 			parent = f.RailcontentID
@@ -156,6 +161,10 @@ func (p *Planner) plan(ctx context.Context, limit int, dryRun bool) (enqueued in
 
 			if !dryRun {
 				_, created, err := p.Store.EnqueueJob(ctx, sql.NullInt64{Int64: f.ID, Valid: true}, id)
+				if errors.Is(err, database.ErrLessonDeleting) {
+					// A delete of its files began after ShouldSkipEnqueue: skip it.
+					continue
+				}
 				if err != nil {
 					return enqueued, fmt.Errorf("enqueue lesson %d: %w", id, err)
 				}

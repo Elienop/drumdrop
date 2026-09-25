@@ -17,7 +17,15 @@ import (
 // follows-read tests can seed rows directly before building the server over it.
 func newTestStore(t *testing.T) *database.Store {
 	t.Helper()
-	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
+	store, _ := newTestStoreAt(t)
+	return store
+}
+
+// newTestStoreAt is newTestStore, also returning the database file's path.
+func newTestStoreAt(t *testing.T) (*database.Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -30,7 +38,7 @@ func newTestStore(t *testing.T) *database.Store {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	return store
+	return store, path
 }
 
 // TestCreateFollowRejectsInvalidQuality verifies the create handler rejects a
@@ -176,8 +184,8 @@ func TestFollowLessons(t *testing.T) {
 	if err := store.UpsertLesson(ctx, 12, "Lesson Two", sql.NullInt64{}, "drumeo", sql.NullInt64{}, fid); err != nil {
 		t.Fatalf("UpsertLesson 12: %v", err)
 	}
-	if err := store.MarkSkipped(ctx, 12, "no thanks"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := store.SkipLesson(ctx, 12, "no thanks"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

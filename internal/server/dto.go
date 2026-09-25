@@ -52,6 +52,15 @@ type LessonDTO struct {
 	FirstSeenAt         *time.Time `json:"first_seen_at"`
 	DownloadedAt        *time.Time `json:"downloaded_at"`
 	UpdatedAt           *time.Time `json:"updated_at"`
+	// HasFiles is true exactly when a delete of this lesson would have files
+	// to act on (database.Lesson.HasFiles: an output_dir, or a library record
+	// that is not empty), whatever its status. Always present.
+	HasFiles bool `json:"has_files"`
+	// Deleting is true while a delete of this lesson is in progress: the same
+	// predicate (database.Lesson.Deleting, a live lease) the server uses to
+	// refuse a download, retry, skip or second delete of it with 409. Always
+	// present.
+	Deleting bool `json:"deleting"`
 }
 
 // JobDTO is the JSON wire shape of a database.Job.
@@ -144,6 +153,8 @@ func lessonDTO(l database.Lesson) LessonDTO {
 		FirstSeenAt:         nullTime(l.FirstSeenAt),
 		DownloadedAt:        nullTime(l.DownloadedAt),
 		UpdatedAt:           nullTime(l.UpdatedAt),
+		HasFiles:            l.HasFiles(),
+		Deleting:            l.Deleting,
 	}
 }
 
@@ -171,7 +182,13 @@ func (s *Server) hostPath(p *string) *string {
 	if p == nil || s.cfg.HostDownloadsDir == "" || s.cfg.DownloadsDir == "" {
 		return p
 	}
-	rel, err := filepath.Rel(s.cfg.DownloadsDir, *p)
+	// A row recorded under a relative downloads folder (the ./downloads default,
+	// before the roots were made absolute) is read as the OS reads it.
+	stored := *p
+	if abs, err := filepath.Abs(stored); err == nil {
+		stored = abs
+	}
+	rel, err := filepath.Rel(s.cfg.DownloadsDir, stored)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return p // not under the container downloads root: leave as-is
 	}

@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom"
 import { setupServer } from "msw/node"
 import { http, HttpResponse } from "msw"
 import { SSEProvider } from "@/lib/sse"
-import type { JobDTO, SummaryDTO } from "@/types"
+import type { JobDTO, ProgressEvent, SummaryDTO } from "@/types"
 
 // Default summary used by the dashboard cards. Maps are zero-filled across the
 // full enum vocabulary, mirroring the Go DTO contract.
@@ -32,18 +32,53 @@ export const server = setupServer(
 )
 
 // MockEventSource stands in for the browser EventSource that the SSEProvider
-// opens — jsdom has none. It never emits, so the live-downloads view starts
-// empty; tests that exercise SSE drive the reducer directly elsewhere.
+// opens — jsdom has none. It emits nothing by itself, so the live-downloads
+// view starts empty. The SSEProvider opens it only once a token is stored; a
+// test that stores one can then push a server event with sendEvent.
+// Every stream opened so far, newest last: sendEvent's target is the last.
+const openedStreams: MockEventSource[] = []
+
 class MockEventSource {
   url: string
   onmessage: ((e: MessageEvent) => void) | null = null
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
+  closed = false
   constructor(url: string) {
     this.url = url
+    openedStreams.push(this)
   }
   addEventListener() {}
-  close() {}
+  close() {
+    this.closed = true
+  }
+}
+
+// sendEvent delivers one server event on the page's open stream, as the
+// SSEProvider receives a live frame. Wrap it in act(). It throws when no
+// stream is open, so a test that forgot to store a token fails loudly instead
+// of sending into nothing.
+export function sendEvent(event: Partial<ProgressEvent> & Pick<ProgressEvent, "kind">) {
+  const es = openedStreams.at(-1)
+  if (!es || es.closed) throw new Error("sendEvent: no open event stream (store a token first)")
+  const full: ProgressEvent = {
+    railcontent_id: 0,
+    job_id: 0,
+    follow_id: 0,
+    title: "",
+    attempt: 0,
+    max_attempts: 0,
+    pct: 0,
+    bytes: 0,
+    total_bytes: 0,
+    speed: "",
+    error: "",
+    planned: 0,
+    processed: 0,
+    time: new Date().toISOString(),
+    ...event,
+  }
+  es.onmessage?.({ data: JSON.stringify(full) } as MessageEvent)
 }
 
 if (typeof globalThis.EventSource === "undefined") {
@@ -52,14 +87,29 @@ if (typeof globalThis.EventSource === "undefined") {
 
 // renderWithProviders wraps the UI in the providers the pages rely on:
 // QueryClientProvider (fresh, retry-off so error states settle deterministically),
-// SSEProvider (useSSE), and a MemoryRouter.
-export function renderWithProviders(ui: ReactElement) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+// SSEProvider (useSSE), and a MemoryRouter. Pass `client` to seed or inspect
+// the cache from the test (e.g. whether a key the page does not mount was
+// invalidated); it is returned as `qc` either way.
+export function newTestQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
+}
+
+// `route` is the router's starting location (e.g. "/lessons?follow=1").
+export function renderWithProviders(
+  ui: ReactElement,
+  { client, route = "/" }: { client?: QueryClient; route?: string } = {},
+) {
+  const qc = client ?? newTestQueryClient()
+  const result = render(
     createElement(
       QueryClientProvider,
       { client: qc },
-      createElement(SSEProvider, null, createElement(MemoryRouter, null, ui)),
+      createElement(
+        SSEProvider,
+        null,
+        createElement(MemoryRouter, { initialEntries: [route] }, ui),
+      ),
     ),
   )
+  return { ...result, qc }
 }

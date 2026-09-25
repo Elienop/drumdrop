@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 func TestCancelJobQueued(t *testing.T) {
@@ -50,11 +52,9 @@ func TestCancelJobTerminalConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
-	if err := store.MarkJobDone(ctx, id); err != nil {
-		t.Fatalf("MarkJobDone: %v", err)
+	claimJob(t, store, id)
+	if err := store.FinishDownload(ctx, id, 6002, database.DownloadRecord{}); err != nil {
+		t.Fatalf("FinishDownload: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 
@@ -101,11 +101,9 @@ func TestRetryJobFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
-	if err := store.MarkJobRunning(ctx, id); err != nil {
-		t.Fatalf("MarkJobRunning: %v", err)
-	}
-	if err := store.MarkJobFailed(ctx, id, "boom"); err != nil {
-		t.Fatalf("MarkJobFailed: %v", err)
+	claimJob(t, store, id)
+	if err := store.FailDownload(ctx, id, 6003, "boom", "kept", "boom", true); err != nil {
+		t.Fatalf("FailDownload: %v", err)
 	}
 	srv := NewServer(store, Deps{}, nil, Config{}, "test")
 

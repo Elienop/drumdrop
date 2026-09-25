@@ -2,6 +2,7 @@ package musora
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -153,7 +155,12 @@ func TestFetchAuxArtifactsSurfacesFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, base), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	failures := fetchAuxArtifacts(l, filepath.Join(dir, base), base)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	failures := fetchAuxArtifacts(context.Background(), l, root, base, base)
 
 	if len(failures) != 1 {
 		t.Fatalf("failures = %v, want exactly 1", failures)
@@ -207,7 +214,7 @@ func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(t.Context(), l, DownloadOpts{Dir: dir, Index: 4, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson must not fail on aux fetch failure: %v", err)
 	}
 
@@ -220,6 +227,47 @@ func TestDownloadLessonAuxFailureNonFatal(t *testing.T) {
 	} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected file missing after non-fatal aux failure: %s (%v)", p, err)
+		}
+	}
+}
+
+// TestDownloadLessonCanceledDuringTheFetchesStops (D66) proves the auxiliary
+// fetches honour ctx: a download canceled while its first artifact is fetched
+// fetches nothing more (the request in flight is dropped, the next ones fail at
+// once), writes no nfo, and returns ctx's error, so a stopped download is
+// never reported finished.
+func TestDownloadLessonCanceledDuringTheFetchesStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		cancel() // the Skip lands while the poster is fetched
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second): // a fetch that ignores the cancel
+			_, _ = w.Write([]byte("data"))
+		}
+	}))
+	defer srv.Close()
+
+	l := &Lesson{
+		ID:        3,
+		Title:     "Stopped",
+		Thumbnail: srv.URL + "/thumb.jpg",
+		Resources: []Resource{{Name: "Sheet", URL: srv.URL + "/sheet.pdf"}},
+	}
+	dir := t.TempDir()
+	err := DownloadLesson(ctx, l, DownloadOpts{Dir: dir, Index: 1, ResourcesOnly: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("requests = %d, want 1 (none after the cancel)", n)
+	}
+	for _, p := range []string{"01 - Stopped.nfo", "01 - Stopped-poster.jpg", filepath.Join("resources", "Sheet")} {
+		if _, err := os.Stat(filepath.Join(dir, "01 - Stopped", p)); err == nil {
+			t.Errorf("%s was written by a canceled download", p)
 		}
 	}
 }
@@ -468,7 +516,7 @@ func TestDownloadLessonLayout(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := DownloadLesson(nil, l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
+	if err := DownloadLesson(t.Context(), l, DownloadOpts{Dir: dir, Index: 3, ResourcesOnly: true}); err != nil {
 		t.Fatalf("DownloadLesson: %v", err)
 	}
 

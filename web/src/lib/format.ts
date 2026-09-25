@@ -21,9 +21,34 @@ export function formatRelativeTime(iso: string | null | undefined, now: Date = n
   return `${days}d ago`
 }
 
+// countOf writes a count with its noun in the right number: "1 lesson",
+// "0 lessons", "12 lessons". English has one singular, 1, which is what
+// Intl.PluralRules("en") says too for a whole number.
+export function countOf(n: number, one: string, other: string): string {
+  return `${n} ${n === 1 ? one : other}`
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return `${m}m ${s}s`
+}
+
+// Musora's own names for its brands. The server sends a brand as the
+// lower-case value the Brand field takes ("pianote"); every place the UI shows
+// one reads it through brandName, so the Add follow preview and the Follows
+// and Lessons tables all say "Pianote". A brand not listed here (playbass,
+// whose casing is unconfirmed) shows as the server sent it, not as a guessed
+// capitalisation. A Map, not an object literal: an object would answer
+// "constructor" or "toString" with Object's own functions.
+const BRAND_NAMES: ReadonlyMap<string, string> = new Map([
+  ["drumeo", "Drumeo"],
+  ["pianote", "Pianote"],
+  ["guitareo", "Guitareo"],
+  ["singeo", "Singeo"],
+])
+
+export function brandName(brand: string): string {
+  return BRAND_NAMES.get(brand) ?? brand
 }

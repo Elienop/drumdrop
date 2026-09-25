@@ -86,6 +86,14 @@ describe("invalidationKeys", () => {
       )
     }
   })
+  // The worker emits download_started right after it saves the lesson as
+  // 'downloading' (internal/scheduler/worker.go, StartDownload then Emit), so
+  // the lesson's row and its job's row must refresh then, not at the end.
+  it("invalidates lessons+jobs+summary when a download starts", () => {
+    expect(invalidationKeys(ev({ kind: "download_started" }))).toEqual(
+      expect.arrayContaining([["lessons"], ["jobs"], ["summary"]]),
+    )
+  })
   it("does not invalidate on pure progress", () => {
     expect(invalidationKeys(ev({ kind: "download_progress" }))).toEqual([])
   })

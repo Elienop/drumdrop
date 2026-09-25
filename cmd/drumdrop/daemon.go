@@ -17,8 +17,11 @@ import (
 // jobs for newly discovered lessons and a sequential Worker that drains the queue
 // one download at a time with retry. With --once it runs a single plan+drain
 // cycle and exits (the cron-friendly / testing path). Otherwise it loops every
-// --interval until SIGINT/SIGTERM, then shuts down cleanly after the in-flight
-// download finishes.
+// --interval until SIGINT/SIGTERM. Either way SIGINT/SIGTERM stops the
+// in-flight download, whose job is left running. Only the start of serve or of
+// a looping daemon queues it again (Daemon.Recover); --once never does, so
+// after a stopped --once run the job stays running, and the lesson is not
+// queued again, until one of those starts.
 func cmdDaemon(argv []string) error {
 	opts, err := parseDaemonArgs(argv)
 	if err != nil {
@@ -31,18 +34,26 @@ func cmdDaemon(argv []string) error {
 	}
 	defer store.Close()
 
-	cfg := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	cfg, err := engine.Config(opts.out, opts.quality, opts.resourcesOnly)
+	if err != nil {
+		return err
+	}
 	_, _, daemon := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
+
+	// Graceful shutdown, --once included: SIGINT/SIGTERM cancels the context,
+	// which stops the in-flight download (yt-dlp runs in its own process group,
+	// so a Ctrl-C at the terminal never reaches it: without this, drumdrop would
+	// die and leave it running on its own, writing into the job's private
+	// folder). The worker then removes that folder, leaves the job running, and
+	// claims nothing more. A --once run never requeues it (RunOnce does not call
+	// Daemon.Recover): the next serve or looping daemon start does.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if opts.once {
 		fmt.Printf("drumdrop daemon: one cycle into %s\n", cfg.DownloadsDir)
-		return daemon.RunOnce(context.Background())
+		return daemon.RunOnce(ctx)
 	}
-
-	// Graceful shutdown: SIGINT/SIGTERM cancels the context; the daemon stops
-	// claiming new jobs and returns after the in-flight download finishes.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	fmt.Printf("drumdrop daemon: auto-syncing every %s into %s (Ctrl-C to stop)\n", opts.interval, cfg.DownloadsDir)
 	if err := daemon.Run(ctx, opts.interval); err != nil {

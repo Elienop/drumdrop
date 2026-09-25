@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Play, Search, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
-import { formatRelativeTime } from "@/lib/format"
+import { countOf, formatRelativeTime } from "@/lib/format"
 import type { JobStatus, LessonStatus } from "@/types"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,6 +29,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { PendingButton } from "@/components/PendingButton"
 import { ProgressRow } from "@/components/ProgressRow"
 import { StatusBadge } from "@/components/StatusBadge"
 import { QueryStatus } from "@/components/QueryState"
@@ -64,7 +66,7 @@ export function Dashboard() {
     },
     onError: (err) => {
       if (is503(err)) toast.error("No daemon attached")
-      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
+      else failureToast("Couldn't start a sync", errorMessage(err))
     },
   })
 
@@ -72,11 +74,11 @@ export function Dashboard() {
   const dryRun = useMutation({
     mutationFn: () => api.sync(true),
     onSuccess: (result) => {
-      toast.message(`A sync would queue ${result.data.would_enqueue} lessons`)
+      toast.message(`A sync would queue ${countOf(result.data.would_enqueue ?? 0, "lesson", "lessons")}`)
     },
     onError: (err) => {
       if (is503(err)) toast.error("No planner attached")
-      else toast.error(err instanceof ApiHttpError ? err.message : "Sync failed")
+      else failureToast("Couldn't run the dry run", errorMessage(err))
     },
   })
 
@@ -88,12 +90,12 @@ export function Dashboard() {
       <div className="flex flex-col gap-6">
         <div className="flex items-center justify-between gap-4">
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <SyncButton
               label="Run sync"
               icon={Play}
               onClick={() => run.mutate()}
-              disabled={run.isPending || runBlocked}
+              pending={run.isPending}
               blocked={runBlocked}
               tooltip="no daemon attached"
             />
@@ -102,7 +104,7 @@ export function Dashboard() {
               icon={Search}
               variant="outline"
               onClick={() => dryRun.mutate()}
-              disabled={dryRun.isPending || dryRunBlocked}
+              pending={dryRun.isPending}
               blocked={dryRunBlocked}
               tooltip="no planner attached"
             />
@@ -116,7 +118,7 @@ export function Dashboard() {
                 loading={summary.isPending}
                 error={summary.error}
                 onRetry={() => summary.refetch()}
-                fallbackMessage="Failed to load summary"
+                fallbackMessage="Couldn't load the summary. Check that DrumDrop is running, then Retry."
               />
             </CardContent>
           </Card>
@@ -168,7 +170,7 @@ export function Dashboard() {
                 loading={jobs.isPending}
                 error={jobs.error}
                 onRetry={() => jobs.refetch()}
-                fallbackMessage="Failed to load jobs"
+                fallbackMessage="Couldn't load the jobs. Check that DrumDrop is running, then Retry."
               />
             ) : jobs.data.length > 0 ? (
               <Table>
@@ -244,11 +246,16 @@ function StatBreakdown({
   )
 }
 
+// SyncButton runs a sync or a dry run. While its request runs it is a
+// PendingButton, not `disabled`, so keyboard focus stays on it (a disabled
+// button drops it to <body>); the spinner takes its icon's place, as on the
+// TopBar's Pause, so its width does not change. Only a 503 (nothing
+// attached to run it) really disables it.
 function SyncButton({
   label,
   icon: Icon,
   onClick,
-  disabled,
+  pending,
   blocked,
   tooltip,
   variant = "default",
@@ -256,24 +263,29 @@ function SyncButton({
   label: string
   icon: LucideIcon
   onClick: () => void
-  disabled: boolean
+  pending: boolean
   blocked: boolean
   tooltip: string
   variant?: "default" | "outline"
 }) {
-  const button = (
-    <Button size="sm" variant={variant} onClick={onClick} disabled={disabled}>
-      <Icon />
-      {label}
-    </Button>
-  )
-  if (!blocked) return button
+  if (!blocked) {
+    return (
+      <PendingButton size="sm" variant={variant} icon={Icon} pending={pending} onClick={onClick}>
+        {label}
+      </PendingButton>
+    )
+  }
   // A disabled button swallows pointer events, so wrap it in a focusable span
   // that owns the tooltip trigger.
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span tabIndex={0}>{button}</span>
+        <span tabIndex={0}>
+          <Button size="sm" variant={variant} disabled>
+            <Icon data-icon="inline-start" />
+            {label}
+          </Button>
+        </span>
       </TooltipTrigger>
       <TooltipContent>{tooltip}</TooltipContent>
     </Tooltip>

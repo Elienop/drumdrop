@@ -51,7 +51,7 @@ func TestProgressNilSinkIsNoop(t *testing.T) {
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: lesson(100, "Lesson A")}}
 	dl := newFakeDownloader()
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	// Progress is left nil on purpose.
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -72,7 +72,7 @@ func TestWorkerEmitsSuccessSequence(t *testing.T) {
 	dl := newFakeDownloader()
 	sink := &recordingSink{}
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Progress = sink
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -120,7 +120,7 @@ func TestWorkerEmitsRetrySequence(t *testing.T) {
 	dl.failsBefore[100] = 2
 	sink := &recordingSink{}
 
-	w := newTestWorker(store, res, dl, (&recordingSleeper{}).sleep)
+	w := newTestWorker(t, store, res, dl, (&recordingSleeper{}).sleep)
 	w.Progress = sink
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -161,7 +161,7 @@ func TestWorkerEmitsSkipped(t *testing.T) {
 	dl := newFakeDownloader()
 	sink := &recordingSink{}
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Progress = sink
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -203,7 +203,7 @@ func TestWorkerEmitsDownloadProgress(t *testing.T) {
 	}
 	sink := &recordingSink{}
 
-	w := newTestWorker(store, res, dl, func(time.Duration) {})
+	w := newTestWorker(t, store, res, dl, func(time.Duration) {})
 	w.Progress = sink
 	if _, err := w.RunOnce(context.Background(), 0); err != nil {
 		t.Fatalf("RunOnce error: %v", err)
@@ -277,7 +277,7 @@ func TestProgressEventJSONIsSnakeCase(t *testing.T) {
 // cycle_done, with the cycle_done carrying the planned/processed counts.
 func TestDaemonEmitsCycleEvents(t *testing.T) {
 	store := newFakeDaemonStore()
-	d := newTestDaemon(store)
+	d := newTestDaemon(t, store)
 	sink := &recordingSink{}
 	d.Progress = sink
 

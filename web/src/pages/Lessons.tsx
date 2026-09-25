@@ -1,12 +1,15 @@
 import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
-import { ChevronLeft, ChevronRight, MoreHorizontal, Trash2, X } from "lucide-react"
+import { ChevronLeft, ChevronRight, MoreHorizontal, X } from "lucide-react"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
+import { api } from "@/lib/api"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
-import { formatBytes, formatRelativeTime } from "@/lib/format"
+import { brandName, formatBytes, formatRelativeTime } from "@/lib/format"
+import { rowFocusTargets } from "@/lib/focus"
+import { cn } from "@/lib/utils"
+import { cancelOutcome, errorMessage, failureToast, itemOutcome, type ItemOutcome } from "@/lib/errors"
 import type { ActiveDownload } from "@/lib/sse-reducer"
 import type { LessonDTO, LessonStatus } from "@/types"
 import { Badge } from "@/components/ui/badge"
@@ -33,19 +36,14 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
 import { StatusBadge } from "@/components/StatusBadge"
 import { ProgressRow } from "@/components/ProgressRow"
 import { QueryStatus } from "@/components/QueryState"
+import { ConfirmDialog } from "@/components/ConfirmDialog"
 
 const STATUS_TABS: LessonStatus[] = [
   "pending",
@@ -56,6 +54,109 @@ const STATUS_TABS: LessonStatus[] = [
 ]
 const PAGE_SIZE = 50
 
+// WIDE_ONLY hides a column below xl (1280px). It is on the Brand and Quality
+// columns, header and cells alike, so the cells stay under their headers
+// (owner's ruling 2026-09-24, (t)). Below xl a row note also narrows to 22rem
+// (see the note), and together they let the table fit a 1024px window with
+// short titles (measured in Chromium; BACKLOG D131).
+const WIDE_ONLY = "hidden xl:table-cell"
+
+// A dialog opened from a row remembers the row order at that moment, so focus
+// can return to a neighbour if the row itself has left the list on close.
+interface RowDialog {
+  lesson: LessonDTO
+  order: number[]
+}
+
+const actionsSelector = (id: number) => `[data-row-actions="${id}"]`
+
+// noItem is a row dialog's confirm without a row. It cannot happen (a row
+// dialog is open exactly while its row is set, and a closed dialog sends
+// nothing), but if it did it must fail rather than report a success.
+const noItem = (): Promise<never> => Promise.reject(new Error("the dialog has no lesson"))
+
+// TOMBSTONE is the reason a delete stores on the lesson it skips.
+const TOMBSTONE = "deleted"
+
+// rowNote is the muted line under a lesson's title, all stored in `error`:
+// why it was skipped, why it failed, or, on a downloaded lesson, why a
+// re-download failed while its earlier download was kept (owner's ruling
+// 2026-09-24, (h)); a successful download clears it. Nothing for any other
+// status. A delete's tombstone reads "Files deleted", the reason under the
+// "skipped" badge, not a bare "deleted" that looks like a code or like the
+// lesson itself was deleted. The stored value stays as it is.
+function rowNote(lesson: LessonDTO): string | null {
+  if (lesson.status !== "skipped" && lesson.status !== "failed" && lesson.status !== "downloaded")
+    return null
+  const note = lesson.error?.trim()
+  if (lesson.status === "skipped" && note === TOMBSTONE) return "Files deleted"
+  return note || null
+}
+
+// listedLessons is the Lessons card's description: which lessons it lists.
+function listedLessons(follow: number | null, followTitle: string | undefined): string {
+  if (follow == null) return "All tracked lessons"
+  return followTitle ? `Lessons of “${followTitle}”` : "Lessons of one follow"
+}
+
+// RowMenu is a row's ⋯ menu, closed by itself when its lesson starts or stops
+// downloading while it is open (owner's ruling 2026-09-24, (v)). The items
+// are built from the live row, so that change swaps them under the user:
+// Radix re-anchors the open menu on every layout change and a click selects
+// whatever item is under the pointer, so a resting pointer (or a highlight
+// moved by the swap) would choose from a menu the user never read. Closing
+// hands focus back to the ⋯ trigger, as Escape does, and opening it again
+// shows the current items. Anything else about the row (a refetch, another
+// lesson's event, Cancel learning its job) leaves the menu open.
+//
+// `children` gets the class for the menu's content: it cuts the close short.
+function RowMenu({
+  downloading,
+  children,
+}: Readonly<{
+  downloading: boolean
+  children: (contentClassName: string | undefined) => React.ReactNode
+}>) {
+  // What `downloading` was when the menu opened; null while it is closed.
+  const [openedAs, setOpenedAs] = React.useState<boolean | null>(null)
+  // Whether the last close was this one, not the user's.
+  const [cut, setCut] = React.useState(false)
+  // The derived `open` below already closes the menu in the render that
+  // brings the changed items. This reset is for two other things:
+  // - It runs during render, not in an effect (nor a layout effect), so
+  //   `cut`, and with it the no-fade class, is already on the menu in the
+  //   commit that closes it. Radix's Presence reads the animation once, in
+  //   that commit (react-presence's usePresence): it sees none and removes
+  //   the menu at once. A class that arrives a commit later cancels the fade
+  //   Presence is waiting for, and the closed menu stays on screen and
+  //   clickable, with no end: in Chromium a click on it sent a cancel.
+  //   Pinned by "a menu closed by a start or an end is gone in the same
+  //   commit…" in Lessons.test.tsx.
+  // - Clearing `openedAs` (rather than only deriving `open`) keeps the menu
+  //   from reopening by itself if the lesson flips back.
+  if (openedAs !== null && openedAs !== downloading) {
+    setOpenedAs(null)
+    setCut(true)
+  }
+  return (
+    <DropdownMenu
+      open={openedAs === downloading}
+      onOpenChange={(open) => {
+        setOpenedAs(open ? downloading : null)
+        if (open) setCut(false)
+      }}
+    >
+      {/* Without its exit animation, Radix's Presence removes the menu in
+          the same commit, before a paint. With it, the closing menu stays
+          on screen for the fade, showing the new items, and still takes a
+          click: measured in Chromium, a click in that frame canceled the
+          download it had just started. A close the user makes keeps the
+          fade. */}
+      {children(cut ? "data-[state=closed]:animate-none!" : undefined)}
+    </DropdownMenu>
+  )
+}
+
 export function Lessons() {
   const qc = useQueryClient()
   const [params, setParams] = useSearchParams()
@@ -65,8 +166,16 @@ export function Lessons() {
   const [tab, setTab] = React.useState<"all" | LessonStatus>("all")
   const [offset, setOffset] = React.useState(0)
   const [search, setSearch] = React.useState("")
-  const [skipping, setSkipping] = React.useState<LessonDTO | null>(null)
-  const [deleting, setDeleting] = React.useState<LessonDTO | null>(null)
+  const [skipping, setSkipping] = React.useState<RowDialog | null>(null)
+  const [skipReason, setSkipReason] = React.useState("")
+  const skipReasonId = React.useId()
+  const [deleting, setDeleting] = React.useState<RowDialog | null>(null)
+  const headingRef = React.useRef<HTMLHeadingElement>(null)
+
+  // A fresh Skip starts without the last one's reason.
+  React.useEffect(() => {
+    if (!skipping) setSkipReason("")
+  }, [skipping])
 
   const status = tab === "all" ? undefined : tab
 
@@ -76,12 +185,10 @@ export function Lessons() {
   // status tabs and follow view return the full set (no paging).
   const lessons = useQuery({
     queryKey: qk.lessons({ follow, status, offset: status ? undefined : offset }),
-    queryFn: () =>
-      follow != null
-        ? api.followLessons(follow, status)
-        : api.listLessons(
-            status ? { status } : { limit: PAGE_SIZE, offset },
-          ),
+    queryFn: () => {
+      if (follow != null) return api.followLessons(follow, status)
+      return api.listLessons(status ? { status } : { limit: PAGE_SIZE, offset })
+    },
   })
 
   // Running jobs let us resolve a downloading lesson's job id for Cancel.
@@ -89,6 +196,17 @@ export function Lessons() {
     queryKey: qk.jobs({ state: "running" }),
     queryFn: () => api.listJobs({ state: "running" }),
   })
+
+  // The follow's name for the filter badge (the id means nothing to a user).
+  // The same query the Follows page runs, so usually already cached.
+  const followList = useQuery({
+    queryKey: qk.follows,
+    queryFn: api.listFollows,
+    enabled: follow != null,
+  })
+  const followTitle =
+    follow != null ? followList.data?.find((f) => f.id === follow)?.title : undefined
+  const filterLabel = followTitle ? `Filtered by “${followTitle}”` : "Filtered by one follow"
 
   const runningJobByRailcontent = React.useMemo(() => {
     const m = new Map<number, number>()
@@ -103,77 +221,120 @@ export function Lessons() {
     return byRailcontent
   }, [state.active])
 
-  const download = useMutation({
-    mutationFn: (id: number) => api.downloadLesson(id),
-    onSuccess: ({ status: s }) => {
-      if (s === 202) toast.success("Queued")
-      else toast.message("Already queued")
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
-    },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Download failed")
-    },
-  })
+  // Row actions report a failure as a toast titled with the outcome and the
+  // lesson, and the server's sentence (or our own, never "HTTP 502") below.
+  //
+  // A race with something done elsewhere is not a failure. It gets a
+  // neutral note that goes away by itself, like Skip's and Delete's, titled
+  // with what happened:
+  // - Cancel: a 404 reads "Already removed" and a 409 (the download had
+  //   already ended) "Already ended". "Already" fits: the press wanted it
+  //   gone or stopped.
+  // - Download: a 404 has two causes, the lesson went with its follow
+  //   (msgDownloadGone), or a Skip or a delete elsewhere took the new
+  //   download off the queue and the row stays, marked skipped
+  //   (msgDownloadJobGone). The title is true of both.
+  // - Un-skip: a 404 reads "Removed elsewhere"; the press wanted it back.
+  // The lists refresh after a failure too, so a row that was out of date goes.
+  const refreshRows = () => {
+    qc.invalidateQueries({ queryKey: qk.jobs() })
+    qc.invalidateQueries({ queryKey: ["lessons"] })
+    qc.invalidateQueries({ queryKey: qk.summary })
+  }
 
-  const skip = useMutation({
-    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
-      api.skipLesson(id, { reason: reason || undefined }),
-    onSuccess: () => {
-      toast.success("Lesson skipped")
-      setSkipping(null)
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+  const download = useMutation({
+    mutationFn: async (lesson: LessonDTO) => {
+      let queuedNow = false
+      const outcome = await itemOutcome(
+        api.downloadLesson(lesson.railcontent_id).then(({ status: s }) => {
+          queuedNow = s === 202
+        }),
+      )
+      if (outcome === "already-gone") return outcome
+      return queuedNow ? "queued" : "already-queued"
     },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Skip failed")
+    onSuccess: (outcome, lesson) => {
+      const description = lesson.title
+      if (outcome === "already-gone") {
+        toast.message("Won't download: skipped or removed elsewhere", { description })
+      } else if (outcome === "queued") toast.success("Queued", { description })
+      else toast.message("Already queued", { description })
     },
+    onError: (err, lesson) => {
+      failureToast(`Couldn't queue “${lesson.title}”`, errorMessage(err))
+    },
+    onSettled: refreshRows,
   })
 
   const cancel = useMutation({
-    mutationFn: (jobId: number) => api.cancelJob(jobId),
-    onSuccess: () => {
-      toast.success("Download canceled")
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+    mutationFn: ({ jobId }: { jobId: number; lesson: LessonDTO }) =>
+      cancelOutcome(api.cancelJob(jobId)),
+    onSuccess: (outcome, { lesson }) => {
+      const description = lesson.title
+      if (outcome === "already-gone") toast.message("Already removed", { description })
+      else if (outcome === "already-ended") toast.message("Already ended", { description })
+      else toast.success("Download canceled", { description })
     },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Cancel failed")
+    onError: (err, { lesson }) => {
+      failureToast(`Couldn't cancel the download of “${lesson.title}”`, errorMessage(err))
     },
+    onSettled: refreshRows,
   })
 
   const unskip = useMutation({
-    mutationFn: (id: number) => api.unskipLesson(id),
-    onSuccess: () => {
-      toast.success("Lesson un-skipped")
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
+    mutationFn: (lesson: LessonDTO) => itemOutcome(api.unskipLesson(lesson.railcontent_id)),
+    onSuccess: (outcome, lesson) => {
+      const description = lesson.title
+      if (outcome === "already-gone") toast.message("Removed elsewhere", { description })
+      else toast.success("Lesson un-skipped", { description })
     },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Un-skip failed")
+    onError: (err, lesson) => {
+      failureToast(`Couldn't un-skip “${lesson.title}”`, errorMessage(err))
     },
+    onSettled: refreshRows,
   })
 
-  // Per-lesson delete removes both file copies then tombstone-skips the row
-  // (status downloaded -> skipped, paths cleared). Invalidate the raw ["lessons"]
-  // prefix so every keyed/live variant refetches, plus summary (the per-status
-  // counts shift) and jobs (history mutation, mirrors skip/unskip).
-  const deleteLesson = useMutation({
-    mutationFn: (id: number) => api.deleteLesson(id),
-    onSuccess: () => {
-      toast.success("Lesson deleted")
-      setDeleting(null)
-      qc.invalidateQueries({ queryKey: qk.jobs() })
-      qc.invalidateQueries({ queryKey: ["lessons"] })
-      qc.invalidateQueries({ queryKey: qk.summary })
-    },
-    onError: (err) => {
-      toast.error(err instanceof ApiHttpError ? err.message : "Delete failed")
-    },
-  })
+  // Per-lesson delete: the server first removes the lesson's queued and running
+  // jobs (killing a running download), then removes its recorded files and
+  // tombstone-skips the row (skipped, paths cleared).
+  //
+  // The refresh runs on FAILURE too (finally): a 500 or 409 arrives after the
+  // jobs were already removed, so the lesson's status and the jobs list changed
+  // even though files were kept. The raw ["lessons"] prefix covers every
+  // keyed/live variant, summary the per-status counts. The dialog stays
+  // pending until the refresh lands, so a failure's message appears together
+  // with the refreshed lists, and on success focus returns to a row that is
+  // already where the server says it is. A 404 means it was removed elsewhere
+  // first: that closes the dialog as done (see itemOutcome).
+  const deleteLesson = (id: number): Promise<ItemOutcome> =>
+    itemOutcome(api.deleteLesson(id)).finally(() =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: qk.jobs() }),
+        qc.invalidateQueries({ queryKey: ["lessons"] }),
+        qc.invalidateQueries({ queryKey: qk.summary }),
+      ]),
+    )
+
+  // A 404 means the lesson was removed meanwhile (with its follow): nothing
+  // is left to skip, so the dialog closes as done, like a delete's 404, and
+  // the refresh drops the row.
+  const skipLesson = (id: number, reason: string): Promise<ItemOutcome> =>
+    itemOutcome(api.skipLesson(id, { reason: reason || undefined })).then(async (outcome) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["lessons"] }),
+        qc.invalidateQueries({ queryKey: qk.summary }),
+      ])
+      return outcome
+    })
+
+  // Where focus goes when a row's dialog closes: the row's Actions button, a
+  // neighbour's when the row has left the list, else the page heading.
+  const rowReturn = (d: RowDialog | null) => () =>
+    d
+      ? rowFocusTargets(d.order, d.lesson.railcontent_id, actionsSelector, headingRef.current)
+      : [headingRef.current]
+  const openRowDialog = (set: (d: RowDialog) => void, lesson: LessonDTO) =>
+    set({ lesson, order: rows.map((r) => r.railcontent_id) })
 
   const copyPath = (lesson: LessonDTO) => {
     const path = lesson.video_path ?? lesson.output_dir
@@ -205,10 +366,241 @@ export function Lessons() {
 
   const loadedCount = lessons.data?.length ?? 0
 
+  // The card's body: the query's state until the lessons load, then
+  // their table, or a line saying there are none.
+  let body: React.ReactNode
+  if (lessons.isPending || lessons.isError) {
+    body = (
+      <QueryStatus
+        loading={lessons.isPending}
+        error={lessons.error}
+        onRetry={() => lessons.refetch()}
+        fallbackMessage="Couldn't load the lessons. Check that DrumDrop is running, then Retry."
+      />
+    )
+  } else if (rows.length === 0) {
+    body = <p className="text-sm text-muted-foreground">No lessons</p>
+  } else {
+    body = (
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className={WIDE_ONLY}>Brand</TableHead>
+            <TableHead className={WIDE_ONLY}>Quality</TableHead>
+            <TableHead>Size</TableHead>
+            <TableHead>Updated</TableHead>
+            <TableHead className="w-0" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((lesson) => {
+            const live = active[lesson.railcontent_id]
+            const note = rowNote(lesson)
+            // While a delete of it runs, no action is offered that would
+            // race it (the server may refuse them anyway).
+            const busy = lesson.deleting
+            // The running job Cancel stops: unknown until the jobs load.
+            const jobId = runningJobByRailcontent.get(lesson.railcontent_id)
+            // Every menu item is keyed by its action. The items are
+            // built from the live row, and React reuses an unkeyed
+            // item in the same place for the next status's item: the
+            // highlighted Download would become Cancel download, still
+            // highlighted, when the download starts (ruling (q)).
+            // RowMenu now closes on that change (ruling (v)); the keys
+            // stay, so no item is ever reused for another action.
+            const copyItem = (
+              <DropdownMenuItem key="copy" onSelect={() => copyPath(lesson)}>
+                Copy path
+              </DropdownMenuItem>
+            )
+            // The menu's first group: only Copy path while a delete runs.
+            let items: React.ReactNode
+            if (busy) {
+              items = copyItem
+            } else if (lesson.status === "downloading") {
+              // Copy path first, Cancel download after (owner's ruling
+              // 2026-09-24, (q)). An open menu no longer changes into
+              // this one: RowMenu closes it when the download starts
+              // (ruling (v)). The order stays, so the first item, where
+              // a reopened menu's highlight lands, is still the harmless
+              // one.
+              items = (
+                <>
+                  {copyItem}
+                  <DropdownMenuItem
+                    key="cancel"
+                    disabled={jobId === undefined}
+                    onSelect={() => {
+                      if (jobId !== undefined) cancel.mutate({ jobId, lesson })
+                    }}
+                  >
+                    Cancel download
+                  </DropdownMenuItem>
+                </>
+              )
+            } else {
+              items = (
+                <>
+                  {lesson.status === "skipped" && (
+                    <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
+                      Un-skip
+                    </DropdownMenuItem>
+                  )}
+                  {/* A downloaded lesson WITH a note is a failed
+                      re-download that kept the earlier files: syncs
+                      leave it alone, so Download is how to try again
+                      (owner's ruling 2026-09-24, (h)). */}
+                  {(lesson.status !== "downloaded" || note) && (
+                    <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
+                      Download
+                    </DropdownMenuItem>
+                  )}
+                  {(lesson.status === "pending" || lesson.status === "failed") && (
+                    <DropdownMenuItem
+                      key="skip"
+                      onSelect={() => openRowDialog(setSkipping, lesson)}
+                    >
+                      Skip
+                    </DropdownMenuItem>
+                  )}
+                  {copyItem}
+                </>
+              )
+            }
+            return (
+              <TableRow key={lesson.railcontent_id}>
+                <TableCell className="font-medium">
+                  {lesson.title}
+                  {note && (
+                    // Clamped; the title attribute carries all of it (a
+                    // skip's reason is whatever was typed). A minimum
+                    // width: titles don't wrap, so the column is as wide
+                    // as the longest one on the page, and with short
+                    // titles only it left a note 244px at 1024px, cut
+                    // after a clause. From xl: 28rem and two lines, where
+                    // every sentence the server writes fits (the
+                    // longest, 147 characters, needs about 27rem). Below
+                    // xl: 22rem (min-w-88) and three lines, so that with
+                    // Brand and Quality hidden (WIDE_ONLY) the table fits
+                    // a 1024px window without scrolling sideways (owner's
+                    // ruling 2026-09-24, (t)). A long title still makes
+                    // it scroll.
+                    <p
+                      title={note}
+                      className="mt-0.5 line-clamp-3 max-w-md min-w-88 text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground xl:line-clamp-2 xl:min-w-md"
+                    >
+                      {note}
+                    </p>
+                  )}
+                  {live && (
+                    <div className="mt-2 max-w-md">
+                      <ProgressRow
+                        title={live.title || lesson.title}
+                        pct={live.pct}
+                        speed={live.speed}
+                        bytes={live.bytes}
+                        totalBytes={live.totalBytes}
+                      />
+                    </div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={busy ? "deleting" : lesson.status} />
+                </TableCell>
+                <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
+                  {brandName(lesson.brand)}
+                </TableCell>
+                <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
+                  {lesson.quality ?? "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground tabular-nums">
+                  {formatBytes(lesson.bytes)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatRelativeTime(lesson.updated_at)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <RowMenu downloading={lesson.status === "downloading"}>
+                    {(contentClassName) => (
+                      <>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Actions for ${lesson.title}`}
+                            data-row-actions={lesson.railcontent_id}
+                          >
+                            <MoreHorizontal />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className={contentClassName}>
+                          <DropdownMenuGroup>{items}</DropdownMenuGroup>
+                          {/* Whatever the status: a canceled or failed
+                              re-download, or a delete that stopped the job
+                              but kept files, leaves a lesson that still owns
+                              files (BACKLOG D63). */}
+                          {lesson.has_files && !busy && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuGroup>
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={() => openRowDialog(setDeleting, lesson)}
+                                >
+                                  Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuGroup>
+                            </>
+                          )}
+                        </DropdownMenuContent>
+                      </>
+                    )}
+                  </RowMenu>
+                </TableCell>
+              </TableRow>
+            )
+          })}
+        </TableBody>
+      </Table>
+    )
+  }
+
+  // No scroll anchoring on this page (owner's ruling 2026-09-24, (w)). The
+  // page scrolls inside the app shell's <main> (App.tsx), not the window
+  // and not the table's overflow-x wrapper, whose height is its content's.
+  // With anchoring on, Chrome pins <main>'s view to a row in it, and when a
+  // lesson in view started downloading and moved to the top of All, the view
+  // followed it there: a jump of the whole page. Not only when it was the
+  // top visible row: one mid-view pulled the view up too (2270→0, measured
+  // in headless Chromium, round 5h UI review). overflow-anchor:none here
+  // takes the page out of <main>'s anchor choice, and <main> holds nothing
+  // else, so the view stays still and the rows below shift by one. Here
+  // rather than on <main>, so other pages keep anchoring (none of them
+  // reorders rows under the reader).
+  //
+  // One scroll is left on purpose (owner's ruling 2026-09-24, (x), "Follow
+  // the lesson"): when that lesson's ⋯ menu is open as it starts or stops
+  // downloading, (v) closes the menu and Radix hands focus back to ⋯ with a
+  // plain .focus() (@radix-ui/react-dropdown-menu, onCloseAutoFocus), which
+  // scrolls the page to the lesson. That keeps the reader with the lesson
+  // they were acting on. overflow-anchor does not stop it, and it must not
+  // be stopped with preventScroll.
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 [overflow-anchor:none]">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold">Lessons</h1>
+        {/* tabIndex -1: the last place focus can return to when a dialog
+            closes and neither its row nor a neighbour is left. */}
+        {/* -mx-1.5 px-1.5: the ring gets room around the letters without
+            moving the heading. */}
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="-mx-1.5 rounded-md px-1.5 text-2xl font-bold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60"
+        >
+          Lessons
+        </h1>
         <Input
           type="search"
           placeholder="Search titles…"
@@ -220,7 +612,11 @@ export function Lessons() {
 
       {follow != null && (
         <div className="flex items-center gap-2">
-          <Badge variant="secondary">Filtered by follow #{follow}</Badge>
+          {/* A long follow name truncates inside the badge (it may shrink,
+              min-w-0); the title attribute carries the full label. */}
+          <Badge variant="secondary" className="min-w-0 shrink" title={filterLabel}>
+            <span className="truncate">{filterLabel}</span>
+          </Badge>
           <Button variant="ghost" size="sm" onClick={clearFollow}>
             <X />
             Clear
@@ -242,146 +638,13 @@ export function Lessons() {
       <Card>
         <CardHeader>
           <CardTitle>Lessons</CardTitle>
-          <CardDescription>
-            {follow != null ? `Lessons for follow #${follow}` : "All tracked lessons"}
-          </CardDescription>
+          <CardDescription>{listedLessons(follow, followTitle)}</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {lessons.isPending || lessons.isError ? (
-            <QueryStatus
-              loading={lessons.isPending}
-              error={lessons.error}
-              onRetry={() => lessons.refetch()}
-              fallbackMessage="Failed to load lessons"
-            />
-          ) : rows.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Brand</TableHead>
-                  <TableHead>Quality</TableHead>
-                  <TableHead>Size</TableHead>
-                  <TableHead>Updated</TableHead>
-                  <TableHead className="w-0" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((lesson) => {
-                  const live = active[lesson.railcontent_id]
-                  return (
-                    <TableRow key={lesson.railcontent_id}>
-                      <TableCell className="font-medium">
-                        {lesson.title}
-                        {live && (
-                          <div className="mt-2 max-w-md">
-                            <ProgressRow
-                              title={live.title || lesson.title}
-                              pct={live.pct}
-                              speed={live.speed}
-                              bytes={live.bytes}
-                              totalBytes={live.totalBytes}
-                            />
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={lesson.status} />
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{lesson.brand}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {lesson.quality ?? "—"}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground tabular-nums">
-                        {formatBytes(lesson.bytes)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatRelativeTime(lesson.updated_at)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Actions for ${lesson.title}`}
-                            >
-                              <MoreHorizontal />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuGroup>
-                              {lesson.status === "downloading" ? (
-                                (() => {
-                                  const jobId = runningJobByRailcontent.get(
-                                    lesson.railcontent_id,
-                                  )
-                                  return (
-                                    <DropdownMenuItem
-                                      disabled={jobId === undefined}
-                                      onSelect={() => {
-                                        if (jobId !== undefined) cancel.mutate(jobId)
-                                      }}
-                                    >
-                                      Cancel
-                                    </DropdownMenuItem>
-                                  )
-                                })()
-                              ) : lesson.status === "downloaded" ? (
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onSelect={() => setDeleting(lesson)}
-                                >
-                                  <Trash2 />
-                                  Delete
-                                </DropdownMenuItem>
-                              ) : (
-                                <>
-                                  {lesson.status === "skipped" && (
-                                    <DropdownMenuItem
-                                      onSelect={() =>
-                                        unskip.mutate(lesson.railcontent_id)
-                                      }
-                                    >
-                                      Un-skip
-                                    </DropdownMenuItem>
-                                  )}
-                                  <DropdownMenuItem
-                                    onSelect={() =>
-                                      download.mutate(lesson.railcontent_id)
-                                    }
-                                  >
-                                    Download
-                                  </DropdownMenuItem>
-                                  {(lesson.status === "pending" ||
-                                    lesson.status === "failed") && (
-                                    <DropdownMenuItem
-                                      onSelect={() => setSkipping(lesson)}
-                                    >
-                                      Skip
-                                    </DropdownMenuItem>
-                                  )}
-                                </>
-                              )}
-                              <DropdownMenuItem onSelect={() => copyPath(lesson)}>
-                                Copy path
-                              </DropdownMenuItem>
-                            </DropdownMenuGroup>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="text-sm text-muted-foreground">No lessons</p>
-          )}
+          {body}
 
           {tab === "all" && follow == null && (
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center justify-end gap-3">
               <Button
                 variant="outline"
                 size="sm"
@@ -405,91 +668,67 @@ export function Lessons() {
         </CardContent>
       </Card>
 
-      <Dialog
+      <ConfirmDialog
         open={skipping !== null}
         onOpenChange={(open) => {
           if (!open) setSkipping(null)
         }}
+        title={skipping ? `Skip “${skipping.lesson.title}”?` : "Skip lesson?"}
+        description="Any queued or running download of it stops, and what that download had written is discarded; its earlier files stay. Syncs leave a skipped lesson alone until you un-skip it."
+        confirmLabel="Skip"
+        pendingLabel="Skipping…"
+        confirmVariant="default"
+        onConfirm={() =>
+          skipping ? skipLesson(skipping.lesson.railcontent_id, skipReason) : noItem()
+        }
+        announce={(outcome) => {
+          const description = skipping?.lesson.title
+          if (outcome === "already-gone") toast.message("Already removed", { description })
+          else toast.success("Lesson skipped", { description })
+        }}
+        failureTitle={`Couldn't skip “${skipping?.lesson.title ?? "the lesson"}”`}
+        returnFocus={rowReturn(skipping)}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Skip lesson</DialogTitle>
-            <DialogDescription>
-              {skipping ? `Skip "${skipping.title}"?` : "Skip this lesson?"}
-            </DialogDescription>
-          </DialogHeader>
-          <SkipForm
-            pending={skip.isPending}
-            onConfirm={(reason) => {
-              if (skipping) skip.mutate({ id: skipping.railcontent_id, reason })
+        {({ pending, confirm }) => (
+          // A form, so Enter in the reason skips. data-disabled dims the
+          // label with the input (the Label's group-data-[disabled] style).
+          <form
+            className="group flex flex-col gap-2"
+            data-disabled={pending}
+            onSubmit={(e) => {
+              e.preventDefault()
+              confirm()
             }}
-            onCancel={() => setSkipping(null)}
-          />
-        </DialogContent>
-      </Dialog>
+          >
+            <Label htmlFor={skipReasonId}>Reason (optional)</Label>
+            <Input
+              id={skipReasonId}
+              value={skipReason}
+              disabled={pending}
+              onChange={(e) => setSkipReason(e.target.value)}
+            />
+          </form>
+        )}
+      </ConfirmDialog>
 
-      <Dialog
+      <ConfirmDialog
         open={deleting !== null}
         onOpenChange={(open) => {
           if (!open) setDeleting(null)
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {deleting ? `Delete "${deleting.title}"?` : "Delete lesson?"}
-            </DialogTitle>
-            <DialogDescription>
-              This removes the downloaded files (downloads + library). The lesson
-              is marked skipped so it is not re-downloaded; un-skip to restore it.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={deleteLesson.isPending}
-              onClick={() => {
-                if (deleting) deleteLesson.mutate(deleting.railcontent_id)
-              }}
-            >
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  )
-}
-
-function SkipForm({
-  pending,
-  onConfirm,
-  onCancel,
-}: {
-  pending: boolean
-  onConfirm: (reason: string) => void
-  onCancel: () => void
-}) {
-  const [reason, setReason] = React.useState("")
-  return (
-    <>
-      <Input
-        placeholder="Reason (optional)"
-        value={reason}
-        onChange={(e) => setReason(e.target.value)}
-        aria-label="Skip reason"
+        title={deleting ? `Delete “${deleting.lesson.title}”?` : "Delete lesson?"}
+        description="Its files are deleted from both the downloads folder and the library, and any queued or running download of it is stopped. The lesson is then marked skipped so the next sync leaves it alone; un-skip it to download it again."
+        confirmLabel="Delete"
+        pendingLabel="Deleting…"
+        onConfirm={() => (deleting ? deleteLesson(deleting.lesson.railcontent_id) : noItem())}
+        announce={(outcome) => {
+          const description = deleting?.lesson.title
+          if (outcome === "already-gone") toast.message("Already removed", { description })
+          else toast.success("Lesson deleted", { description })
+        }}
+        failureTitle={`Couldn't delete “${deleting?.lesson.title ?? "the lesson"}”`}
+        returnFocus={rowReturn(deleting)}
       />
-      <DialogFooter>
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button disabled={pending} onClick={() => onConfirm(reason)}>
-          Skip
-        </Button>
-      </DialogFooter>
-    </>
+    </div>
   )
 }

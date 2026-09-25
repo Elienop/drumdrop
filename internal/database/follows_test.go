@@ -303,7 +303,7 @@ func TestRemoveFollowCascade(t *testing.T) {
 		t.Fatalf("EnqueueJob other: %v", err)
 	}
 
-	if err := s.RemoveFollowCascade(ctx, target.ID); err != nil {
+	if _, err := s.RemoveFollowCascade(ctx, target.ID); err != nil {
 		t.Fatalf("RemoveFollowCascade: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func TestRemoveFollowCascade(t *testing.T) {
 func TestRemoveFollowCascadeNotFound(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.RemoveFollowCascade(context.Background(), 999999); err == nil {
+	if _, err := s.RemoveFollowCascade(context.Background(), 999999); err == nil {
 		t.Error("RemoveFollowCascade on an unknown id returned nil, want error")
 	}
 }

@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 // handleListLessons serves GET /api/lessons. With ?status it returns every
@@ -18,7 +21,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	if status := q.Get("status"); status != "" {
 		lessons, err := s.store.ListByStatus(r.Context(), status)
 		if err != nil {
-			writeStoreErr(w, err, "lessons not found")
+			writeLoadErr(w, err, msgLoadFailed)
 			return
 		}
 		writeJSON(w, http.StatusOK, s.viewLessons(lessons))
@@ -35,7 +38,7 @@ func (s *Server) handleListLessons(w http.ResponseWriter, r *http.Request) {
 	}
 	lessons, err := s.store.ListLessons(r.Context(), limit, offset)
 	if err != nil {
-		writeStoreErr(w, err, "lessons not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLessons(lessons))
@@ -50,7 +53,7 @@ func (s *Server) handleGetLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeLoadErr(w, err, msgNoSuchLesson)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -69,7 +72,10 @@ type skipLessonRequest struct {
 // queued-or-running job that existing job is returned with 200; otherwise a new
 // job is enqueued (inheriting the lesson's follow_id) and returned with 202. The
 // created bool carries the dedup signal, so no separate active-job lookup is
-// needed. A non-integer id is a 400.
+// needed. Any status is queued, a downloaded lesson's too: that is how the
+// owner retries a failed re-download, which leaves the lesson downloaded and
+// which syncs never queue again (owner ruling 2026-09-24 (h)). A non-integer
+// id is a 400.
 func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
@@ -77,18 +83,21 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	lesson, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgDownloadGone)
 		return
 	}
 
 	jobID, created, err := s.store.EnqueueJob(r.Context(), lesson.FollowID, id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgDownloadGone)
 		return
 	}
+	// A job is queued (or already was): start a sync now, not at the next
+	// interval (owner ruling 2026-09-24 (m)).
+	s.kick()
 	job, err := s.store.GetJob(r.Context(), jobID)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgDownloadJobGone)
 		return
 	}
 	status := http.StatusOK
@@ -100,10 +109,16 @@ func (s *Server) handleDownloadLesson(w http.ResponseWriter, r *http.Request) {
 
 // handleSkipLesson serves POST /api/lessons/{id}/skip: it marks the lesson
 // skipped, recording the optional {reason} in the lesson's error column, and
-// returns the updated lesson with 200. It reads the lesson first so an unknown
-// id maps cleanly to 404 (MarkSkipped's own miss error is not a wrapped
-// sql.ErrNoRows). An empty or missing body is allowed and skips with no reason;
-// a malformed body is a 400. A non-integer id is a 400.
+// returns the updated lesson with 200. Skip sticks: in the same transaction it
+// removes the lesson's queued, running and canceled jobs (SkipLesson), then it
+// kills a running download, whose worker then records nothing and removes what
+// that download wrote (its earlier, recorded files stay); syncs leave a
+// skipped lesson alone. It cancels rather than refusing while a download runs:
+// the user asked for the lesson not to be downloaded, and a refusal would only
+// send them to Cancel first. While a delete holds the lesson it answers 409
+// (msgSkipDeleting): the delete skips it anyway once the files are gone. An
+// unknown id is a 404; an empty or missing body skips with no reason; a
+// malformed body or a non-integer id is a 400.
 func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
@@ -112,21 +127,23 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 
 	var req skipLessonRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 
-	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+	running, err := s.store.SkipLesson(r.Context(), id, req.Reason)
+	switch {
+	case errors.Is(err, database.ErrLessonDeleting):
+		writeErr(w, http.StatusConflict, msgSkipDeleting)
+		return
+	case err != nil:
+		writeStoreErr(w, err, msgSkipGone)
 		return
 	}
-	if err := s.store.MarkSkipped(r.Context(), id, req.Reason); err != nil {
-		writeStoreErr(w, err, "lesson not found")
-		return
-	}
+	s.killRunning(running)
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgSkipGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -136,24 +153,36 @@ func (s *Server) handleSkipLesson(w http.ResponseWriter, r *http.Request) {
 // lesson back to pending (clearing its error) and returns the updated lesson
 // with 200. It reads the lesson first so an unknown id maps cleanly to 404
 // (UnskipLesson itself tolerates a non-skipped lesson as a benign no-op rather
-// than erroring). A non-integer id is a 400. It mirrors handleSkipLesson.
+// than erroring). A non-integer id is a 400. It mirrors handleSkipLesson:
+// while a delete holds the lesson it answers 409 (msgBeingDeleted, through
+// writeStoreErr) and changes nothing, since the delete skips it again once
+// the files are gone.
+//
+// Un-skip queues no job itself: a sync's planning does, for a pending lesson
+// its follow lists. So when it reset a skipped lesson, it starts a sync now
+// rather than at the next interval (owner ruling 2026-09-24 (m)); a refusal
+// starts none.
 func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
 		return
 	}
 
-	if _, err := s.store.GetLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+	before, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	if err := s.store.UnskipLesson(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgUnskipGone)
 		return
+	}
+	if before.Status == database.StatusSkipped {
+		s.kick()
 	}
 	l, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgUnskipGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(l))
@@ -167,35 +196,87 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 // otherwise re-discover and re-download it — ShouldSkipEnqueue already skips
 // 'skipped', and un-skip can bring it back later.
 //
-// It reads the lesson first so an unknown id maps cleanly to 404 (mirroring
-// handleSkipLesson; UpdateLessonDeleted's own miss is a benign no-op). File
-// removal uses the RAW stored output_dir (the container path under DownloadsDir),
-// NOT the host-mapped DTO value, and is best-effort. A non-integer id is a 400.
+// It first marks the lesson deleting and removes its queued, running and
+// canceled jobs (BeginLessonDelete), then kills a running download: no step of
+// a download already under way can record anything once the delete answers,
+// and no new one can start until it ends; a download that was under way
+// removes what it wrote, whatever the lesson's record says. From there the
+// delete runs to the end even if the client goes away, renews its hold on the
+// lesson while it runs, and always ends it (holdDelete). File removal
+// uses the RAW stored paths (container paths), NOT the host-mapped DTO
+// values, and follows the lesson's record (see removeLessonFiles). An unknown
+// id is a 404, a non-integer id a 400, a lesson already being deleted a 409.
+// A lesson whose own files are still in a season folder the library folder
+// setting no longer points at is a 409 too, and nothing is removed (see
+// leftBehind). That refusal, and one because which files are whose can't be
+// read, come before the delete begins, so no download is stopped
+// (refuseUpFront); both are asked again once it holds the lesson.
+// When a file could not be removed, the lesson records only what is left, the
+// detail goes to the server log, and the client gets a fixed 500.
 func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
 		return
 	}
 
-	l, err := s.store.GetLesson(r.Context(), id)
+	before, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgLessonGone)
+		return
+	}
+	switch err := s.refuseUpFront(r.Context(), before); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgLessonNoClaimsUpFront)
+		return
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgLessonLeftBehind)
 		return
 	}
 
-	// Best-effort file removal before clearing the paths; a failure must not block
-	// the tombstone (the row would otherwise keep claiming a path we tried to drop).
-	if l.OutputDir.Valid {
-		_ = removeLessonFiles(s.cfg.Layout, s.cfg.DownloadsDir, s.cfg.LibraryDir, l.OutputDir.String, l.VideoPath.String)
-	}
-
-	if err := s.store.UpdateLessonDeleted(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "lesson not found")
+	l, running, err := s.store.BeginLessonDelete(r.Context(), id)
+	if errors.Is(err, database.ErrLessonDeleting) {
+		writeErr(w, http.StatusConflict, msgLessonDeleting)
 		return
 	}
-	updated, err := s.store.GetLesson(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "lesson not found")
+		writeStoreErr(w, err, msgLessonGone)
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	hold := s.holdDelete(ctx, id)
+	defer s.endDelete(ctx, hold)
+	s.killRunning(running)
+
+	c, err := s.claims(ctx)
+	if err == nil {
+		err = leftBehind(c, l)
+	}
+	if err == nil {
+		err = s.deleteLessonFiles(ctx, c, hold, l)
+	}
+	switch {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgLessonNoClaims)
+		return
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgLessonLeftBehind)
+		return
+	case errors.Is(err, errFilesKept):
+		writeErr(w, http.StatusInternalServerError, msgLessonFilesKept)
+		return
+	case errors.Is(err, errRecordNotUpdated):
+		writeErr(w, http.StatusInternalServerError, msgLessonNotSaved)
+		return
+	case errors.Is(err, database.ErrLessonChanged):
+		writeErr(w, http.StatusConflict, msgLessonChanged)
+		return
+	case err != nil:
+		writeStoreErr(w, err, msgLessonGone)
+		return
+	}
+	updated, err := s.store.GetLesson(ctx, id)
+	if err != nil {
+		writeStoreErr(w, err, msgLessonGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.viewLesson(updated))
@@ -210,7 +291,7 @@ func queryInt(w http.ResponseWriter, raw, name string) (int, bool) {
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadQueryNumber(name))
 		return 0, false
 	}
 	return v, true
@@ -223,7 +304,7 @@ func pathInt(w http.ResponseWriter, r *http.Request, name string) (int, bool) {
 	raw := r.PathValue(name)
 	id, err := strconv.Atoi(raw)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid "+name+": "+raw)
+		writeErr(w, http.StatusBadRequest, msgBadPathNumber(name))
 		return 0, false
 	}
 	return id, true

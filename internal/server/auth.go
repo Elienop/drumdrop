@@ -29,7 +29,7 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		writeErr(w, http.StatusUnauthorized, msgUnauthorized)
 	})
 }
 

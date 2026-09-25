@@ -2,13 +2,16 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +22,9 @@ import (
 // Worker drains the jobs table sequentially: it claims one queued job at a
 // time, resolves and downloads the lesson, and records the outcome. A failed
 // download is retried up to Cfg.MaxAttempts with a growing backoff between
-// attempts; after the final attempt the lesson and job are marked failed. A
-// single bad job never aborts the run — every per-job failure is recorded and
+// attempts; after the final attempt the job is marked failed, and so is the
+// lesson unless it still records files from an earlier download (it then
+// stays downloaded, with a note). A single bad job never aborts the run — every per-job failure is recorded and
 // the worker moves on to the next claim.
 type Worker struct {
 	// Store claims jobs, loads follows, and records lesson/job outcomes.
@@ -168,12 +172,12 @@ func (w *Worker) progressCallback(job database.Job, lesson *musora.Lesson, attem
 }
 
 // waitBackoff waits the given retry delay but stays responsive to cancellation:
-// it returns false (do not retry) the moment ctx is cancelled, leaving the job
-// to be re-queued and retried next cycle. A real Worker waits on time.After(d)
-// vs ctx.Done(); a Worker with an injected sleeper (tests) calls that sleeper so
-// the recorded backoff schedule is still observable, then re-checks ctx so a
-// cancelled context still aborts retries. Returns true when the wait completed
-// normally and the next attempt should proceed.
+// it returns false (do not retry) the moment ctx, the job's, is cancelled (a
+// Cancel, or a shutdown; the caller tells the two apart). A real Worker waits
+// on time.After(d) vs ctx.Done(); a Worker with an injected sleeper (tests)
+// calls that sleeper so the recorded backoff schedule is still observable, then
+// re-checks ctx so a cancelled context still aborts retries. Returns true when
+// the wait completed normally and the next attempt should proceed.
 func (w *Worker) waitBackoff(ctx context.Context, d time.Duration) bool {
 	if w.sleep == nil {
 		w.sleep = time.Sleep
@@ -274,61 +278,10 @@ func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err err
 // attempts). A job that succeeds on the first try ends at attempts==1; one that
 // needs all three tries ends at attempts==3.
 func (w *Worker) execute(ctx context.Context, job database.Job) {
-	id := job.RailcontentID
-
-	// Load the follow for quality + folder title. A NULL/missing follow id (a
-	// job whose follow was deleted, or a manually enqueued job) falls back to a
-	// zero Follow, which outDirFor/qualityFor handle via Cfg defaults and the
-	// lesson's parent title below.
-	var follow database.Follow
-	if job.FollowID.Valid {
-		f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
-		if err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
-		} else {
-			follow = f
-		}
-	}
-
-	lesson, err := w.Resolver.Resolve(id, w.PermIDs)
-	if err != nil || lesson == nil {
-		reason := "could not resolve (gated or missing)"
-		if err != nil {
-			reason = err.Error()
-		}
-		fmt.Fprintf(w.log(), "  ↳ skipping %d: %s\n", id, reason)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "lesson_skipped",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Err:           reason,
-			Time:          time.Now(),
-		})
-		// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
-		// landing mid-resolve reaches here with ctx already cancelled. Finalize via
-		// WithoutCancel (same reasoning as the cancel branch below) so the lesson is
-		// not stranded in its prior status with the job stuck 'running'.
-		finishCtx := context.WithoutCancel(ctx)
-		_ = w.Store.MarkSkipped(finishCtx, id, reason)
-		_ = w.Store.MarkJobFailed(finishCtx, job.ID, reason)
+	run, ok := w.prepare(ctx, job)
+	if !ok {
 		return
 	}
-
-	outDir := w.outDir(follow, job, lesson)
-	quality := qualityFor(w.Cfg, follow)
-	// Number the folder by the lesson's recorded position (1-based) so siblings
-	// sort the way they appear in the course; fall back to 1 when the position is
-	// unknown. The download and the worker's lessonDir MUST share this value so
-	// producedVideo and cleanupPartials target the exact folder DownloadLesson
-	// writes to. GetLesson failure is non-fatal: keep the default index 1.
-	index := 1
-	if l, err := w.Store.GetLesson(ctx, id); err != nil {
-		fmt.Fprintf(w.log(), "  ⚠ get lesson %d position: %v\n", id, err)
-	} else if l.Position.Valid {
-		index = int(l.Position.Int64)
-	}
-	dir := lessonDir(outDir, index, lesson.Title)
 
 	// Per-job cancelable context: register its CancelFunc so CancelRunning can kill
 	// the in-flight download (yt-dlp dies via the context). Cancelling jobCtx does
@@ -338,196 +291,467 @@ func (w *Worker) execute(ctx context.Context, job database.Job) {
 	defer w.unregister(job.ID)
 	defer cancel()
 
-	var lastErr error
+	// The download writes only into its private folder; whatever happens, the
+	// folder goes when the job ends (a placed download has left it already).
+	lessonBase := filepath.Base(lessonDir("", run.index, run.lesson.Title))
+	private, err := w.startPrivate(job.ID, lessonBase)
+	if err != nil {
+		w.failBeforeDownload(ctx, job, run.lesson.Title, err, failNoFolder)
+		return
+	}
+	defer w.dropPrivate(job.ID)
+	run.private, run.privateLesson = private, filepath.Join(private, lessonBase)
+
+	// The failure the job ends with if every attempt fails: the last
+	// attempt's.
+	final := failDownload
 	for attempt := 1; attempt <= w.Cfg.MaxAttempts; attempt++ {
-		// Abort promptly on cancellation: leave the job in its current state (it
-		// is not downloaded and, after a re-mark, may be running) so the next
-		// planner/requeue cycle re-queues and retries it.
-		if err := ctx.Err(); err != nil {
+		f, done := w.attempt(ctx, jobCtx, run, attempt)
+		if done {
 			return
 		}
+		final = f
+	}
+	w.endFailed(ctx, job, final)
+}
 
-		// Attempt #1 was already claimed (running, attempts=1). Re-mark running
-		// only for retries, then wait the backoff for this retry.
-		if attempt > 1 {
-			if err := w.Store.MarkJobRunning(ctx, job.ID); err != nil {
-				fmt.Fprintf(w.log(), "  ⚠ job %d: re-mark running failed: %v\n", job.ID, err)
-			}
-			// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
-			// last entry for any further retries. See the doc comment: Backoff[i]
-			// is the delay before attempt i+2. A cancellation mid-backoff aborts
-			// the retry early, leaving the job to be re-queued next cycle.
-			if !w.waitBackoff(ctx, w.backoff(attempt-2)) {
-				return
-			}
-		}
+// jobRun is one claimed job's lesson and what its attempts share: what the
+// download needs, and what placing and recording it needs.
+type jobRun struct {
+	job    database.Job
+	lesson *musora.Lesson
+	// follow is the job's follow, or a zero Follow (see prepare).
+	follow database.Follow
+	// prev is the lesson's row as it was before this download.
+	prev    database.Lesson
+	quality string
+	// index is the lesson's position (1-based), which numbers its folder.
+	index  int
+	outDir string
+	// private is the job's private folder, and privateLesson the lesson's
+	// folder in it, where the download writes.
+	private, privateLesson string
+}
 
-		if err := w.Store.MarkDownloading(ctx, id); err != nil {
-			fmt.Fprintf(w.log(), "  ⚠ mark downloading %d: %v\n", id, err)
-		}
+// prepare resolves the job's lesson and reads what its download needs. ok is
+// false when the job ended here, without downloading: Musora couldn't be
+// asked, it has no match for the lesson, something could not be read, or
+// drumdrop is shutting down.
+func (w *Worker) prepare(ctx context.Context, job database.Job) (run *jobRun, ok bool) {
+	id := job.RailcontentID
 
-		fmt.Fprintf(w.log(), "  ▼ [%02d/%d] %d %s\n", attempt, w.Cfg.MaxAttempts, id, lesson.Title)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "download_started",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Title:         lesson.Title,
-			Attempt:       attempt,
-			MaxAttempts:   w.Cfg.MaxAttempts,
-			Time:          time.Now(),
-		})
-		derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
-			Dir:           outDir,
-			Index:         index,
-			Quality:       quality,
-			AudioLang:     w.Cfg.AudioLang,
-			ResourcesOnly: w.Cfg.ResourcesOnly,
-			OnProgress:    w.progressCallback(job, lesson, attempt),
-		})
-
-		// Cancel-error-first: a CancelRunning kill (jobCtx cancelled) must never
-		// fall through to the success or failure branches. Clean the partials, mark
-		// the lesson skipped + the job canceled, and stop — no retry.
-		//
-		// The two finalization writes use context.WithoutCancel(ctx): on a user
-		// Cancel the outer ctx is still alive, but on SIGINT/SIGTERM shutdown the
-		// outer ctx is ALSO cancelled (it is what cancelled jobCtx), and a plain
-		// ctx here would make withTx's BeginTx fail immediately — stranding the job
-		// 'running' and the lesson 'downloading' until the next startup requeue.
-		// WithoutCancel keeps the deadline/values but drops cancellation so these
-		// short writes land; gracefulServe joins the daemon goroutine before
-		// closing the store, so the DB is still open when they run.
-		if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
-			cleanupPartials(dir)
-			fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
-			w.progress().Emit(ProgressEvent{
-				Kind:          "lesson_skipped",
-				JobID:         job.ID,
-				FollowID:      job.FollowID.Int64,
-				RailcontentID: id,
-				Title:         lesson.Title,
-				Err:           "canceled",
-				Time:          time.Now(),
-			})
-			finishCtx := context.WithoutCancel(ctx)
-			_ = w.Store.MarkSkipped(finishCtx, id, "canceled")
-			_ = w.Store.MarkJobCanceled(finishCtx, job.ID)
-			return
-		}
-
-		if derr == nil {
-			// Move the finished lesson into the library (single location) when
-			// configured, BEFORE producedVideo/MarkDownloaded so they record the
-			// LIBRARY path. Non-fatal in either layout: a move failure logs a warning
-			// and keeps dir as the scratch downloads path (the file is still there,
-			// the download succeeded); the move must never turn a successful download
-			// into a failure.
-			videoPath, bytes := "", int64(0)
-			recorded := false
-			if w.Cfg.Layout == LayoutPlexTV && w.Cfg.LibraryDir != "" {
-				// Plex TV layout: flatten into <library>/<Show>/Season 01/ and rename
-				// the lesson + sidecars to the episode base. output_dir = the season
-				// folder; video_path = the moved episode .mp4 (stat for bytes). The
-				// move returns the .mp4 path directly, so producedVideo's
-				// "<dir>/<base>.mp4" assumption (which no longer holds once the file is
-				// renamed and flat) is bypassed here.
-				show := plexShow(follow, job, lesson)
-				seasonDir, vp, err := moveToLibraryPlexTV(w.Cfg.LibraryDir, show, 1, index, lesson.Title, dir)
-				if err != nil {
-					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
-				}
-				// A non-empty seasonDir means every file was placed in the library; the
-				// only error that can accompany it is the best-effort scratch-dir
-				// cleanup (logged above), which leaves the files correctly in place. Record
-				// the library paths in that case so we never fall back to producedVideo's
-				// now-emptied scratch dir. A true move failure returns an empty seasonDir,
-				// keeping the scratch dir and the producedVideo fallback below.
-				if seasonDir != "" {
-					dir = seasonDir
-					videoPath = vp
-					if !w.Cfg.ResourcesOnly && vp != "" {
-						if info, serr := os.Stat(vp); serr == nil {
-							bytes = info.Size()
-						}
-					}
-					recorded = true
-					// Overwrite the moved <movie> nfo with an <episodedetails> nfo so a
-					// Plex TV-Shows library (which can't match Drumeo to TheTVDB) gets the
-					// real episode title/season/episode from local metadata. Same path the
-					// move renamed the download-time nfo to (plexEpisodeBase). Non-fatal:
-					// the .mp4 + move already landed, so a write error just logs and the job
-					// still succeeds — like the aux-artifact fetches.
-					nfoPath := filepath.Join(seasonDir, plexEpisodeBase(show, lesson.Title, 1, index)+".nfo")
-					if err := os.WriteFile(nfoPath, []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)), 0o644); err != nil {
-						fmt.Fprintf(w.log(), "  ⚠ episode nfo %d: %v\n", id, err)
-					}
-				}
-			} else if w.Cfg.LibraryDir != "" {
-				// Default layout: move the whole "NN - title" leaf into the library at
-				// the same path relative to DownloadsDir. The rename preserves the leaf,
-				// so producedVideo still finds <base>.mp4 at the new dir.
-				if newDir, err := moveToLibrary(w.Cfg.DownloadsDir, w.Cfg.LibraryDir, dir); err != nil {
-					fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)
-				} else {
-					dir = newDir
-				}
-			}
-			// For the default layout (and for a plex-tv move that FAILED, leaving the
-			// file at the scratch dir) derive the video from the dir's "<base>.mp4".
-			if !recorded {
-				videoPath, bytes = w.producedVideo(dir)
-			}
-			if err := w.Store.MarkDownloaded(ctx, id, quality, dir, videoPath, bytes); err != nil {
-				fmt.Fprintf(w.log(), "  ⚠ mark downloaded %d: %v\n", id, err)
-			}
-			if err := w.Store.MarkJobDone(ctx, job.ID); err != nil {
-				fmt.Fprintf(w.log(), "  ⚠ mark job done %d: %v\n", job.ID, err)
-			}
-			fmt.Fprintf(w.log(), "  ✓ %d\n", id)
-			w.progress().Emit(ProgressEvent{
-				Kind:          "download_ok",
-				JobID:         job.ID,
-				FollowID:      job.FollowID.Int64,
-				RailcontentID: id,
-				Title:         lesson.Title,
-				Attempt:       attempt,
-				MaxAttempts:   w.Cfg.MaxAttempts,
-				Bytes:         bytes,
-				Time:          time.Now(),
-			})
-			return
-		}
-
-		lastErr = derr
-		fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, derr)
-		w.progress().Emit(ProgressEvent{
-			Kind:          "attempt_failed",
-			JobID:         job.ID,
-			FollowID:      job.FollowID.Int64,
-			RailcontentID: id,
-			Title:         lesson.Title,
-			Attempt:       attempt,
-			MaxAttempts:   w.Cfg.MaxAttempts,
-			Err:           derr.Error(),
-			Time:          time.Now(),
-		})
+	// Resolve runs before the loop's ctx.Err() guard, so a SIGINT/SIGTERM
+	// landing mid-resolve reaches either branch below with ctx already
+	// cancelled; both finalize via WithoutCancel (same reasoning as the cancel
+	// branch) so the lesson is not stranded in its prior status with the job
+	// stuck 'running'.
+	lesson, err := w.Resolver.Resolve(id, w.PermIDs)
+	if err != nil {
+		// Musora didn't answer, or its answer couldn't be read (hard rule 10:
+		// a shape mismatch must show as a failure). Nothing says the lesson is
+		// gone, so it is not skipped: a failed attempt, which later cycles
+		// retry like any failure.
+		w.failBeforeDownload(ctx, job, "", fmt.Errorf("asking Musora for the lesson: %w", err), failMusora)
+		return nil, false
+	}
+	if lesson == nil {
+		w.notReturned(ctx, job)
+		return nil, false
 	}
 
-	// Every attempt failed: record the lesson + job as failed and move on. The
-	// next planner cycle re-enqueues the lesson (it is not downloaded, and the
-	// job is no longer active), giving it another chance next interval.
-	msg := "download failed"
-	if lastErr != nil {
-		msg = lastErr.Error()
+	follow, ok := w.loadFollow(ctx, job, lesson)
+	if !ok {
+		return nil, false
 	}
-	// WithoutCancel for parity with the cancel/resolve branches: the per-attempt
-	// ctx.Err() guard makes a cancelled ctx here practically unreachable, but
-	// keeping all terminal writes uncancellable makes "shutdown never strands a
-	// job" a single, obvious invariant.
-	finishCtx := context.WithoutCancel(ctx)
-	_ = w.Store.MarkFailed(finishCtx, id, msg)
-	_ = w.Store.MarkJobFailed(finishCtx, job.ID, msg)
+
+	outDir := w.outDir(follow, job, lesson)
+	quality := qualityFor(w.Cfg, follow)
+	// Number the folder by the lesson's recorded position (1-based) so siblings
+	// sort the way they appear in the course; fall back to 1 when the position is
+	// unknown. The download and the worker's lessonDir MUST share this value so
+	// producedVideo and cleanupPartials target the exact folder DownloadLesson
+	// writes to. The row also says what the lesson's previous download left,
+	// which the placement replaces; a delete can not change it while this job
+	// runs without removing the job (and then nothing here is recorded). A row
+	// that can not be read is not "owns nothing": the job fails without
+	// downloading, and the next cycle tries again.
+	prev, err := w.Store.GetLesson(ctx, id)
+	if err != nil {
+		if w.shuttingDown(ctx, job, lesson) {
+			return nil, false
+		}
+		w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the lesson's record could not be read: %w", err), failNotStarted)
+		return nil, false
+	}
+	// What a download needs to be recorded is checked before it costs one.
+	if err := w.checkBeforeDownload(ctx); err != nil {
+		if w.shuttingDown(ctx, job, lesson) {
+			return nil, false
+		}
+		w.failBeforeDownload(ctx, job, lesson.Title, err, failNotStarted)
+		return nil, false
+	}
+	index := 1
+	if prev.Position.Valid {
+		index = int(prev.Position.Int64)
+	}
+	return &jobRun{job: job, lesson: lesson, follow: follow, prev: prev, quality: quality, index: index, outDir: outDir}, true
+}
+
+// loadFollow reads the job's follow, for quality + folder title. A NULL
+// follow id (a manually enqueued job), or one whose row is missing (the
+// follow was deleted), falls back to a zero Follow, which outDirFor/qualityFor
+// handle via Cfg defaults and the lesson's parent title. A follow that can't
+// be read is not "missing": the job fails without downloading (ok is false),
+// and the next cycle tries again. Defaults would name another folder, and the
+// placement would then move the lesson there (D66).
+func (w *Worker) loadFollow(ctx context.Context, job database.Job, lesson *musora.Lesson) (follow database.Follow, ok bool) {
+	if !job.FollowID.Valid {
+		return database.Follow{}, true
+	}
+	f, err := w.Store.GetFollow(ctx, job.FollowID.Int64)
+	switch {
+	case err == nil:
+		return f, true
+	case errors.Is(err, sql.ErrNoRows):
+		fmt.Fprintf(w.log(), "  ⚠ job %d: follow %d not found, using defaults: %v\n", job.ID, job.FollowID.Int64, err)
+		return database.Follow{}, true
+	}
+	if w.shuttingDown(ctx, job, lesson) {
+		return database.Follow{}, false
+	}
+	w.failBeforeDownload(ctx, job, lesson.Title, fmt.Errorf("the follow's record could not be read: %w", err), failNotStarted)
+	return database.Follow{}, false
+}
+
+// attempt runs attempt number attempt of run's download, placing and
+// recording it when it succeeds. done is true when the job ended in it: the
+// download was recorded, or the job was stopped, canceled or shut down.
+// Otherwise the attempt failed, and f is the failure the job ends with if it
+// was the last.
+func (w *Worker) attempt(ctx, jobCtx context.Context, run *jobRun, attempt int) (f failure, done bool) {
+	job, lesson, id := run.job, run.lesson, run.job.RailcontentID
+	// Abort promptly on cancellation: leave the job in its current state (it
+	// is not downloaded and, after a re-mark, may be running) so the next
+	// planner/requeue cycle re-queues and retries it. A later attempt's end
+	// was already reported (attempt_failed); the first attempt's is not.
+	if err := ctx.Err(); err != nil {
+		if attempt == 1 {
+			w.ended(job, lesson, msgShutdown)
+		}
+		return failure{}, true
+	}
+
+	// Attempt #1 was already claimed (running, attempts=1). Re-mark running
+	// only for retries, then wait the backoff for this retry.
+	if attempt > 1 && !w.retry(ctx, jobCtx, job, lesson, attempt) {
+		return failure{}, true
+	}
+
+	if w.stopped(ctx, job, lesson, w.Store.StartDownload(ctx, job.ID, id), "mark downloading") {
+		return failure{}, true
+	}
+
+	fmt.Fprintf(w.log(), "  ▼ [%02d/%d] %d %s\n", attempt, w.Cfg.MaxAttempts, id, lesson.Title)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "download_started",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         lesson.Title,
+		Attempt:       attempt,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Time:          time.Now(),
+	})
+	derr := w.Downloader.Download(jobCtx, lesson, musora.DownloadOpts{
+		Dir:           run.private,
+		Root:          run.private,
+		Index:         run.index,
+		Quality:       run.quality,
+		AudioLang:     w.Cfg.AudioLang,
+		ResourcesOnly: w.Cfg.ResourcesOnly,
+		OnProgress:    w.progressCallback(job, lesson, attempt),
+	})
+
+	// Cancel-error-first: a kill (jobCtx cancelled) must never fall through
+	// to the success or failure branches. A shutdown leaves the job to start
+	// over; a Cancel is recorded, with no retry.
+	if jobCtx.Err() != nil || errors.Is(derr, context.Canceled) {
+		if !w.shuttingDown(ctx, job, lesson) {
+			w.finishCanceled(ctx, job, lesson)
+		}
+		return failure{}, true
+	}
+
+	if derr == nil {
+		ended, rerr := w.recordAttempt(ctx, run, attempt)
+		if ended {
+			return failure{}, true
+		}
+		// The download could not be placed or recorded: a failed attempt,
+		// retried.
+		derr = rerr
+	}
+	w.attemptFailed(run, attempt, derr)
+	return attemptFailure(derr), false
+}
+
+// retry re-marks the job running before attempt, a retry, and waits the
+// backoff; false means the job ended during the wait.
+func (w *Worker) retry(ctx, jobCtx context.Context, job database.Job, lesson *musora.Lesson, attempt int) bool {
+	// A job canceled or removed meanwhile is not re-marked; the
+	// StartDownload after the wait then stops the download.
+	if err := w.Store.MarkJobRunning(ctx, job.ID); err != nil && !errors.Is(err, database.ErrDownloadCanceled) {
+		fmt.Fprintf(w.log(), "  ⚠ job %d: re-mark running failed: %v\n", job.ID, err)
+	}
+	// First retry (attempt 2) waits Backoff[0]; backoff() clamps to the
+	// last entry for any further retries. See the doc comment: Backoff[i]
+	// is the delay before attempt i+2. The wait is on the job's context,
+	// so a Cancel lands at once, not when the backoff ends (it is
+	// recorded, with no retry). A shutdown mid-backoff leaves the job
+	// running, to be requeued at the next start; its end was already
+	// reported with the failed attempt.
+	if !w.waitBackoff(jobCtx, w.backoff(attempt-2)) {
+		if ctx.Err() == nil {
+			w.finishCanceled(ctx, job, lesson)
+		}
+		return false
+	}
+	return true
+}
+
+// recordAttempt places and records a complete download (recordDownload).
+// ended is true when the job ended here: the download was recorded, or a job
+// a delete removed, or one canceled meanwhile, stopped (nothing is placed
+// yet when it is confirmed). Otherwise err is why the attempt failed.
+func (w *Worker) recordAttempt(ctx context.Context, run *jobRun, attempt int) (ended bool, err error) {
+	job, lesson := run.job, run.lesson
+	if w.stopped(ctx, job, lesson, w.Store.ConfirmDownload(ctx, job.ID, job.RailcontentID), "confirm download") {
+		return true, nil
+	}
+	bytes, ok, err := w.recordDownload(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		w.downloaded(job, lesson, attempt, bytes)
+	}
+	return true, nil
+}
+
+// attemptFailure is the failure an attempt that failed with err ends the job
+// with, if it was the last.
+func attemptFailure(err error) failure {
+	switch {
+	case errors.Is(err, errLeftBehind):
+		return failLeftBehind
+	case errors.Is(err, errKeptInLibrary):
+		return failKeptInLibrary
+	}
+	return failDownload
+}
+
+// attemptFailed logs why attempt number attempt of run's download failed,
+// and reports it (attempt_failed).
+func (w *Worker) attemptFailed(run *jobRun, attempt int, err error) {
+	id := run.job.RailcontentID
+	fmt.Fprintf(w.log(), "  ✖ download %d attempt %d/%d failed: %v\n", id, attempt, w.Cfg.MaxAttempts, err)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "attempt_failed",
+		JobID:         run.job.ID,
+		FollowID:      run.job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         run.lesson.Title,
+		Attempt:       attempt,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Err:           msgAttemptFailed,
+		Time:          time.Now(),
+	})
+}
+
+// endFailed ends a job every attempt of which failed, with final: record the
+// job as failed and move on. A lesson with no files from an earlier download
+// is failed too, and the next planner cycle re-enqueues it, giving it another
+// chance next interval; one that still records files, all on disk now, stays
+// downloaded with a note, so syncs don't download it again and again, and the
+// owner's Download retries it (owner rulings 2026-09-24 (h) and (o)). Each
+// attempt's error was logged already; the lesson records a sentence. What the
+// download wrote goes with its private folder; nothing outside it was
+// touched. WithoutCancel for parity with the cancel/resolve branches: the
+// per-attempt ctx.Err() guard makes a cancelled ctx here practically
+// unreachable, but keeping all terminal writes uncancellable makes "shutdown
+// never strands a job" a single, obvious invariant.
+func (w *Worker) endFailed(ctx context.Context, job database.Job, final failure) {
+	id := job.RailcontentID
+	onDisk := w.filesOnDisk(ctx, id)
+	switch ferr := w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, final.lesson, final.keptNote(), final.job, onDisk); {
+	case errors.Is(ferr, database.ErrDownloadAbandoned):
+		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while it failed; nothing was recorded\n", id)
+	case errors.Is(ferr, database.ErrDownloadCanceled):
+		fmt.Fprintf(w.log(), "  ⚠ record failure %d: its job was requeued meanwhile: %v\n", id, ferr)
+	case ferr != nil:
+		fmt.Fprintf(w.log(), "  ⚠ record failure %d: %v\n", id, ferr)
+	}
+}
+
+// shuttingDown reports whether ctx, the worker's run, has ended: drumdrop is
+// shutting down. The job is then left as it is, running, and the lesson is
+// never skipped or failed for it. Only the startup of serve or a looping
+// daemon requeues it (Daemon.Recover), so it starts over; a daemon --once run
+// never does, and until one of those starts the job stays running, which
+// keeps the lesson from being queued again. Its end is reported, and its
+// private folder goes with the job.
+func (w *Worker) shuttingDown(ctx context.Context, job database.Job, lesson *musora.Lesson) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	fmt.Fprintf(w.log(), "  ⊗ %d stopped: shutting down; its job stays running until serve or a looping daemon (not --once) starts and queues it again\n", job.RailcontentID)
+	w.ended(job, lesson, msgShutdown)
+	return true
+}
+
+// failBeforeDownload fails a job that can not start its download (Musora
+// couldn't be asked for the lesson, or a precondition can not pass), without
+// downloading anything: its reason is logged, reported as a failed attempt
+// (the job's one terminal event), and the job is marked failed with f, and
+// the lesson too (the next cycle tries again) unless it still records files
+// from an earlier download, all on disk: that one stays downloaded with f's
+// kept note (database.Store.FailDownload). The event and the records carry
+// f's sentences, written for the user, not the reason. title is the lesson's,
+// or "" when it is not known.
+func (w *Worker) failBeforeDownload(ctx context.Context, job database.Job, title string, reason error, f failure) {
+	id := job.RailcontentID
+	fmt.Fprintf(w.log(), "  ✖ %d not downloaded: %v\n", id, reason)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "attempt_failed",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         title,
+		Attempt:       1,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Err:           f.lesson,
+		Time:          time.Now(),
+	})
+	w.logAbandoned(id, w.Store.FailDownload(context.WithoutCancel(ctx), job.ID, id, f.lesson, f.keptNote(), f.job, w.filesOnDisk(ctx, id)))
+}
+
+// notReturned ends a job whose lesson Musora answered with no match (locked
+// for the owner's account, or removed), without downloading anything. A
+// lesson whose earlier download is on disk stays downloaded with
+// msgNotReturnedKept, and only its job fails (owner ruling 2026-09-24 (n)):
+// the job's end is reported as a failed attempt, and syncs leave the lesson
+// alone. Any other lesson is skipped, as it always was, and reported so. The
+// job records msgNotResolved either way, and so does the event.
+func (w *Worker) notReturned(ctx context.Context, job database.Job) {
+	id := job.RailcontentID
+	onDisk := w.filesOnDisk(ctx, id)
+	e := ProgressEvent{
+		Kind:          "lesson_skipped",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Err:           msgNotResolved,
+		Time:          time.Now(),
+	}
+	if onDisk {
+		e.Kind, e.Attempt, e.MaxAttempts = "attempt_failed", 1, w.Cfg.MaxAttempts
+		fmt.Fprintf(w.log(), "  ✖ %d not downloaded: Musora returned no lesson (locked or removed); its earlier download is kept\n", id)
+	} else {
+		fmt.Fprintf(w.log(), "  ↳ skipping %d: Musora returned no lesson (locked or removed)\n", id)
+	}
+	w.progress().Emit(e)
+	w.logAbandoned(id, w.Store.NotReturnedDownload(context.WithoutCancel(ctx), job.ID, id, msgNotResolved, msgNotReturnedKept, onDisk))
+}
+
+// ended reports the end of a job that stopped without downloading, failing or
+// being canceled (a skip or a delete removed it, it was requeued elsewhere, or
+// drumdrop is shutting down), so a client never keeps showing it as active.
+// msg is a sentence for the user.
+func (w *Worker) ended(job database.Job, lesson *musora.Lesson, msg string) {
+	w.progress().Emit(ProgressEvent{
+		Kind:          "lesson_skipped",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: job.RailcontentID,
+		Title:         lesson.Title,
+		Err:           msg,
+		Time:          time.Now(),
+	})
+}
+
+// logAbandoned logs the outcome of a terminal store write made before anything
+// was placed (a skip, a failed precondition, a cancel), so there is nothing
+// outside the private folder for a stopper's intent to apply to.
+func (w *Worker) logAbandoned(id int, err error) {
+	switch {
+	case errors.Is(err, database.ErrDownloadAbandoned):
+		fmt.Fprintf(w.log(), "  ⊗ %d was removed meanwhile; nothing was recorded\n", id)
+	case err != nil:
+		fmt.Fprintf(w.log(), "  ⚠ record %d: %v\n", id, err)
+	}
+}
+
+// stopped reports whether a guarded write's err ends the job: a delete or a
+// skip removed it (its end is reported; what it wrote goes with its private
+// folder), or it was canceled (recorded as a cancel). Any other error is
+// logged under what, and the download goes on.
+func (w *Worker) stopped(ctx context.Context, job database.Job, lesson *musora.Lesson, err error, what string) bool {
+	switch {
+	case errors.Is(err, database.ErrDownloadAbandoned):
+		w.ended(job, lesson, msgStopped)
+		fmt.Fprintf(w.log(), "  ⊗ %d was stopped while downloading; nothing outside its private folder was touched\n", job.RailcontentID)
+		return true
+	case errors.Is(err, database.ErrDownloadCanceled):
+		w.finishCanceled(ctx, job, lesson)
+		return true
+	case err != nil:
+		fmt.Fprintf(w.log(), "  ⚠ %s %d: %v\n", what, job.RailcontentID, err)
+	}
+	return false
+}
+
+// finishCanceled records a download a Cancel stopped: the lesson is left as
+// CancelDownload says, and the job canceled; what it wrote goes with its
+// private folder. The write uses context.WithoutCancel(ctx), so it lands
+// whatever happens to ctx meanwhile. A delete that removed the job meanwhile,
+// or a job requeued meanwhile (a retry), records nothing. A shutdown never
+// comes here (shuttingDown).
+func (w *Worker) finishCanceled(ctx context.Context, job database.Job, lesson *musora.Lesson) {
+	id := job.RailcontentID
+	fmt.Fprintf(w.log(), "  ⊗ canceled %d\n", id)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "lesson_skipped",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: id,
+		Title:         lesson.Title,
+		Err:           msgCanceled,
+		Time:          time.Now(),
+	})
+	switch err := w.Store.CancelDownload(context.WithoutCancel(ctx), job.ID, id, w.filesOnDisk(ctx, id)); {
+	case errors.Is(err, database.ErrDownloadAbandoned):
+		fmt.Fprintf(w.log(), "  ⊗ %d was removed meanwhile; nothing was recorded\n", id)
+	case errors.Is(err, database.ErrDownloadCanceled):
+	case err != nil:
+		fmt.Fprintf(w.log(), "  ⚠ record cancel %d: %v\n", id, err)
+	}
+}
+
+// downloaded reports a recorded download.
+func (w *Worker) downloaded(job database.Job, lesson *musora.Lesson, attempt int, bytes int64) {
+	fmt.Fprintf(w.log(), "  ✓ %d\n", job.RailcontentID)
+	w.progress().Emit(ProgressEvent{
+		Kind:          "download_ok",
+		JobID:         job.ID,
+		FollowID:      job.FollowID.Int64,
+		RailcontentID: job.RailcontentID,
+		Title:         lesson.Title,
+		Attempt:       attempt,
+		MaxAttempts:   w.Cfg.MaxAttempts,
+		Bytes:         bytes,
+		Time:          time.Now(),
+	})
 }
 
 // outDir is the single source of truth for a job's output directory. An
@@ -595,28 +819,100 @@ func lessonDir(outDir string, index int, title string) string {
 	return filepath.Join(outDir, fmt.Sprintf("%02d - %s", index, musora.Sanitize(title)))
 }
 
-// cleanupPartials removes yt-dlp's leftover partial-download artifacts under a
-// cancelled lesson's dir — *.part, *.ytdl, and *.f* (per-format fragments) — so a
-// killed download leaves no half-written files behind. A missing dir is tolerated
-// (nothing to clean); any other read/remove error is ignored: cleanup is
-// best-effort and must not block the cancel path.
+// cleanupPartials removes leftover partial-download artifacts from a lesson's
+// dir and its subfolders, so a killed download leaves no half-written files
+// behind, and none is moved into the library. In dir itself only names of the
+// lesson's own base (the folder's name) in the partial shapes go
+// (isPartialName): a finished subtitle ("<base>.fr.vtt") or a title with dots
+// in it is a kept file, never a partial. In a subfolder (resources/,
+// play-along/, sheet-music/) only drumdrop's own temporary files go
+// (isTempName): yt-dlp writes only in dir, and a resource keeps the name
+// Musora gave it, so no other shape there is a partial. The walk and every
+// removal go through dir opened as an os.Root, and a symlink is never
+// followed, so nothing outside dir is read or removed. A missing dir is
+// tolerated (nothing to clean); any other read/remove error is ignored:
+// cleanup is best-effort and must not block the cancel path.
 func cleanupPartials(dir string) {
-	entries, err := os.ReadDir(dir)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return // missing dir or unreadable: nothing to clean
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	defer root.Close()
+	base := filepath.Base(dir)
+	_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil // an unreadable subfolder is skipped; the rest goes on
 		}
-		name := e.Name()
-		part, _ := filepath.Match("*.part", name)
-		ytdl, _ := filepath.Match("*.ytdl", name)
-		frag, _ := filepath.Match("*.f*", name)
-		if part || ytdl || frag {
-			_ = os.Remove(filepath.Join(dir, name))
+		name := d.Name()
+		if (p == name && isPartialName(name, base)) || (p != name && isTempName(name)) {
+			_ = root.Remove(filepath.FromSlash(p))
+		}
+		return nil
+	})
+}
+
+// isTempName reports whether name is a file drumdrop writes before it takes
+// its place (musora's writeInRoot, writeScratchNFO), whatever its base.
+func isTempName(name string) bool {
+	return strings.HasSuffix(name, musora.TempSuffix) || strings.HasSuffix(name, episodeTempSuffix)
+}
+
+// isPartialName reports whether name is one of the partial-download artifacts
+// for the lesson base, yt-dlp's or drumdrop's own:
+//   - "<base>….part", "<base>….ytdl", and "<base>….part-Frag<N>…" (a download
+//     in progress, and its fragments);
+//   - "<base>[ [Label]].f<digits>.<ext>" (one format of a merge, before
+//     ffmpeg joins them);
+//   - "<base>[ [Label]].temp.<ext>" (ffmpeg's output while it merges or fixes
+//     up the video, before yt-dlp renames it over "<base>.<ext>");
+//   - "<base>….drumdrop-part" and "<base>….drumdrop-episode" (a file drumdrop
+//     writes itself, the nfo or the poster, before it takes its place).
+//
+// Each is left only by a run that died (or was killed) before finishing it.
+func isPartialName(name, base string) bool {
+	rest, ok := strings.CutPrefix(name, base)
+	if !ok {
+		return false
+	}
+	for _, suffix := range []string{".part", ".ytdl", musora.TempSuffix, episodeTempSuffix} {
+		if strings.HasSuffix(rest, suffix) {
+			return true
 		}
 	}
+	if strings.Contains(rest, ".part-Frag") {
+		return true
+	}
+	if strings.HasPrefix(rest, " [") {
+		end := strings.Index(rest, "]")
+		if end < 0 {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+	if ext, ok := strings.CutPrefix(rest, ".temp."); ok {
+		return ext != "" && !strings.Contains(ext, ".")
+	}
+	return isFormatSuffix(rest)
+}
+
+// isFormatSuffix reports whether rest, what follows a lesson base (and its
+// version label), is ".f<digits>.<ext>": one format of a merge, before ffmpeg
+// joins them.
+func isFormatSuffix(rest string) bool {
+	after, ok := strings.CutPrefix(rest, ".f")
+	if !ok {
+		return false
+	}
+	digits, ext, ok := strings.Cut(after, ".")
+	if !ok || digits == "" || ext == "" || strings.Contains(ext, ".") {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // producedVideo returns the path and total size of the mp4(s) DownloadLesson
@@ -630,13 +926,21 @@ func cleanupPartials(dir string) {
 //
 // On ResourcesOnly (no video is produced) or when no matching mp4 exists (a
 // video-less song, or a different container extension) it returns "" and 0 so
-// MarkDownloaded records no video metadata rather than a path that does not
-// exist. ReadDir + string prefix/suffix matching is used (not filepath.Glob) so
-// glob metacharacters surviving Sanitize in the base can never break the match.
+// FinishDownload records no video metadata rather than a path that does not
+// exist.
 func (w *Worker) producedVideo(lessonDir string) (videoPath string, bytes int64) {
 	if w.Cfg.ResourcesOnly {
 		return "", 0
 	}
+	return lessonVideo(lessonDir)
+}
+
+// lessonVideo is producedVideo for any lesson folder: the first, in name
+// order, of its videos named after the folder (isLessonVideoName), and the
+// sum of their sizes; "" and 0 when it holds none. ReadDir + string
+// prefix/suffix matching is used (not filepath.Glob) so glob metacharacters
+// surviving Sanitize in the base can never break the match.
+func lessonVideo(lessonDir string) (videoPath string, bytes int64) {
 	base := filepath.Base(lessonDir)
 	entries, err := os.ReadDir(lessonDir)
 	if err != nil {

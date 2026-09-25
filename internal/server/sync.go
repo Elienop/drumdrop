@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -24,18 +25,19 @@ type syncRequest struct {
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+		writeErr(w, http.StatusBadRequest, msgBadBody)
 		return
 	}
 
 	if req.DryRun {
 		if s.deps.Planner == nil {
-			writeErr(w, http.StatusServiceUnavailable, "dry-run sync unavailable: no planner attached")
+			writeErr(w, http.StatusServiceUnavailable, msgNoPlanner)
 			return
 		}
 		would, err := s.deps.Planner.PlanDryRun(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "dry-run sync failed")
+			fmt.Fprintf(logOut, "drumdrop: dry-run sync: %v\n", err)
+			writeErr(w, http.StatusInternalServerError, msgDryRunFailed)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]int{"would_enqueue": would})
@@ -43,14 +45,24 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.deps.Kick == nil {
-		writeErr(w, http.StatusServiceUnavailable, "sync unavailable: no daemon attached")
+		writeErr(w, http.StatusServiceUnavailable, msgNoDaemon)
 		return
 	}
-	// Non-blocking send: a full buffer means a cycle is already pending, which is
-	// exactly what the caller asked for, so report success either way.
+	s.kick()
+	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
+}
+
+// kick asks the daemon for one cycle now, out of the interval: a non-blocking
+// send on the kick channel, so a request never waits on it. A full buffer
+// means a cycle is already pending, and it covers this request too, so
+// presses close together share one cycle. With no daemon attached (a nil
+// Kick: server tests, and the CLI, which serves nothing) it does nothing: a
+// send on a nil channel is never ready, so the default case runs. While syncs
+// are paused the daemon drops a kick it receives (Daemon.Run), so what a
+// press queued waits for Resume, which kicks again.
+func (s *Server) kick() {
 	select {
 	case s.deps.Kick <- struct{}{}:
 	default:
 	}
-	writeJSON(w, http.StatusAccepted, map[string]bool{"triggered": true})
 }

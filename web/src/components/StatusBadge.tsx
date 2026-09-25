@@ -28,12 +28,17 @@ const tone: Record<string, string> = {
   failed: statusTone.error,
   skipped: statusTone.neutral,
   canceled: statusTone.neutral,
+  // Work in progress reads amber, like downloading/running.
+  deleting: statusTone.active,
 }
 
-export function StatusBadge({ status }: { status: LessonStatus | JobStatus }) {
+// Shown instead of a status while that work runs (LessonDTO.deleting).
+const label: Record<string, string> = { deleting: "deleting…" }
+
+export function StatusBadge({ status }: { status: LessonStatus | JobStatus | "deleting" }) {
   return (
     <Badge variant="outline" className={cn("font-medium", tone[status])}>
-      {status}
+      {label[status] ?? status}
     </Badge>
   )
 }

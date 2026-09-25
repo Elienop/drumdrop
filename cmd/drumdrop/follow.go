@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/elienop/drumdrop/internal/config"
 	"github.com/elienop/drumdrop/internal/database"
@@ -15,6 +18,9 @@ import (
 	"github.com/elienop/drumdrop/internal/musora"
 	"github.com/elienop/drumdrop/internal/scheduler"
 )
+
+// errCoachLinkAsNode is what followNode answers for a coach-page link.
+var errCoachLinkAsNode = errors.New("follow: that's a coach page, not a lesson or course; follow the instructor with `drumdrop follow @<link>` or --instructor <link>")
 
 // followArgs holds the parsed positionals and flag values for the follow
 // command. Extracted so cmdFollow and its tests drive the same parser.
@@ -32,9 +38,11 @@ type followArgs struct {
 func parseFollowArgs(argv []string) (followArgs, error) {
 	fs := flag.NewFlagSet("drumdrop follow", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	brand := fs.String("brand", "drumeo", "musora brand (drumeo|pianote|guitareo|singeo|playbass)")
+	// brand defaults to "" so an instructor follow can tell a --brand given
+	// from none, when a pasted coach-page link names its own.
+	brand := fs.String("brand", "", "musora brand (drumeo|pianote|guitareo|singeo|playbass); default drumeo, or a coach link's")
 	quality := fs.String("quality", "best", "best|2160|1440|1080|720|480")
-	instructor := fs.String("instructor", "", "follow an instructor by slug")
+	instructor := fs.String("instructor", "", "follow an instructor by name, slug or coach-page link")
 
 	positionals, flags := splitArgs(argv)
 	if err := fs.Parse(flags); err != nil {
@@ -48,21 +56,33 @@ func parseFollowArgs(argv []string) (followArgs, error) {
 	}, nil
 }
 
+// instructorInput returns what was typed for an instructor follow, and whether
+// this is one: --instructor wins, else a leading @ on the first positional.
+// The @ stays in what it returns: the normaliser drops one, as it does for the
+// web's preview and add, so "@@jared-falk" is refused on every path. A bare
+// "@" is an instructor follow with nothing typed, which the normaliser
+// refuses, rather than a node follow of "@".
+func instructorInput(args followArgs) (string, bool) {
+	if args.instructor != "" {
+		return args.instructor, true
+	}
+	if len(args.positionals) > 0 && strings.HasPrefix(args.positionals[0], "@") {
+		return args.positionals[0], true
+	}
+	return "", false
+}
+
 // cmdFollow records a node follow (bare id / Musora URL) or an instructor follow
-// (leading @slug, or --instructor slug). Both are idempotent: re-following an
+// (leading @, or --instructor). Both are idempotent: re-following an
 // already-followed target reports "already following" rather than erroring.
 func cmdFollow(argv []string) error {
 	args, err := parseFollowArgs(argv)
 	if err != nil {
 		return err
 	}
-	positionals := args.positionals
-
-	// Determine the slug for an instructor follow: --instructor <slug> wins, else
-	// a leading @slug positional.
-	slug := args.instructor
-	if slug == "" && len(positionals) > 0 && strings.HasPrefix(positionals[0], "@") {
-		slug = strings.TrimPrefix(positionals[0], "@")
+	input, isInstructor := instructorInput(args)
+	if !isInstructor && len(args.positionals) == 0 {
+		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
 	}
 
 	store, err := engine.OpenStore()
@@ -72,19 +92,26 @@ func cmdFollow(argv []string) error {
 	defer store.Close()
 	ctx := context.Background()
 
-	if slug != "" {
-		return followInstructor(ctx, store, slug, args.brand, args.quality)
+	if isInstructor {
+		return followInstructor(ctx, store, input, args.brand, args.quality)
 	}
-
-	if len(positionals) == 0 {
-		return fmt.Errorf("follow: provide a lesson/course id or URL, or @slug / --instructor slug")
-	}
-	return followNode(ctx, store, positionals[0], args.brand, args.quality)
+	return followNode(ctx, store, args.positionals[0], args.brand, args.quality)
 }
 
 // followNode resolves a best-effort title for the node id (an empty title is
-// acceptable) and records a node follow.
+// acceptable) and records a node follow. The brand is settled as the web's
+// add settles it (musora.NodeBrand): any case, empty for the default, and one
+// Musora doesn't have is refused before Musora is asked, since every lesson of
+// the follow is stored with it. A coach-page link
+// is refused too: its number is the instructor's, not a lesson's or course's.
 func followNode(ctx context.Context, store *database.Store, target, brand, quality string) error {
+	brand, err := musora.NodeBrand(brand)
+	if err != nil {
+		return fmt.Errorf("follow: --brand must be drumeo, pianote, guitareo, singeo or playbass: %w", err)
+	}
+	if musora.IsCoachLink(target) {
+		return errCoachLinkAsNode
+	}
 	id := engine.ExtractID(target)
 	if id == 0 {
 		return fmt.Errorf("could not parse a content id from: %s", target)
@@ -112,10 +139,19 @@ func followNode(ctx context.Context, store *database.Store, target, brand, quali
 	return nil
 }
 
-// followInstructor validates the slug, looks up the instructor's display name,
-// and records an instructor follow.
-func followInstructor(ctx context.Context, store *database.Store, slug, brand, quality string) error {
-	id, name, ok, err := musora.ResolveInstructorID(slug)
+// followInstructor normalises what was typed and settles the brand exactly as
+// the web's preview and add do (musora.NormalizeInstructor), looks up the
+// instructor's display name, and records an instructor follow of the
+// normalised slug.
+func followInstructor(ctx context.Context, store *database.Store, input, brand, quality string) error {
+	slug, brand, err := musora.NormalizeInstructor(input, brand)
+	if errors.Is(err, musora.ErrBadSlug) {
+		return fmt.Errorf("follow: enter an instructor's name, like @'Jared Falk', slug, like @jared-falk, or coach-page link: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("follow: %w", err)
+	}
+	id, name, ok, err := musora.ResolveInstructorID(slug, brand)
 	if err != nil {
 		return err
 	}
@@ -228,6 +264,18 @@ func lastSynced(f database.Follow) string {
 // active jobs, cap NEW downloads via --limit, never abort on one bad lesson, and
 // dry-run records but downloads nothing — live in and are tested by the scheduler
 // package.
+//
+// sync runs no startup recovery (Daemon.Recover), on purpose: it may run while
+// a daemon or serve works on the same database and folders, and it can not
+// tell that process's download from a crashed one. Worker.SweepPrivate keeps
+// only the private folders of jobs its own worker is running, which for sync is
+// none, so it would remove the other process's download in progress. The jobs
+// table is no substitute: a job canceled or removed meanwhile still uses its
+// folder until its worker has undone its placement, and a queued one can be
+// claimed between the check and the removal. Requeueing running jobs would
+// requeue the other process's. What a crash left is cleared by the next daemon
+// or serve start. An interrupt (Ctrl-C, SIGTERM) is not a crash: it stops the
+// download in progress, and the worker removes its private folder.
 
 // cmdSync parses the sync flags, builds a scheduler Planner + Worker over the
 // real store and adapters, and runs one plan+drain cycle (the daemon's per-cycle
@@ -253,10 +301,18 @@ func cmdSync(argv []string) error {
 	}
 	defer store.Close()
 
-	cfg := engine.Config(*out, *quality, *resourcesOnly)
+	cfg, err := engine.Config(*out, *quality, *resourcesOnly)
+	if err != nil {
+		return err
+	}
 	planner, worker, _ := engine.Build(store, cfg, engine.PermissionIDs(), os.Stdout, nil)
 
-	return runSync(context.Background(), planner, worker, *dryRun, *limit, os.Stdout)
+	// yt-dlp runs in its own process group, so a Ctrl-C at the terminal never
+	// reaches it: without this, drumdrop would die and leave it running on its
+	// own, writing into the job's private folder.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runSync(ctx, planner, worker, *dryRun, *limit, os.Stdout)
 }
 
 // runSync executes one sync cycle, decoupled from flag parsing so tests can drive
@@ -281,6 +337,12 @@ func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.
 	processed, err := worker.RunOnce(ctx, limit)
 	if err != nil {
 		return err
+	}
+	if ctx.Err() != nil {
+		// The stopped job stays marked running (Worker.shuttingDown), and only
+		// a daemon or serve start requeues it.
+		fmt.Fprintf(w, "\nSync interrupted — queued %d, processed %d\n", planned, processed)
+		return errors.New("sync interrupted: a download in progress was stopped; it starts over the next time daemon or serve starts")
 	}
 	fmt.Fprintf(w, "\nSync complete — queued %d, downloaded %d\n", planned, processed)
 	return nil

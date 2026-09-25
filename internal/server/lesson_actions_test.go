@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/elienop/drumdrop/internal/database"
 )
 
 func TestDownloadLessonEnqueues(t *testing.T) {
@@ -78,6 +80,51 @@ func TestDownloadLessonReturnsExistingActiveJob(t *testing.T) {
 	}
 	if len(jobs) != 1 {
 		t.Fatalf("queued jobs = %d, want 1 (no duplicate enqueued)", len(jobs))
+	}
+}
+
+// TestDownloadLessonAcceptsADownloadedLesson (owner ruling 2026-09-24 (h))
+// proves Download queues a lesson that is downloaded, here one a failed
+// re-download left downloaded with a note: syncs never queue it again, so
+// the owner's Download is how it is retried.
+func TestDownloadLessonAcceptsADownloadedLesson(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	if err := store.UpsertLesson(ctx, 5003, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
+	}
+	for _, fail := range []bool{false, true} {
+		id, _, err := store.EnqueueJob(ctx, sql.NullInt64{}, 5003)
+		if err != nil {
+			t.Fatalf("EnqueueJob: %v", err)
+		}
+		claimJob(t, store, id)
+		if fail {
+			err = store.FailDownload(ctx, id, 5003, "failed", "kept", "retry", true)
+		} else {
+			err = store.FinishDownload(ctx, id, 5003, database.DownloadRecord{OutputDir: "/dl/C/01 - Lesson"})
+		}
+		if err != nil {
+			t.Fatalf("record the download (failed=%v): %v", fail, err)
+		}
+	}
+	if l, err := store.GetLesson(ctx, 5003); err != nil || l.Status != database.StatusDownloaded || l.Error.String != "kept" {
+		t.Fatalf("lesson = %+v, %v; want downloaded with the note", l, err)
+	}
+	srv := NewServer(store, Deps{}, nil, Config{}, "test")
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/lessons/5003/download", nil))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var got JobDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.RailcontentID != 5003 || got.Status != "queued" {
+		t.Errorf("job = %+v, want a queued job for 5003", got)
 	}
 }
 

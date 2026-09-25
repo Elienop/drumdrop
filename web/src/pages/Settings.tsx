@@ -1,7 +1,8 @@
 import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
-import { api, ApiHttpError } from "@/lib/api"
+import { api } from "@/lib/api"
+import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { clearToken, getToken, setToken } from "@/lib/auth"
 import { Button } from "@/components/ui/button"
@@ -15,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ConnectionPill } from "@/components/StatusBadge"
+import { PendingButton } from "@/components/PendingButton"
 
 // Settings has three cards: the Musora account connection (session pill + a
 // local connect form), the API token (stored in localStorage, shared with the
@@ -44,10 +46,12 @@ function MusoraCard() {
       qc.invalidateQueries({ queryKey: qk.session })
     },
     onError: (err) => {
-      // 401 → bad Musora credentials; 400 → malformed. Both surface a generic
-      // "login failed"; ApiHttpError carries a clean server message we append.
-      const detail = err instanceof ApiHttpError && err.message ? `: ${err.message}` : ""
-      toast.error(`login failed${detail}`)
+      // The server's sentence says why: Musora rejected the email and
+      // password (422), Musora couldn't be reached (502), or the form was
+      // malformed (400); without one (a proxy page) our own sentence does.
+      // Never a 401: that status belongs to DrumDrop's own API token, and
+      // the api client answers it by opening the token gate.
+      failureToast("Couldn't connect to Musora", errorMessage(err))
     },
   })
 
@@ -60,16 +64,14 @@ function MusoraCard() {
           <div className="flex flex-col gap-1.5">
             <CardTitle>Musora connection</CardTitle>
             <CardDescription>
-              Posted to your local drumdrop server; credentials never leave this machine.
+              DrumDrop's server signs in to Musora with your email and password, and keeps a copy in its config folder. They aren't sent anywhere else.
             </CardDescription>
           </div>
           {session.isPending ? (
             <span className="text-sm text-muted-foreground">Loading…</span>
           ) : session.isError ? (
             <span className="text-sm text-destructive">
-              {session.error instanceof ApiHttpError
-                ? session.error.message
-                : "Failed to load"}
+              {errorMessage(session.error, "Couldn't load the connection status.")}
             </span>
           ) : (
             <ConnectionPill connected={connected} />
@@ -105,12 +107,18 @@ function MusoraCard() {
             />
           </div>
           <div>
-            <Button
+            {/* PendingButton, not `disabled` while it runs: a disabled
+                button drops keyboard focus to <body>. Enter in a field
+                meanwhile sends nothing: implicit submission is a click on
+                this button, which PendingButton cancels while pending. */}
+            <PendingButton
               type="submit"
-              disabled={connect.isPending || email.trim() === "" || password === ""}
+              pending={connect.isPending}
+              pendingLabel="Connecting…"
+              disabled={email.trim() === "" || password === ""}
             >
               Connect
-            </Button>
+            </PendingButton>
           </div>
         </form>
       </CardContent>
@@ -160,7 +168,7 @@ function TokenCard() {
               onChange={(e) => setValue(e.target.value)}
             />
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-3">
             <Button onClick={save} disabled={value.trim() === ""}>
               Save
             </Button>
@@ -187,9 +195,7 @@ function AboutCard() {
         {health.isError ? (
           <div className="flex items-center justify-between gap-4">
             <span className="text-sm text-destructive">
-              {health.error instanceof ApiHttpError
-                ? health.error.message
-                : "Failed to load"}
+              {errorMessage(health.error, "Couldn't reach the server to read its version.")}
             </span>
             <Button variant="outline" size="sm" onClick={() => health.refetch()}>
               Retry

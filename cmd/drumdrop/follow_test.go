@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -159,35 +162,39 @@ func (s *cliStore) GetLesson(ctx context.Context, id int) (database.Lesson, erro
 	return database.Lesson{}, nil
 }
 func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
-func (s *cliStore) MarkJobDone(ctx context.Context, id int64) error {
+func (s *cliStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
+	return nil, nil
+}
+func (s *cliStore) setJobStatus(id int64, status string) {
 	j := s.jobs[id]
-	j.Status = database.JobDone
+	j.Status = status
 	s.jobs[id] = j
+}
+func (s *cliStore) StartDownload(ctx context.Context, jobID int64, id int) error { return nil }
+func (s *cliStore) FinishDownload(ctx context.Context, jobID int64, id int, rec database.DownloadRecord) error {
+	s.markedDLed = append(s.markedDLed, id)
+	s.downloaded[id] = true
+	s.setJobStatus(jobID, database.JobDone)
 	return nil
 }
-func (s *cliStore) MarkJobFailed(ctx context.Context, id int64, msg string) error {
-	j := s.jobs[id]
-	j.Status = database.JobFailed
-	s.jobs[id] = j
+func (s *cliStore) FailDownload(ctx context.Context, jobID int64, id int, lessonMsg, keptMsg, jobMsg string, onDisk bool) error {
+	s.setJobStatus(jobID, database.JobFailed)
 	return nil
 }
-func (s *cliStore) MarkJobCanceled(ctx context.Context, id int64) error {
-	j := s.jobs[id]
-	if j.Status == database.JobRunning {
-		j.Status = database.JobCanceled
-		s.jobs[id] = j
+func (s *cliStore) NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error {
+	s.setJobStatus(jobID, database.JobFailed)
+	return nil
+}
+func (s *cliStore) CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error {
+	if s.jobs[jobID].Status == database.JobRunning {
+		s.setJobStatus(jobID, database.JobCanceled)
 	}
 	return nil
 }
-func (s *cliStore) MarkDownloading(ctx context.Context, id int) error { return nil }
-func (s *cliStore) MarkDownloaded(ctx context.Context, id int, q, dir, vp string, b int64) error {
-	s.markedDLed = append(s.markedDLed, id)
-	s.downloaded[id] = true
+func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error) { return 0, nil }
+func (s *cliStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
 	return nil
 }
-func (s *cliStore) MarkFailed(ctx context.Context, id int, msg string) error     { return nil }
-func (s *cliStore) MarkSkipped(ctx context.Context, id int, reason string) error { return nil }
-func (s *cliStore) RequeueStaleRunning(ctx context.Context) (int, error)         { return 0, nil }
 
 // cliExpander returns a fixed id list per follow id.
 type cliExpander struct{ ids map[int64][]int }
@@ -227,10 +234,13 @@ func cliNodeFollow(id int64, rc int) database.Follow {
 	}
 }
 
-func newSyncHarness(store *cliStore, exp cliExpander, dl *cliDownloader) (*scheduler.Planner, *scheduler.Worker) {
+// newSyncHarness is a planner and a worker over store, downloading into a
+// folder of the test's own: the worker writes real folders there (D66).
+func newSyncHarness(t *testing.T, store *cliStore, exp cliExpander, dl *cliDownloader) (*scheduler.Planner, *scheduler.Worker) {
+	t.Helper()
 	planner := &scheduler.Planner{Store: store, Expander: exp, PermIDs: "perm"}
 	cfg := scheduler.DefaultConfig()
-	cfg.DownloadsDir = "/tmp/x"
+	cfg.DownloadsDir = t.TempDir()
 	worker := scheduler.NewWorker(store, cliResolver{}, dl, cfg, "perm", nil)
 	return planner, worker
 }
@@ -241,7 +251,7 @@ func TestRunSyncDryRunDownloadsNothing(t *testing.T) {
 	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
 	exp := cliExpander{ids: map[int64][]int{1: {11, 12, 13}}}
 	dl := &cliDownloader{}
-	planner, worker := newSyncHarness(store, exp, dl)
+	planner, worker := newSyncHarness(t, store, exp, dl)
 
 	var buf bytes.Buffer
 	if err := runSync(context.Background(), planner, worker, true /* dryRun */, 0, &buf); err != nil {
@@ -279,7 +289,7 @@ func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
 		2: {21, 22},
 	}}
 	dl := &cliDownloader{}
-	planner, worker := newSyncHarness(store, exp, dl)
+	planner, worker := newSyncHarness(t, store, exp, dl)
 
 	var buf bytes.Buffer
 	if err := runSync(context.Background(), planner, worker, false, 2 /* limit */, &buf); err != nil {
@@ -296,5 +306,55 @@ func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Sync complete") {
 		t.Errorf("real run should print a completion summary; got:\n%s", buf.String())
+	}
+}
+
+// interruptingDownloader is a download an interrupt stops: it writes a partial
+// file in its folder, the interrupt lands (cancel), and yt-dlp, killed,
+// returns the context's error.
+type interruptingDownloader struct {
+	cancel context.CancelFunc
+	dirs   []string
+}
+
+func (d *interruptingDownloader) Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error {
+	d.dirs = append(d.dirs, o.Dir)
+	if err := os.WriteFile(filepath.Join(o.Dir, "partial.mp4.part"), []byte("partial"), 0o644); err != nil {
+		return err
+	}
+	d.cancel()
+	return ctx.Err()
+}
+
+// TestRunSyncInterruptStopsAndSaysSo: an interrupt stops the download in
+// progress, starts no other, leaves no private folder behind, and sync reports
+// it as an interruption, not as a completed sync.
+func TestRunSyncInterruptStopsAndSaysSo(t *testing.T) {
+	store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
+	exp := cliExpander{ids: map[int64][]int{1: {11, 12}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dl := &interruptingDownloader{cancel: cancel}
+	planner := &scheduler.Planner{Store: store, Expander: exp, PermIDs: "perm"}
+	cfg := scheduler.DefaultConfig()
+	cfg.DownloadsDir = t.TempDir()
+	worker := scheduler.NewWorker(store, cliResolver{}, dl, cfg, "perm", nil)
+
+	var buf bytes.Buffer
+	err := runSync(ctx, planner, worker, false, 0, &buf)
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("runSync = %v, want an interruption error", err)
+	}
+	if strings.Contains(buf.String(), "Sync complete") {
+		t.Errorf("an interrupted sync reported itself complete:\n%s", buf.String())
+	}
+	if len(dl.dirs) != 1 {
+		t.Fatalf("downloads started = %d, want 1 (none after the interrupt)", len(dl.dirs))
+	}
+	if _, err := os.Stat(dl.dirs[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stopped download's private folder %q is still there (err=%v)", dl.dirs[0], err)
+	}
+	if len(store.markedDLed) != 0 {
+		t.Errorf("an interrupted download was recorded: %v", store.markedDLed)
 	}
 }

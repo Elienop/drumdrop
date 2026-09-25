@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -48,55 +49,76 @@ func TestWriteErr(t *testing.T) {
 	}
 }
 
+// TestWriteStoreErr pins each store error's answer, for a write
+// (writeStoreErr) and a read (writeLoadErr): only the 500 differs, since a
+// read changes nothing and sits next to a Retry button (UI N3).
 func TestWriteStoreErr(t *testing.T) {
+	captureLog(t)
 	tests := []struct {
 		name     string
 		err      error
 		wantCode int
 		wantMsg  string
+		loadMsg  string
 	}{
 		{
 			name:     "no rows maps to 404 with notFoundMsg",
 			err:      fmt.Errorf("get follow 1: %w", sql.ErrNoRows),
 			wantCode: http.StatusNotFound,
-			wantMsg:  "follow not found",
+			wantMsg:  msgNoSuchFollow,
 		},
 		{
-			name:     "job not active maps to 409 with clean message",
+			name:     "job not active maps to 409 with a sentence",
 			err:      fmt.Errorf("cancel job 1: %w", database.ErrJobNotActive),
 			wantCode: http.StatusConflict,
-			wantMsg:  "job is not active",
+			wantMsg:  msgJobNotActive,
 		},
 		{
-			name:     "job not terminal maps to 409 with clean message",
+			name:     "job not terminal maps to 409 with a sentence",
 			err:      fmt.Errorf("retry job 1: %w", database.ErrJobNotTerminal),
 			wantCode: http.StatusConflict,
-			wantMsg:  "job is not in a terminal state",
+			wantMsg:  msgJobNotRetry,
+		},
+		{
+			name:     "lesson deleting maps to 409 with a sentence",
+			err:      fmt.Errorf("lesson 1: %w", database.ErrLessonDeleting),
+			wantCode: http.StatusConflict,
+			wantMsg:  msgBeingDeleted,
 		},
 		{
 			name:     "default maps to 500 without leaking raw error",
 			err:      fmt.Errorf("sql: no rows in result set: secret table internals"),
 			wantCode: http.StatusInternalServerError,
-			wantMsg:  "internal error",
+			wantMsg:  msgServerError,
+			loadMsg:  msgLoadFailed,
 		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			writeStoreErr(rec, tc.err, "follow not found")
+		for _, w := range []struct {
+			name  string
+			write func(http.ResponseWriter, error, string)
+			want  string
+		}{
+			{"write", writeStoreErr, tc.wantMsg},
+			{"read", writeLoadErr, cmp.Or(tc.loadMsg, tc.wantMsg)},
+		} {
+			t.Run(w.name+" "+tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				w.write(rec, tc.err, msgNoSuchFollow)
 
-			if rec.Code != tc.wantCode {
-				t.Errorf("code = %d, want %d", rec.Code, tc.wantCode)
-			}
-			var got struct {
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if got.Error != tc.wantMsg {
-				t.Errorf("error field = %q, want %q", got.Error, tc.wantMsg)
-			}
-		})
+				if rec.Code != tc.wantCode {
+					t.Errorf("code = %d, want %d", rec.Code, tc.wantCode)
+				}
+				var got struct {
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if got.Error != w.want {
+					t.Errorf("error field = %q, want %q", got.Error, w.want)
+				}
+			})
+		}
 	}
 }

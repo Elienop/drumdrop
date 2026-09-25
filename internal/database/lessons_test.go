@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 )
 
@@ -97,7 +98,8 @@ func TestUpsertLessonNullFollowID(t *testing.T) {
 
 // TestUpsertLessonPreservesFollowID is the first-follow-wins invariant: a lesson
 // discovered under one follow keeps that follow_id even when a later sync
-// re-upserts it under a different follow. (Title and parent are still refreshed.)
+// re-upserts it under a different follow. (Title is still refreshed; parent is
+// the attributed follow's to write: TestUpsertLessonStampsUpdatedAtOnlyOnAChange.)
 func TestUpsertLessonPreservesFollowID(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -221,6 +223,97 @@ func TestUpsertLessonFillsNullPosition(t *testing.T) {
 	}
 }
 
+// TestUpsertLessonStampsUpdatedAtOnlyOnAChange pins owner ruling 2026-09-24
+// (r): a sync stamps a lesson's updated_at only when one of the fields the
+// upsert stores changes (title, parent, a position filled in), never when it
+// finds the lesson as it was, or differs only in what a conflict leaves alone
+// (brand, follow, a position already set). Parent is the attributed follow's
+// to write (code round 5f-5g L1): a sync from another follow that lists the
+// lesson leaves it, and stamps nothing for it, as does one after the lesson's
+// follow was removed; a change from the attributed follow is written and
+// stamped. The stamp is set to a fixed past time first, so CURRENT_TIMESTAMP's
+// one-second grain can't hide a write.
+func TestUpsertLessonStampsUpdatedAtOnlyOnAChange(t *testing.T) {
+	const past = "2026-01-01 00:00:00"
+	num := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
+	type upsert struct {
+		title      string
+		parent     sql.NullInt64
+		brand      string
+		position   sql.NullInt64
+		wantTitle  string
+		wantPos    sql.NullInt64
+		wantParent sql.NullInt64
+		stamped    bool
+	}
+	// Who the sync comes from, against the follow the lesson was stored with.
+	const (
+		noFollow = ""        // no follow, before and now
+		same     = "same"    // the follow the lesson is attributed to
+		other    = "other"   // another follow that lists it too
+		removed  = "removed" // another follow, after the lesson's own was removed
+	)
+	for _, c := range []struct {
+		name     string
+		position sql.NullInt64 // the stored position before the sync
+		from     string
+		sync     upsert
+	}{
+		{"nothing changed", num(5), noFollow, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"only a brand, follow or position a conflict leaves alone", num(5), other, upsert{title: "Lesson", parent: num(7), brand: "pianote", position: num(9), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"the title changed", num(5), noFollow, upsert{title: "New Title", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"the parent changed", num(5), noFollow, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
+		{"the parent cleared", num(5), noFollow, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
+		{"a missing position filled in", sql.NullInt64{}, noFollow, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"the attributed follow's parent changed", num(5), same, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(8), stamped: true}},
+		{"the attributed follow's parent cleared", num(5), same, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), stamped: true}},
+		{"another follow's parent", num(5), other, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"another follow's NULL parent (an instructor)", num(5), other, upsert{title: "Lesson", brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+		{"another follow's title change", num(5), other, upsert{title: "New Title", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
+		{"another follow's parent, the lesson's follow removed", num(5), removed, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			flw, syncFlw := sql.NullInt64{}, sql.NullInt64{}
+			if c.from != noFollow {
+				flw = num(seedFollowForLesson(t, s))
+				syncFlw = flw
+				if c.from != same {
+					syncFlw = num(seedFollowForLesson(t, s))
+				}
+			}
+			if err := s.UpsertLesson(ctx, 1, "Lesson", num(7), "drumeo", c.position, flw); err != nil {
+				t.Fatalf("first UpsertLesson: %v", err)
+			}
+			if c.from == removed {
+				if _, err := s.rawDB().Exec(`DELETE FROM follows WHERE id = ?`, flw.Int64); err != nil {
+					t.Fatalf("remove the follow: %v", err)
+				}
+				flw = sql.NullInt64{} // ON DELETE SET NULL
+			}
+			if _, err := s.rawDB().Exec(`UPDATE lessons SET updated_at = ? WHERE railcontent_id = 1`, past); err != nil {
+				t.Fatalf("set updated_at: %v", err)
+			}
+			if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, syncFlw); err != nil {
+				t.Fatalf("second UpsertLesson: %v", err)
+			}
+			got, err := s.GetLesson(ctx, 1)
+			if err != nil {
+				t.Fatalf("GetLesson: %v", err)
+			}
+			if got.Title != c.sync.wantTitle || got.Position != c.sync.wantPos || got.ParentRailcontentID != c.sync.wantParent || got.FollowID != flw {
+				t.Errorf("stored title %q, position %+v, parent %+v, follow %+v; want %q, %+v, %+v, %+v",
+					got.Title, got.Position, got.ParentRailcontentID, got.FollowID, c.sync.wantTitle, c.sync.wantPos, c.sync.wantParent, flw)
+			}
+			stamped := !got.UpdatedAt.Valid || got.UpdatedAt.Time.UTC().Format("2006-01-02 15:04:05") != past
+			if stamped != c.sync.stamped {
+				t.Errorf("updated_at = %+v after the sync; want it stamped: %v", got.UpdatedAt, c.sync.stamped)
+			}
+		})
+	}
+}
+
 // seedFollowForLesson inserts a node follow and returns its id, so lesson rows can
 // satisfy the follow_id foreign key.
 func seedFollowForLesson(t *testing.T, s *Store) int64 {
@@ -278,9 +371,7 @@ func TestUpsertLessonDoesNotResetStatus(t *testing.T) {
 	if err := s.UpsertLesson(ctx, 409875, "Lesson", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := s.MarkDownloaded(ctx, 409875, "best", "/out/dir", "/out/dir/video.mp4", 12345); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	recordDownloaded(t, s, 409875, DownloadRecord{Quality: "best", OutputDir: "/out/dir", VideoPath: "/out/dir/video.mp4", Bytes: 12345})
 
 	// A re-sync upserts the same lesson again.
 	if err := s.UpsertLesson(ctx, 409875, "Lesson (renamed)", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
@@ -331,13 +422,11 @@ func TestIsDownloaded(t *testing.T) {
 		t.Error("IsDownloaded = true for a pending lesson, want false")
 	}
 
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
 	if ok, err := s.IsDownloaded(ctx, 1); err != nil {
 		t.Fatalf("IsDownloaded: %v", err)
 	} else if !ok {
-		t.Error("IsDownloaded = false after MarkDownloaded, want true")
+		t.Error("IsDownloaded = false after FinishDownload, want true")
 	}
 
 	// An id that was never seen is, by definition, not downloaded (no error).
@@ -348,90 +437,6 @@ func TestIsDownloaded(t *testing.T) {
 	}
 }
 
-func TestStatusTransitions(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-
-	// pending -> downloading
-	if err := s.MarkDownloading(ctx, 1); err != nil {
-		t.Fatalf("MarkDownloading: %v", err)
-	}
-	if got := statusOf(t, s, 1); got != StatusDownloading {
-		t.Errorf("after MarkDownloading status = %q, want %q", got, StatusDownloading)
-	}
-
-	// downloading -> failed (sets error)
-	if err := s.MarkFailed(ctx, 1, "boom"); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
-	}
-	failed, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if failed.Status != StatusFailed {
-		t.Errorf("status = %q, want %q", failed.Status, StatusFailed)
-	}
-	if !failed.Error.Valid || failed.Error.String != "boom" {
-		t.Errorf("Error = %+v, want %q", failed.Error, "boom")
-	}
-
-	// failed -> downloaded clears the error and records paths + downloaded_at.
-	if err := s.MarkDownloaded(ctx, 1, "best", "/out", "/out/v.mp4", 999); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
-	done, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if done.Status != StatusDownloaded {
-		t.Errorf("status = %q, want %q", done.Status, StatusDownloaded)
-	}
-	if done.Error.Valid {
-		t.Errorf("Error = %+v, want cleared after MarkDownloaded", done.Error)
-	}
-	if !done.Quality.Valid || done.Quality.String != "best" {
-		t.Errorf("Quality = %+v, want %q", done.Quality, "best")
-	}
-	if !done.OutputDir.Valid || done.OutputDir.String != "/out" {
-		t.Errorf("OutputDir = %+v, want %q", done.OutputDir, "/out")
-	}
-	if !done.VideoPath.Valid || done.VideoPath.String != "/out/v.mp4" {
-		t.Errorf("VideoPath = %+v, want %q", done.VideoPath, "/out/v.mp4")
-	}
-	if !done.Bytes.Valid || done.Bytes.Int64 != 999 {
-		t.Errorf("Bytes = %+v, want 999", done.Bytes)
-	}
-	if !done.DownloadedAt.Valid {
-		t.Error("DownloadedAt is NULL after MarkDownloaded, want set")
-	}
-}
-
-func TestMarkSkipped(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
-	}
-	got, err := s.GetLesson(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if got.Status != StatusSkipped {
-		t.Errorf("status = %q, want %q", got.Status, StatusSkipped)
-	}
-	if !got.Error.Valid || got.Error.String != "locked content" {
-		t.Errorf("Error = %+v, want %q", got.Error, "locked content")
-	}
-}
-
 func TestUnskipLesson(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -439,8 +444,8 @@ func TestUnskipLesson(t *testing.T) {
 	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
 		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := s.MarkSkipped(ctx, 1, "locked content"); err != nil {
-		t.Fatalf("MarkSkipped: %v", err)
+	if _, err := s.SkipLesson(ctx, 1, "locked content"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
 	if err := s.UnskipLesson(ctx, 1); err != nil {
 		t.Fatalf("UnskipLesson: %v", err)
@@ -483,23 +488,35 @@ func TestUnskipLessonOnlySkipped(t *testing.T) {
 	}
 }
 
-// TestMarkTransitionMissing asserts the mark helpers report an error when no
-// lesson row matches, rather than silently succeeding on zero rows.
-func TestMarkTransitionMissing(t *testing.T) {
+// TestUnskipLessonRefusesWhileADeleteHoldsIt proves Un-skip refuses, as Skip
+// does, while a delete holds the lesson: ErrLessonDeleting, and the lesson
+// stays skipped (security round 5d I5). Once the delete ends it un-skips.
+func TestUnskipLessonRefusesWhileADeleteHoldsIt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-
-	if err := s.MarkDownloading(ctx, 404); err == nil {
-		t.Error("MarkDownloading on a missing id returned nil error, want error")
+	if err := s.UpsertLesson(ctx, 1, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
+		t.Fatalf("UpsertLesson: %v", err)
 	}
-	if err := s.MarkDownloaded(ctx, 404, "best", "/d", "/d/v.mp4", 0); err == nil {
-		t.Error("MarkDownloaded on a missing id returned nil error, want error")
+	if _, err := s.SkipLesson(ctx, 1, "not now"); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
 	}
-	if err := s.MarkFailed(ctx, 404, "x"); err == nil {
-		t.Error("MarkFailed on a missing id returned nil error, want error")
+	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
 	}
-	if err := s.MarkSkipped(ctx, 404, "x"); err == nil {
-		t.Error("MarkSkipped on a missing id returned nil error, want error")
+	if err := s.UnskipLesson(ctx, 1); !errors.Is(err, ErrLessonDeleting) {
+		t.Errorf("UnskipLesson while deleting = %v, want ErrLessonDeleting", err)
+	}
+	if got := mustLesson(t, s, 1); got.Status != StatusSkipped || got.Error.String != "not now" {
+		t.Errorf("lesson = %s %q, want it still skipped %q", got.Status, got.Error.String, "not now")
+	}
+	if err := s.EndLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("EndLessonDelete: %v", err)
+	}
+	if err := s.UnskipLesson(ctx, 1); err != nil {
+		t.Fatalf("UnskipLesson after the delete: %v", err)
+	}
+	if got := mustLesson(t, s, 1); got.Status != StatusPending {
+		t.Errorf("status = %q after the delete ended, want %q", got.Status, StatusPending)
 	}
 }
 
@@ -537,15 +554,9 @@ func TestListByStatus(t *testing.T) {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded 1: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 2, "best", "/d", "/d/v.mp4", 0); err != nil {
-		t.Fatalf("MarkDownloaded 2: %v", err)
-	}
-	if err := s.MarkFailed(ctx, 3, "boom"); err != nil {
-		t.Fatalf("MarkFailed 3: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
+	recordDownloaded(t, s, 2, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4"})
+	recordFailed(t, s, 3, "boom")
 	// id 4 stays pending.
 
 	downloaded, err := s.ListByStatus(ctx, StatusDownloaded)
@@ -714,16 +725,6 @@ func TestListLessonsDefaultLimit(t *testing.T) {
 	}
 }
 
-// statusOf reads the status column of a lesson directly for assertions.
-func statusOf(t *testing.T, s *Store, id int) string {
-	t.Helper()
-	var st string
-	if err := s.rawDB().QueryRow("SELECT status FROM lessons WHERE railcontent_id = ?", id).Scan(&st); err != nil {
-		t.Fatalf("read status of lesson %d: %v", id, err)
-	}
-	return st
-}
-
 // idForStatus maps a status string to a distinct railcontent_id so the
 // valid-status loop in TestUpsertLessonRejectsBadStatus does not collide on the
 // primary key.
@@ -757,15 +758,9 @@ func TestCountLessonsByStatus(t *testing.T) {
 			t.Fatalf("UpsertLesson %d: %v", id, err)
 		}
 	}
-	if err := s.MarkDownloaded(ctx, 1, "best", "/d", "/d/v.mp4", 1); err != nil {
-		t.Fatalf("MarkDownloaded 1: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 2, "best", "/d", "/d/v.mp4", 1); err != nil {
-		t.Fatalf("MarkDownloaded 2: %v", err)
-	}
-	if err := s.MarkFailed(ctx, 3, "boom"); err != nil {
-		t.Fatalf("MarkFailed 3: %v", err)
-	}
+	recordDownloaded(t, s, 1, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4", Bytes: 1})
+	recordDownloaded(t, s, 2, DownloadRecord{Quality: "best", OutputDir: "/d", VideoPath: "/d/v.mp4", Bytes: 1})
+	recordFailed(t, s, 3, "boom")
 
 	counts, err := s.CountLessonsByStatus(ctx)
 	if err != nil {
@@ -787,56 +782,6 @@ func TestCountLessonsByStatus(t *testing.T) {
 	}
 	if _, ok := counts[StatusDownloading]; ok {
 		t.Errorf("count includes %q with no rows, want it omitted", StatusDownloading)
-	}
-}
-
-// TestUpdateLessonDeleted asserts a downloaded lesson is tombstone-skipped:
-// status→skipped, error→'deleted', and the download metadata (output_dir/
-// video_path/bytes) cleared so the row no longer claims a path that's gone.
-func TestUpdateLessonDeleted(t *testing.T) {
-	s := newTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertLesson(ctx, 5001, "L", sql.NullInt64{}, "drumeo", sql.NullInt64{}, sql.NullInt64{}); err != nil {
-		t.Fatalf("UpsertLesson: %v", err)
-	}
-	if err := s.MarkDownloaded(ctx, 5001, "1080", "/dl/5001", "/dl/5001/v.mp4", 123); err != nil {
-		t.Fatalf("MarkDownloaded: %v", err)
-	}
-
-	if err := s.UpdateLessonDeleted(ctx, 5001); err != nil {
-		t.Fatalf("UpdateLessonDeleted: %v", err)
-	}
-
-	got, err := s.GetLesson(ctx, 5001)
-	if err != nil {
-		t.Fatalf("GetLesson: %v", err)
-	}
-	if got.Status != StatusSkipped {
-		t.Errorf("Status = %q, want %q", got.Status, StatusSkipped)
-	}
-	if !got.Error.Valid || got.Error.String != "deleted" {
-		t.Errorf("Error = %v, want 'deleted'", got.Error)
-	}
-	if got.OutputDir.Valid {
-		t.Errorf("OutputDir = %v, want NULL after delete", got.OutputDir)
-	}
-	if got.VideoPath.Valid {
-		t.Errorf("VideoPath = %v, want NULL after delete", got.VideoPath)
-	}
-	if got.Bytes.Valid {
-		t.Errorf("Bytes = %v, want NULL after delete", got.Bytes)
-	}
-}
-
-// TestUpdateLessonDeletedUnknownIsNoOp asserts an unknown id is a benign no-op
-// (no error), matching UnskipLesson — the API handler reads the lesson first
-// for the 404.
-func TestUpdateLessonDeletedUnknownIsNoOp(t *testing.T) {
-	s := newTestStore(t)
-
-	if err := s.UpdateLessonDeleted(context.Background(), 999999); err != nil {
-		t.Errorf("UpdateLessonDeleted on unknown id = %v, want nil (benign no-op)", err)
 	}
 }
 

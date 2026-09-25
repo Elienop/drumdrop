@@ -15,7 +15,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if state := q.Get("state"); state != "" {
 		jobs, err := s.store.ListJobsByStatus(r.Context(), state)
 		if err != nil {
-			writeStoreErr(w, err, "jobs not found")
+			writeLoadErr(w, err, msgLoadFailed)
 			return
 		}
 		writeJSON(w, http.StatusOK, jobDTOs(jobs))
@@ -28,7 +28,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.store.ListJobs(r.Context(), limit)
 	if err != nil {
-		writeStoreErr(w, err, "jobs not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTOs(jobs))
@@ -43,7 +43,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeLoadErr(w, err, msgNoSuchJob)
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTO(j))
@@ -72,7 +72,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgCancelGone)
 		return
 	}
 
@@ -83,14 +83,14 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		s.deps.CancelRunning != nil && s.deps.CancelRunning(id)
 	if !handledByWorker {
 		if err := s.store.CancelJob(r.Context(), id); err != nil {
-			writeStoreErr(w, err, "job not found")
+			writeStoreErr(w, err, msgCancelGone)
 			return
 		}
 	}
 
 	j, err = s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgCancelGone)
 		return
 	}
 	writeJSON(w, http.StatusOK, jobDTO(j))
@@ -101,7 +101,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 // it returns 503.
 func (s *Server) handlePause(w http.ResponseWriter, _ *http.Request) {
 	if s.deps.Pause == nil {
-		writeErr(w, http.StatusServiceUnavailable, "no daemon attached")
+		writeErr(w, http.StatusServiceUnavailable, msgNoDaemon)
 		return
 	}
 	s.deps.Pause()
@@ -113,19 +113,13 @@ func (s *Server) handlePause(w http.ResponseWriter, _ *http.Request) {
 // nil) it returns 503.
 func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
 	if s.deps.Resume == nil {
-		writeErr(w, http.StatusServiceUnavailable, "no daemon attached")
+		writeErr(w, http.StatusServiceUnavailable, msgNoDaemon)
 		return
 	}
 	s.deps.Resume()
 	// Kick a cycle so lessons left queued while paused drain now, rather than
 	// waiting for the next scheduled tick (up to the full sync interval away).
-	// Non-blocking: a full buffer already means a cycle is pending.
-	if s.deps.Kick != nil {
-		select {
-		case s.deps.Kick <- struct{}{}:
-		default:
-		}
-	}
+	s.kick()
 	writeJSON(w, http.StatusOK, map[string]bool{"paused": false})
 }
 
@@ -140,16 +134,18 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.store.GetJob(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgRetryGone)
 		return
 	}
 	if err := s.store.RetryJob(r.Context(), id); err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgRetryGone)
 		return
 	}
+	// The job is queued: start a sync now (owner ruling 2026-09-24 (m)).
+	s.kick()
 	j, err := s.store.GetJob(r.Context(), id)
 	if err != nil {
-		writeStoreErr(w, err, "job not found")
+		writeStoreErr(w, err, msgRetryGone)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, jobDTO(j))
@@ -184,17 +180,17 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	lessonCounts, err := s.store.CountLessonsByStatus(ctx)
 	if err != nil {
-		writeStoreErr(w, err, "summary not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	jobCounts, err := s.store.CountJobsByState(ctx)
 	if err != nil {
-		writeStoreErr(w, err, "summary not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 	follows, err := s.store.ListFollows(ctx)
 	if err != nil {
-		writeStoreErr(w, err, "summary not found")
+		writeLoadErr(w, err, msgLoadFailed)
 		return
 	}
 
