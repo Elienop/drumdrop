@@ -44,6 +44,24 @@ func TestPlanByRecordIsExact(t *testing.T) {
 	}
 }
 
+// TestPlanByAnEmptyRecordOwnsNothing (round-5l code seat W2) proves an empty
+// record ("[]": the lesson's files are known, and there are none) is a
+// record: a row filed in a season folder whose files carry its legacy episode
+// name owns none of them, rather than falling back to the name grammar.
+func TestPlanByAnEmptyRecordOwnsNothing(t *testing.T) {
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	row := legacyRow(1, "Five", 5, season, "Show - s01e05 - Five.mp4")
+	row.LibraryEntries = sql.NullString{String: "[]", Valid: true}
+	got, err := plan(t, libraryOf(season), row, []database.Lesson{row})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(got.Remove) != 0 || len(got.Kept) != 0 {
+		t.Errorf("plan = %+v, want nothing: the empty record names no file", got)
+	}
+}
+
 // TestPlanKeepsAPathTwoRecordsName proves an entry two records name (identical
 // titles at one episode) is ambiguous: neither lesson may remove it.
 func TestPlanKeepsAPathTwoRecordsName(t *testing.T) {
@@ -495,5 +513,27 @@ func TestClaimantsTriesEveryNameOfAnUnsettledLegacyEpisode(t *testing.T) {
 	ids, err := c.Claimants(filepath.Join(season, "Show - s01e05 - Five.en.vtt"), 1, true)
 	if err != nil || !reflect.DeepEqual(ids, []int{2}) {
 		t.Errorf("Claimants = %v, %v; want [2]", ids, err)
+	}
+}
+
+// TestClaimantsReadsARecordedRowByItsRecordAlone (round-5l security seat S1)
+// proves a row with a record claims exactly what it records, even with legacy
+// name matching on: lesson 2 records only its video, so the nfo that carries
+// its episode name is claimed by nobody. A legacy name match never outranks a
+// record.
+func TestClaimantsReadsARecordedRowByItsRecordAlone(t *testing.T) {
+	root := t.TempDir()
+	season := filepath.Join(root, "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")
+	other := recordedRow(2, season, "Show - s01e05 - Five.mp4")
+	other.Title, other.Position = "Five", sql.NullInt64{Int64: 5, Valid: true}
+	other.VideoPath = sql.NullString{String: filepath.Join(season, "Show - s01e05 - Five.mp4"), Valid: true}
+	c, err := NewClaims(root, []database.Lesson{other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := c.Claimants(filepath.Join(season, "Show - s01e05 - Five.nfo"), 9, true)
+	if err != nil || len(ids) != 0 {
+		t.Errorf("Claimants(the nfo lesson 2 does not record) = %v, %v; want none", ids, err)
 	}
 }

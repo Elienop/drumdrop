@@ -151,6 +151,29 @@ func TestRemoveFindsTheRootUnderAnotherSpelling(t *testing.T) {
 	assertExist(t, true, filepath.Join(tmp, "elsewhere", "keep.txt"))
 }
 
+// TestRemoveGoesByTheRootAPathIsWrittenIn (round-5l code seat W3) proves the
+// root a path is written inside decides, before any identity lookup: a path
+// under downloads through a symlink to the library is refused (os.Root will
+// not follow it out of downloads), and the library file it leads to stays,
+// though the library is a root too.
+func TestRemoveGoesByTheRootAPathIsWrittenIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	seedSeason(t, lib, "x.mp4")
+	seedSeason(t, dl)
+	link := filepath.Join(dl, "link")
+	if err := os.Symlink(lib, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove([]string{dl, lib}, filepath.Join(link, "x.mp4")); err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("Remove through a symlink out of downloads = %v, want os.Root's refusal", err)
+	}
+	assertExist(t, true, filepath.Join(lib, "x.mp4"), link)
+}
+
 // TestRemoveReadsRelativePathsFromTheWorkingDirectory proves a relative root
 // or path (DRUMDROP_DOWNLOADS_DIR's ./downloads default, stored as written)
 // means what the OS reads it as.
