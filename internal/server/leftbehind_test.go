@@ -161,9 +161,11 @@ func TestDeleteFollowRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 			downloads := filepath.Join(root, "dl")
 			f := addFollow(t, store, 4242)
 			// Lesson 3, left behind, sorts after lesson 2 (BeginFollowDelete
-			// and ListLessonsByFollow order by railcontent_id), so a check made
-			// lesson by lesson would remove lesson 2's files first: the
-			// refusal is all or nothing only if it comes before any removal.
+			// and ListLessonsByFollow order by railcontent_id). Here the
+			// refusal comes up front, before BeginFollowDelete, so the
+			// removal loop never runs and this test can't tell a check made
+			// lesson by lesson inside it from one made before it:
+			// TestDeleteFollowChecksAgainBeforeTheFirstRemoval pins that.
 			seedSeasonLesson(t, store, f, 3, recordedSeason, files, true)
 			// Lesson 2 of the same follow, kept in downloads in its own folder:
 			// nothing about it is left behind.

@@ -223,7 +223,12 @@ func (w *Worker) place(job database.Job, lesson *musora.Lesson, follow database.
 // for season folders (an empty answer counts as none learned; a season folder
 // in the fallback's course folder is the library's) are a second line: they
 // decide only a row whose recorded folder is gone, is the one read now, or
-// no longer holds the lesson's own files.
+// no longer holds the lesson's own files. For a recorded folder outside
+// today's library that second line never refuses (inLibrary reads the
+// recorded folder as spelled), so an emptied old folder falls back like a
+// gone one: a legacy row whose files were moved to the new folder, and whose
+// move there learned nothing, then records the downloads folder and leaves
+// them recorded by nothing (BACKLOG D137).
 func refuseFallback(claims *library.Claims, prev database.Lesson, lib, downloads string, entries []string, fallback string) error {
 	switch dir, left, err := claims.LeftBehind(prev); {
 	case err != nil:
