@@ -262,6 +262,10 @@ func (s *Server) handleUpdateFollow(w http.ResponseWriter, r *http.Request) {
 // lessons are left alone.
 //
 // With ?files=true:
+//  0. Refuse, changing nothing, when a lesson's own files are still in a
+//     season folder the library folder setting no longer points at (409), or
+//     which files are whose can't be read (500) (refuseUpFront): no download
+//     is stopped, and no queued job is dropped.
 //  1. Mark every lesson of the follow deleting and remove their queued,
 //     running and canceled jobs (BeginFollowDelete), then kill the running
 //     downloads (deps.CancelRunning, nil-safe when no worker is attached).
@@ -295,6 +299,21 @@ func (s *Server) handleDeleteFollow(w http.ResponseWriter, r *http.Request) {
 
 	if !deleteFilesRequested(r) {
 		s.removeFollowKeepingFiles(w, r, id)
+		return
+	}
+
+	// 0. Refuse what can be known before anything is stopped.
+	before, err := s.store.ListLessonsByFollow(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, msgFollowGone)
+		return
+	}
+	switch err := s.refuseUpFront(r.Context(), before...); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgFollowNoClaimsUpFront)
+		return
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgFollowLeftBehind)
 		return
 	}
 
@@ -361,11 +380,12 @@ func (s *Server) removeFollowKeepingFiles(w http.ResponseWriter, r *http.Request
 
 // deleteFollowFiles removes the files of every lesson that has any
 // (Lesson.HasFiles), and tombstones each one whose files are all gone. When
-// any lesson's files are still in a season folder the library folder setting
-// no longer points at (leftBehind), it removes nothing at all and answers
-// 409: the refusal is known before the first removal, so the follow and
-// every lesson stay exactly as they were, rather than half deleted, and the
-// owner moves the files (or sets the folder back) and removes it again. The
+// any lesson's own files are still in a season folder the library folder
+// setting no longer points at (leftBehind), it removes nothing at all and
+// answers 409: the refusal is known before the first removal, so the follow
+// and every lesson stay exactly as they were, rather than half deleted, and
+// the owner moves the files and removes it again. (handleDeleteFollow asks
+// the same before it begins; this is the check once the lessons are held.) The
 // lessons are as BeginFollowDelete read them, and nothing can change them
 // meanwhile: no download can record for a lesson being deleted. It writes the
 // error response and returns false when any lesson's files could not all be
@@ -376,7 +396,11 @@ func (s *Server) deleteFollowFiles(ctx context.Context, w http.ResponseWriter, h
 		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
 		return false
 	}
-	if leftBehind(c, lessons...) {
+	switch err := leftBehind(c, lessons...); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgFollowNoClaims)
+		return false
+	case errors.Is(err, errLeftBehind):
 		writeErr(w, http.StatusConflict, msgFollowLeftBehind)
 		return false
 	}

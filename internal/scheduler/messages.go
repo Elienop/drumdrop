@@ -27,7 +27,10 @@ const (
 	// msgKeptInLibrary is failKeptInLibrary's sentence under the lesson.
 	msgKeptInLibrary = "Couldn't put this lesson in the library, so its copy there was kept. Check the server log, fix the problem, then Download again."
 	// msgLeftBehind is failLeftBehind's sentence under the lesson.
-	msgLeftBehind = "Couldn't put this lesson in the library: its files are still in the old library folder. Move them to the new one, or set the library folder back, then Download again."
+	// It offers only the move: "set it back" is safe only when no file moved,
+	// which doesn't fit in the Lessons row's two lines (see
+	// server.msgLessonLeftBehind).
+	msgLeftBehind = "Couldn't put this lesson in the library: its files are in the old library folder. Move them to the same place in the new one, then Download again."
 )
 
 // msgEarlierKept is the note a failed download leaves on a lesson that still
@@ -80,7 +83,7 @@ var (
 	// note (owner ruling 2026-09-24 (y)).
 	failLeftBehind = failure{
 		lesson: msgLeftBehind,
-		job:    "Couldn't put this lesson in the library: its files are still in the old library folder. Move them to the new one, or set the library folder back, then Retry.",
+		job:    "Couldn't put this lesson in the library: its files are in the old library folder. Move them to the same place in the new one, then Retry.",
 		kept:   msgLeftBehind,
 	}
 	// failNoFolder is a download not started because its private folder, in

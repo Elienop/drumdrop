@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"testing"
 
 	"github.com/elienop/drumdrop/internal/database"
@@ -24,7 +26,8 @@ import (
 // old folder now in the downloads folder).
 //
 // The controls fall back and record the season files as before: nothing
-// moved, a library remounted with its files (the recorded path is gone), and
+// moved, a library remounted with its files (the recorded path is gone), the
+// files moved to the same place with the old season folder left empty, and
 // a library setting spelled through a symlink to the same folder.
 func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) {
 	plain := []string{"Beginner Course - s01e05 - Lesson A.mp4", "Beginner Course - s01e05 - Lesson A.nfo", "Beginner Course - s01e05 - Lesson A.en.vtt"}
@@ -40,6 +43,9 @@ func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) 
 		names                     []string
 		recorded                  bool
 		leftBehind                bool
+		// emptyRow: the row's season folder is still there, emptied (the
+		// files moved to the same place in the new library: round 5j J1).
+		emptyRow bool
 	}{
 		{name: "M1 plex-tv, moved up, downloads inside, song version", layout: LayoutPlexTV, lib: "media", dl: "media/drumeo", row: "media/drumeo/Beginner Course/Season 01", names: song, leftBehind: true},
 		{name: "M2 plex-tv, moved up, downloads inside, plain name", layout: LayoutPlexTV, lib: "media", dl: "media/drumeo", row: "media/drumeo/Beginner Course/Season 01", names: plain, leftBehind: true},
@@ -56,6 +62,8 @@ func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) 
 		{name: "R1 plex-tv, remounted with its files, plain name", layout: LayoutPlexTV, lib: "newlib", dl: "dl", row: "oldlib/Beginner Course/Season 01", files: "newlib/Beginner Course/Season 01", names: plain},
 		{name: "R2 plex-tv, remounted with its files, recorded", layout: LayoutPlexTV, lib: "newlib", dl: "dl", row: "oldlib/Beginner Course/Season 01", files: "newlib/Beginner Course/Season 01", names: plain, recorded: true},
 		{name: "L1 plex-tv, the setting through a symlink to the same folder, plain name", layout: LayoutPlexTV, lib: "linked", link: "linked", dl: "dl", row: "media/lib/Beginner Course/Season 01", names: plain},
+		{name: "E1 plex-tv, files moved to the same place, the old folder left empty, plain name", layout: LayoutPlexTV, lib: "newlib", dl: "dl", row: "oldlib/Beginner Course/Season 01", files: "newlib/Beginner Course/Season 01", names: plain, emptyRow: true},
+		{name: "E1 plex-tv, files moved to the same place, the old folder left empty, recorded", layout: LayoutPlexTV, lib: "newlib", dl: "dl", row: "oldlib/Beginner Course/Season 01", files: "newlib/Beginner Course/Season 01", names: plain, recorded: true, emptyRow: true},
 		{name: "L2 plex-tv, the setting through a symlink to the same folder, recorded", layout: LayoutPlexTV, lib: "linked", link: "linked", dl: "dl", row: "media/lib/Beginner Course/Season 01", names: plain, recorded: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -81,6 +89,9 @@ func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) 
 				filesDir = abs(c.files)
 			}
 			seedSeason(t, filesDir, c.names...)
+			if c.emptyRow {
+				seedSeason(t, rowSeason)
+			}
 			prev := legacyRow(100, "Lesson A", 5, rowSeason, c.names[0])
 			if c.recorded {
 				prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(rowSeason, c.names...))
@@ -112,6 +123,52 @@ func TestWorkerRefusedPlacementKeepsFilesLeftBehindByALibraryMove(t *testing.T) 
 			if want := recordOf(season, c.names...); !reflect.DeepEqual(sorted(rec.entries), sorted(want)) {
 				t.Errorf("entries = %v, want the season files recorded %v", rec.entries, want)
 			}
+		})
+	}
+}
+
+// TestWorkerRefusedPlacementKeepsAnOldFolderItCantRead pins "when unsure,
+// keep" for the fallback: the old library folder at mode 000 with the files
+// still in it. The fallback is refused with failKeptInLibrary (the reason is
+// logged), not taken for a folder that is gone.
+func TestWorkerRefusedPlacementKeepsAnOldFolderItCantRead(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a folder's mode doesn't refuse this user")
+	}
+	names := []string{"Beginner Course - s01e05 - Lesson A.mp4", "Beginner Course - s01e05 - Lesson A.nfo"}
+	for _, recorded := range []bool{true, false} {
+		t.Run("recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
+			w, store, _, _, _ := plexWorker(t)
+			tmp := t.TempDir()
+			oldRoot := filepath.Join(tmp, "oldlib")
+			rowSeason := filepath.Join(oldRoot, "Beginner Course", "Season 01")
+			w.Cfg.LibraryDir, w.Cfg.DownloadsDir = filepath.Join(tmp, "newlib"), filepath.Join(tmp, "dl")
+			for _, d := range []string{w.Cfg.LibraryDir, w.Cfg.DownloadsDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seedSeason(t, rowSeason, names...)
+			prev := legacyRow(100, "Lesson A", 5, rowSeason, names[0])
+			if recorded {
+				prev.LibraryEntries = database.EncodeLibraryEntries(recordOf(rowSeason, names...))
+			}
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
+			refuseFromJobInto(t, w, filepath.Join(w.Cfg.LibraryDir, "Beginner Course", "Season 01"))
+			if err := os.Chmod(oldRoot, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(oldRoot, 0o755) })
+
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if err := os.Chmod(oldRoot, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			assertContent(t, rowSeason, names...)
+			assertRefusedAs(t, w, store, failKeptInLibrary)
 		})
 	}
 }

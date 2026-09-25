@@ -29,33 +29,55 @@ var errFilesKept = errors.New("the lesson's files could not all be removed")
 // possible, but the lesson's row could not be updated". Its detail is logged.
 var errRecordNotUpdated = errors.New("the lesson's record could not be updated")
 
-// errNoClaims is the delete outcome "what the other lessons claim could not
-// be read (a store error, or a damaged record)": nothing was removed. Its
-// detail is logged.
+// errNoClaims is the delete outcome "which files are whose could not be read
+// (a store error, a damaged record, or an old library folder that could not
+// be read, see leftBehind)": nothing was removed. Its detail is logged.
 var errNoClaims = errors.New("the other lessons' files could not be read")
 
-// errLeftBehind is the delete outcome "a lesson's files are still in a season
-// folder the library folder setting no longer points at" (leftBehind):
-// nothing was removed. Its detail is logged.
+// errLeftBehind is the delete outcome "a lesson's own files are still in a
+// season folder the library folder setting no longer points at"
+// (leftBehind): nothing was removed. Its detail is logged.
 var errLeftBehind = errors.New("a lesson's files are still in a folder the library setting no longer points at")
 
-// leftBehind reports whether any of lessons has its files left behind in a
-// season folder the library folder setting no longer points at
-// (library.Claims.LeftBehind), logging each one. A delete then removes
-// nothing (owner ruling 2026-09-24 (y)): it would read that season folder
-// under the library configured now, find nothing to remove, and report the
-// lesson deleted while its files stayed on disk, recorded by nothing. `main`
-// removed them, acting on the absolute folder; acting on it here would reach
-// outside today's roots, which library.Remove refuses by design.
-func leftBehind(c *library.Claims, lessons ...database.Lesson) bool {
-	found := false
+// leftBehind returns errLeftBehind when any of lessons still has its own
+// files in a season folder the library folder setting no longer points at
+// (library.Claims.LeftBehind), errNoClaims when that can't be told for one of
+// them (the folder or a file can't be read), and nil otherwise, logging each.
+// A delete then removes nothing (owner ruling 2026-09-24 (y)): it would read
+// that season folder under the library configured now, find nothing to
+// remove, and report the lesson deleted while its files stayed on disk,
+// recorded by nothing. `main` removed them, acting on the absolute folder;
+// acting on it here would reach outside today's roots, which library.Remove
+// refuses by design.
+func leftBehind(c *library.Claims, lessons ...database.Lesson) error {
+	var out error
 	for _, l := range lessons {
-		if dir, ok := c.LeftBehind(l); ok {
-			fmt.Fprintf(logOut, "drumdrop: delete lesson %d: nothing was removed: its files are still in %q, which is not where the library folder setting points now; move them into the library folder, or set it back\n", l.RailcontentID, dir)
-			found = true
+		dir, left, err := c.LeftBehind(l)
+		switch {
+		case err != nil:
+			fmt.Fprintf(logOut, "drumdrop: delete lesson %d: nothing was removed: couldn't tell whether its files are still in %q, which is not where the library folder setting points now: %v\n", l.RailcontentID, dir, err)
+			out = errNoClaims
+		case left:
+			fmt.Fprintf(logOut, "drumdrop: delete lesson %d: nothing was removed: its files are still in %q, which is not where the library folder setting points now; move them to the same place in the library folder\n", l.RailcontentID, dir)
+			if out == nil {
+				out = errLeftBehind
+			}
 		}
 	}
-	return found
+	return out
+}
+
+// refuseUpFront is the refusal a delete of lessons knows before it begins,
+// so before Begin…Delete stops a download, drops a queued job or records its
+// intent: what the lessons claim can't be read (errNoClaims), or a lesson's
+// files are left behind (leftBehind). The delete asks again once it holds the
+// lessons, as the disk may have changed meanwhile.
+func (s *Server) refuseUpFront(ctx context.Context, lessons ...database.Lesson) error {
+	c, err := s.claims(ctx)
+	if err != nil {
+		return err
+	}
+	return leftBehind(c, lessons...)
 }
 
 // roots are the folders a delete may remove files under: the downloads and

@@ -206,14 +206,30 @@ func (s *Server) handleUnskipLesson(w http.ResponseWriter, r *http.Request) {
 // uses the RAW stored paths (container paths), NOT the host-mapped DTO
 // values, and follows the lesson's record (see removeLessonFiles). An unknown
 // id is a 404, a non-integer id a 400, a lesson already being deleted a 409.
-// A lesson whose files are still in a season folder the library folder
+// A lesson whose own files are still in a season folder the library folder
 // setting no longer points at is a 409 too, and nothing is removed (see
-// leftBehind).
+// leftBehind). That refusal, and one because which files are whose can't be
+// read, come before the delete begins, so no download is stopped
+// (refuseUpFront); both are asked again once it holds the lesson.
 // When a file could not be removed, the lesson records only what is left, the
 // detail goes to the server log, and the client gets a fixed 500.
 func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt(w, r, "id")
 	if !ok {
+		return
+	}
+
+	before, err := s.store.GetLesson(r.Context(), id)
+	if err != nil {
+		writeStoreErr(w, err, msgLessonGone)
+		return
+	}
+	switch err := s.refuseUpFront(r.Context(), before); {
+	case errors.Is(err, errNoClaims):
+		writeErr(w, http.StatusInternalServerError, msgLessonNoClaimsUpFront)
+		return
+	case errors.Is(err, errLeftBehind):
+		writeErr(w, http.StatusConflict, msgLessonLeftBehind)
 		return
 	}
 
@@ -233,11 +249,10 @@ func (s *Server) handleDeleteLesson(w http.ResponseWriter, r *http.Request) {
 
 	c, err := s.claims(ctx)
 	if err == nil {
-		if leftBehind(c, l) {
-			err = errLeftBehind
-		} else {
-			err = s.deleteLessonFiles(ctx, c, hold, l)
-		}
+		err = leftBehind(c, l)
+	}
+	if err == nil {
+		err = s.deleteLessonFiles(ctx, c, hold, l)
 	}
 	switch {
 	case errors.Is(err, errNoClaims):

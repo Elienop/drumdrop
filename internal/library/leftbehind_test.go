@@ -10,8 +10,9 @@ import (
 )
 
 // TestLeftBehind pins Claims.LeftBehind (owner ruling 2026-09-24 (y)): a
-// season-folder row's files stayed behind when its recorded folder is still
-// there and is not the folder it is read as under the library configured now.
+// season-folder row's files stayed behind when its recorded folder still
+// holds them and is not the folder it is read as under the library
+// configured now.
 // A library moved or remounted with its files (the recorded path is gone), a
 // setting spelled another way (a symlink to the same folder), and nothing
 // moved read as before; so does a lesson folder, which is never re-pointed.
@@ -69,9 +70,9 @@ func TestLeftBehind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			dir, got := claims.LeftBehind(row)
-			if got != c.want {
-				t.Fatalf("LeftBehind = %q, %v; want %v", dir, got, c.want)
+			dir, got, err := claims.LeftBehind(row)
+			if err != nil || got != c.want {
+				t.Fatalf("LeftBehind = %q, %v, %v; want %v, no error", dir, got, err, c.want)
 			}
 			if got && dir != abs(c.row) {
 				t.Errorf("LeftBehind named %q, want the recorded folder %q", dir, abs(c.row))
@@ -92,7 +93,7 @@ func TestLeftBehindWithoutALibrary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir, ok := claims.LeftBehind(row); ok {
-		t.Errorf("LeftBehind = %q, true; want false without a library", dir)
+	if dir, ok, err := claims.LeftBehind(row); ok || err != nil {
+		t.Errorf("LeftBehind = %q, %v, %v; want false without a library", dir, ok, err)
 	}
 }

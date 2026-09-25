@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/elienop/drumdrop/internal/database"
 	"github.com/elienop/drumdrop/internal/musora"
@@ -212,7 +213,7 @@ func (c *Claims) seasonFolder(outputDir string) string {
 	return filepath.Join(c.root, filepath.Base(filepath.Dir(d)), filepath.Base(d))
 }
 
-// LeftBehind reports whether lesson l's files stayed behind in the season
+// LeftBehind reports whether lesson l's own files stayed behind in the season
 // folder its row records while the library folder setting now points at
 // another folder, and returns that folder. Every reader of a season-folder
 // row reads it under the library folder configured now (a record resolves
@@ -223,27 +224,98 @@ func (c *Claims) seasonFolder(outputDir string) string {
 // them, while they are still on disk, recorded by nothing. Both refuse
 // instead (owner ruling 2026-09-24 (y)).
 //
-// It does when the recorded folder is still there and is not the folder it is
-// read as now, as written or under another spelling (sameFolder: a symlink, a
-// bind path). So a library moved or remounted with its files (the recorded
-// path is gone), and a setting spelled another way, are read as before. A
-// recorded folder whose existence can not be read counts as there: when
-// unsure, keep. A row that records no season folder (a lesson folder, or
-// none) is not read under the library: a lesson folder is acted on where its
-// row says. Without a library folder, seasonFolder reads a season folder
-// where it is recorded (Plan refuses it then anyway): false too.
-func (c *Claims) LeftBehind(l database.Lesson) (string, bool) {
+// It does when the recorded folder is not the one the row is read as now (by
+// path, then by identity: sameFolder) and still holds one of the lesson's own
+// files (ownFilesIn). Paths are compared first, so an unchanged setting reads
+// nothing on disk. A gone folder or file (ENOTDIR too, which Go doesn't count
+// as not-exist) is not there; one that can't be read is (true, with the
+// error): when unsure, keep. Only a row filed in a season folder is asked: a
+// lesson folder is acted on where its row says, and a row kept in downloads
+// whose record names season files is read under today's library, since the
+// root it was written under is recorded nowhere (BACKLOG D137). Without a
+// library folder, seasonFolder is the recorded folder: false.
+func (c *Claims) LeftBehind(l database.Lesson) (dir string, left bool, err error) {
 	if !IsSeasonDir(l.OutputDir.String) {
-		return "", false
+		return "", false, nil
 	}
 	recorded := absPath(l.OutputDir.String)
-	if _, err := os.Stat(recorded); errors.Is(err, os.ErrNotExist) {
-		return "", false
+	now := c.seasonFolder(l.OutputDir.String)
+	if recorded == now {
+		return "", false, nil
 	}
-	if c.sameFolder(recorded, c.seasonFolder(l.OutputDir.String)) {
-		return "", false
+	info, err := os.Stat(recorded)
+	switch {
+	case gone(err) || err == nil && !info.IsDir():
+		return "", false, nil
+	case err != nil:
+		return recorded, true, err
 	}
-	return recorded, true
+	if c.sameFolder(recorded, now) {
+		return "", false, nil
+	}
+	own, err := c.ownFilesIn(l, recorded)
+	if err != nil || own {
+		return recorded, true, err
+	}
+	return "", false, nil
+}
+
+// gone reports whether err from a stat says the path is not there: it does
+// not exist, or a folder on its way is a file (ENOTDIR).
+func gone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// ownFilesIn reports whether the season folder dir, where lesson l's row
+// records it, still holds one of l's own files: an entry its record names
+// (resolved under the library folder the record was written under, dir's
+// grandparent), its video, or, for a legacy row without a record, an entry
+// the legacy name grammar gives to it (legacyEpisodeBases; when the name is
+// uncertain, every candidate counts, erring towards keeping). It fails when
+// it can not tell.
+func (c *Claims) ownFilesIn(l database.Lesson, dir string) (bool, error) {
+	entries, recorded, err := Record(l)
+	if err != nil {
+		return false, err
+	}
+	var paths []string
+	if l.VideoPath.Valid && l.VideoPath.String != "" && filepath.Dir(absPath(l.VideoPath.String)) == dir {
+		paths = append(paths, absPath(l.VideoPath.String))
+	}
+	if recorded {
+		oldRoot := filepath.Dir(filepath.Dir(dir))
+		for _, e := range entries {
+			paths = append(paths, Resolve(oldRoot, e))
+		}
+	} else {
+		listing, err := c.listing(dir)
+		if err != nil {
+			return false, err
+		}
+		row := l
+		row.OutputDir.String = dir
+		if len(paths) > 0 {
+			row.VideoPath.String = paths[0]
+		}
+		bases, _ := legacyEpisodeBases(row, dir, listing)
+		for name, isDir := range listing {
+			for _, b := range bases {
+				if legacyEpisodeEntry(b, name, isDir, listing) {
+					return true, nil
+				}
+			}
+		}
+	}
+	for _, p := range paths {
+		_, err := os.Lstat(p)
+		if err == nil {
+			return true, nil
+		}
+		if !gone(err) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // legacyRow is a row without a record read under the library folder

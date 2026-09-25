@@ -160,7 +160,11 @@ func TestDeleteFollowRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 			lib, recordedSeason, files := m.setUp(t, root)
 			downloads := filepath.Join(root, "dl")
 			f := addFollow(t, store, 4242)
-			seedSeasonLesson(t, store, f, 1, recordedSeason, files, true)
+			// Lesson 3, left behind, sorts after lesson 2 (BeginFollowDelete
+			// and ListLessonsByFollow order by railcontent_id), so a check made
+			// lesson by lesson would remove lesson 2's files first: the
+			// refusal is all or nothing only if it comes before any removal.
+			seedSeasonLesson(t, store, f, 3, recordedSeason, files, true)
 			// Lesson 2 of the same follow, kept in downloads in its own folder:
 			// nothing about it is left behind.
 			own := filepath.Join(downloads, "F", "06 - Lesson B")
@@ -169,7 +173,7 @@ func TestDeleteFollowRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 			}
 			seedEntries(t, own, "06 - Lesson B.mp4")
 			finishWithNewJob(t, store, f, 2, database.DownloadRecord{Quality: "1080", OutputDir: own, VideoPath: filepath.Join(own, "06 - Lesson B.mp4"), Bytes: 5})
-			before1, before2 := mustLesson(t, store, 1), mustLesson(t, store, 2)
+			before1, before2 := mustLesson(t, store, 3), mustLesson(t, store, 2)
 			srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: lib}, "test")
 
 			rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true")

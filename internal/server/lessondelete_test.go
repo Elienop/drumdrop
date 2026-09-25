@@ -493,8 +493,9 @@ func TestRemoveFollowKeepingFilesStopsOnlyItsOwnDownloads(t *testing.T) {
 
 // TestDeleteRefusesWhileARecordIsDamaged proves one damaged library record
 // anywhere refuses every delete (no ownership can be decided without it) with
-// the fixed 500, removes nothing, and ends the delete, for a lesson and for a
-// follow; the log names the damaged lesson.
+// the fixed 500 before the delete begins (so nothing was stopped), removes
+// nothing, and leaves the lesson unheld, for a lesson and for a follow; the
+// log names the damaged lesson.
 func TestDeleteRefusesWhileARecordIsDamaged(t *testing.T) {
 	store, path := newTestStoreAt(t)
 	downloads, library := t.TempDir(), t.TempDir()
@@ -506,8 +507,8 @@ func TestDeleteRefusesWhileARecordIsDamaged(t *testing.T) {
 	log := captureLog(t)
 	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: library}, "test")
 
-	wantError(t, serveDelete(t, srv, "/api/lessons/1"), http.StatusInternalServerError, msgLessonNoClaims)
-	wantError(t, serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"), http.StatusInternalServerError, msgFollowNoClaims)
+	wantError(t, serveDelete(t, srv, "/api/lessons/1"), http.StatusInternalServerError, msgLessonNoClaimsUpFront)
+	wantError(t, serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"), http.StatusInternalServerError, msgFollowNoClaimsUpFront)
 	assertPresent(t, season, "Show - s01e05 - Five.mp4", "Show - s01e06 - Six.mp4")
 	if l := mustLesson(t, store, 1); l.Status != database.StatusDownloaded || !l.OutputDir.Valid || l.Deleting {
 		t.Errorf("lesson 1 = %+v, want untouched and the delete ended", l)
