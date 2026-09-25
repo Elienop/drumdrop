@@ -660,88 +660,108 @@ func TestTombstoneAndKeepCompareEachColumn(t *testing.T) {
 // writing nothing else (not even updated_at); a legacy row's NULL record is
 // matched as NULL; and it never writes "no record".
 func TestSwapLibraryEntries(t *testing.T) {
-	ctx := context.Background()
-	newRecord := []string{"S/Season 01/a.mp4", "S/Season 01/a.jpg"}
-	seed := func(t *testing.T, entries sql.NullString) (*Store, Lesson) {
-		t.Helper()
-		s := newTestStore(t)
-		seedJob(t, s, 1, sql.NullInt64{})
-		seedFiles(t, s, 1, "/lib/S/Season 01", "/lib/S/Season 01/a.mp4", entries)
-		mustExec(t, s, `UPDATE lessons SET updated_at = '2020-01-01 00:00:00' WHERE railcontent_id = 1`)
-		return s, mustLesson(t, s, 1)
-	}
 	for name, entries := range map[string]sql.NullString{
 		"recorded": EncodeLibraryEntries([]string{"S/Season 01/a.mp4", "S/Season 01/a-poster.jpg"}),
 		"legacy":   {},
 	} {
-		t.Run(name, func(t *testing.T) {
-			s, before := seed(t, entries)
-			if err := s.SwapLibraryEntries(ctx, before, newRecord); err != nil {
-				t.Fatalf("SwapLibraryEntries: %v", err)
-			}
-			want := before
-			want.LibraryEntries = EncodeLibraryEntries(newRecord)
-			if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, want) {
-				t.Errorf("row:\n got %+v\nwant %+v", got, want)
-			}
-		})
+		t.Run(name, func(t *testing.T) { checkSwapWrites(t, entries) })
 	}
 	for _, col := range []string{"output_dir", "video_path", "library_entries"} {
-		t.Run(col+" changed", func(t *testing.T) {
-			s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
-			mustExec(t, s, `UPDATE lessons SET `+col+` = 'changed' WHERE railcontent_id = 1`)
-			changed := mustLesson(t, s, 1)
-			if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonChanged) {
-				t.Errorf("SwapLibraryEntries = %v, want ErrLessonChanged", err)
-			}
-			if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, changed) {
-				t.Errorf("row touched:\n got %+v\nwant %+v", got, changed)
-			}
-		})
+		t.Run(col+" changed", func(t *testing.T) { checkSwapRefusedWhenChanged(t, col) })
 	}
-	t.Run("a delete holds it", func(t *testing.T) {
-		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
-		if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
-			t.Fatalf("BeginLessonDelete: %v", err)
-		}
-		held := mustLesson(t, s, 1)
-		if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonDeleting) {
-			t.Errorf("SwapLibraryEntries = %v, want ErrLessonDeleting", err)
-		}
-		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, held) {
-			t.Errorf("row touched:\n got %+v\nwant %+v", got, held)
-		}
-	})
-	t.Run("a download of it is running", func(t *testing.T) {
-		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
-		job, ok, err := s.ClaimNextJob(ctx)
-		if err != nil || !ok || job.RailcontentID != 1 {
-			t.Fatalf("ClaimNextJob = %+v, %v, %v; want lesson 1's job running", job, ok, err)
-		}
-		if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonDownloading) {
-			t.Errorf("SwapLibraryEntries = %v, want ErrLessonDownloading", err)
-		}
-		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
-			t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
-		}
-		// Another lesson's running job does not hold it back.
-		mustExec(t, s, `UPDATE jobs SET railcontent_id = 2 WHERE id = ?`, job.ID)
-		if err := s.SwapLibraryEntries(ctx, before, newRecord); err != nil {
-			t.Errorf("SwapLibraryEntries beside another lesson's job = %v, want it written", err)
-		}
-	})
-	t.Run("no record", func(t *testing.T) {
-		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
-		if err := s.SwapLibraryEntries(ctx, before, nil); err == nil {
-			t.Error("SwapLibraryEntries(nil) = nil, want a refusal")
-		}
-		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
-			t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
-		}
-	})
+	t.Run("a delete holds it", testSwapRefusedWhileADeleteHoldsIt)
+	t.Run("a download of it is running", testSwapRefusedWhileItsDownloadRuns)
+	t.Run("no record", testSwapNeverWritesNoRecord)
 	s := newTestStore(t)
-	if err := s.SwapLibraryEntries(ctx, Lesson{RailcontentID: 404}, newRecord); !errors.Is(err, sql.ErrNoRows) {
+	if err := s.SwapLibraryEntries(context.Background(), Lesson{RailcontentID: 404}, swapNewRecord); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("SwapLibraryEntries unknown = %v, want sql.ErrNoRows", err)
+	}
+}
+
+// swapNewRecord is the list TestSwapLibraryEntries' swaps record.
+var swapNewRecord = []string{"S/Season 01/a.mp4", "S/Season 01/a.jpg"}
+
+// seedSwapRow is a store with lesson 1 filed in "/lib/S/Season 01", its
+// video "a.mp4" and its record entries, updated long ago; and that row.
+func seedSwapRow(t *testing.T, entries sql.NullString) (*Store, Lesson) {
+	t.Helper()
+	s := newTestStore(t)
+	seedJob(t, s, 1, sql.NullInt64{})
+	seedFiles(t, s, 1, "/lib/S/Season 01", "/lib/S/Season 01/a.mp4", entries)
+	mustExec(t, s, `UPDATE lessons SET updated_at = '2020-01-01 00:00:00' WHERE railcontent_id = 1`)
+	return s, mustLesson(t, s, 1)
+}
+
+// checkSwapWrites pins that a row still recording what was read gets the new
+// list, and nothing else changes (not even updated_at).
+func checkSwapWrites(t *testing.T, entries sql.NullString) {
+	s, before := seedSwapRow(t, entries)
+	if err := s.SwapLibraryEntries(context.Background(), before, swapNewRecord); err != nil {
+		t.Fatalf("SwapLibraryEntries: %v", err)
+	}
+	want := before
+	want.LibraryEntries = EncodeLibraryEntries(swapNewRecord)
+	if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, want) {
+		t.Errorf("row:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// checkSwapRefusedWhenChanged pins that, with the column col changed since
+// the row was read, the swap is refused and the row is left as it is.
+func checkSwapRefusedWhenChanged(t *testing.T, col string) {
+	s, before := seedSwapRow(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+	mustExec(t, s, `UPDATE lessons SET `+col+` = 'changed' WHERE railcontent_id = 1`)
+	changed := mustLesson(t, s, 1)
+	if err := s.SwapLibraryEntries(context.Background(), before, swapNewRecord); !errors.Is(err, ErrLessonChanged) {
+		t.Errorf("SwapLibraryEntries = %v, want ErrLessonChanged", err)
+	}
+	if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, changed) {
+		t.Errorf("row touched:\n got %+v\nwant %+v", got, changed)
+	}
+}
+
+func testSwapRefusedWhileADeleteHoldsIt(t *testing.T) {
+	ctx := context.Background()
+	s, before := seedSwapRow(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
+	}
+	held := mustLesson(t, s, 1)
+	if err := s.SwapLibraryEntries(ctx, before, swapNewRecord); !errors.Is(err, ErrLessonDeleting) {
+		t.Errorf("SwapLibraryEntries = %v, want ErrLessonDeleting", err)
+	}
+	if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, held) {
+		t.Errorf("row touched:\n got %+v\nwant %+v", got, held)
+	}
+}
+
+func testSwapRefusedWhileItsDownloadRuns(t *testing.T) {
+	ctx := context.Background()
+	s, before := seedSwapRow(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+	job, ok, err := s.ClaimNextJob(ctx)
+	if err != nil || !ok || job.RailcontentID != 1 {
+		t.Fatalf("ClaimNextJob = %+v, %v, %v; want lesson 1's job running", job, ok, err)
+	}
+	if err := s.SwapLibraryEntries(ctx, before, swapNewRecord); !errors.Is(err, ErrLessonDownloading) {
+		t.Errorf("SwapLibraryEntries = %v, want ErrLessonDownloading", err)
+	}
+	if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
+		t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
+	}
+	// Another lesson's running job does not hold it back.
+	mustExec(t, s, `UPDATE jobs SET railcontent_id = 2 WHERE id = ?`, job.ID)
+	if err := s.SwapLibraryEntries(ctx, before, swapNewRecord); err != nil {
+		t.Errorf("SwapLibraryEntries beside another lesson's job = %v, want it written", err)
+	}
+}
+
+func testSwapNeverWritesNoRecord(t *testing.T) {
+	s, before := seedSwapRow(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+	if err := s.SwapLibraryEntries(context.Background(), before, nil); err == nil {
+		t.Error("SwapLibraryEntries(nil) = nil, want a refusal")
+	}
+	if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
+		t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
 	}
 }
 
