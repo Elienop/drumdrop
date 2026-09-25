@@ -32,7 +32,7 @@ var errRecordNotUpdated = errors.New("the lesson's record could not be updated")
 // errNoClaims is the delete outcome "which files are whose could not be read
 // (a store error, a damaged record, or an old library folder that could not
 // be read, see leftBehind)": nothing was removed. Its detail is logged.
-var errNoClaims = errors.New("the other lessons' files could not be read")
+var errNoClaims = errors.New("which files belong to which lesson could not be read")
 
 // errLeftBehind is the delete outcome "a lesson's own files are still in a
 // season folder the library folder setting no longer points at"
