@@ -396,3 +396,28 @@ func TestALessonNowASongKeepsItsOwnVideosFiles(t *testing.T) {
 	}
 	assertRecordIs(t, store, season, append(append(append(append(append([]string(nil), own...), videos...), nfos...), images...), base+" resources")...)
 }
+
+// TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles pins the edge of the
+// rule above: the plain video's image and nfo stay only while that video is
+// there. A record naming a "<base>.mp4" that is gone from the season folder
+// keeps nothing for it: "<base>.nfo" and "<base>.jpg" are retired as
+// replaced by the versions' own, as for any song re-download (ruling 5c).
+func TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles(t *testing.T) {
+	const base = sameTitleBase
+	w, store, _, season := songWorker(t, true)
+	seedSeason(t, season, base+".nfo", base+".jpg")
+	prev := recordedRow(100, season, base+".mp4", base+".nfo", base+".jpg")
+	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+	prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertExist(t, false, paths(season, base+".mp4", base+".nfo", base+".jpg")...)
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	assertRecordIs(t, store, season, append(append(append(append([]string(nil), videos...), nfos...), images...), base+" resources")...)
+}
