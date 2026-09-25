@@ -627,6 +627,32 @@ func TestEnsureShowFilesWritesOnlyIntoARealShowFolder(t *testing.T) {
 	})
 }
 
+// TestPlexTVPlacementWritesNoShowFilesThroughASymlink pins invariant 3 for
+// the placement: a show folder that is a symlink, even one to another show
+// folder of the library, gets none of the show's files, so that other show
+// is never given this one's poster, background or tvshow.nfo. The episode is
+// still placed and recorded, and the log says why the show files were not.
+func TestPlexTVPlacementWritesNoShowFilesThroughASymlink(t *testing.T) {
+	w, store, _, _, _, lib, _ := artWorker(t)
+	log := &bytes.Buffer{}
+	w.Log = log
+	other := filepath.Join(lib, "Other")
+	seedSeason(t, filepath.Join(other, "Season 01"))
+	if err := os.Symlink("Other", filepath.Join(lib, "Beginner Course")); err != nil {
+		t.Skip("no symlinks here:", err)
+	}
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := showFileNames(t, other); len(got) != 0 {
+		t.Errorf("wrote %v through the symlink into another show's folder", got)
+	}
+	onlyRecord(t, store)
+	if !strings.Contains(log.String(), "the show's own files were not written") {
+		t.Errorf("log %q does not say why the show's files were not written", log.String())
+	}
+}
+
 // TestShowFilesLeaveTheOwnersAlone pins ruling #78, 3: a slot the owner filled
 // under any name Plex reads for it is left as it is and gets nothing more,
 // and an owner's tvshow.nfo marks the show done: nothing is asked or written.
