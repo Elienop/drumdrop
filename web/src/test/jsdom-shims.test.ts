@@ -1,13 +1,12 @@
 // The stubs every test relies on (jsdom-shims.ts, loaded by setup.ts), held
 // to the contract of the browser API each stands in for.
-import { MemoryStorage } from "./jsdom-shims"
 
 it("localStorage is the shim's own Storage, not the one the environment put there", () => {
   // vitest's jsdom environment puts jsdom's localStorage on the global as a
   // getter (populateGlobal); Node 26 has its own. The shim's is a plain value.
   const own = Object.getOwnPropertyDescriptor(globalThis, "localStorage")
   expect(own?.get).toBeUndefined()
-  expect(own?.value).toBeInstanceOf(MemoryStorage)
+  expect(own?.value?.constructor.name).toBe("MemoryStorage")
   expect(localStorage).toBe(own?.value)
 })
 
@@ -44,12 +43,15 @@ it("installs every stand-in over whatever is already there, never only if missin
     Element.prototype.scrollIntoView = present.scrollIntoView
 
     // Run the module again, as setup.ts does before every test file.
+    // (vi.importActual, not import(): the module is a script, with no import or
+    // export to cost it vitest's line-1 coverage miss, so TypeScript won't
+    // import() it.)
     vi.resetModules()
-    const fresh = await import("./jsdom-shims")
+    await vi.importActual("./jsdom-shims")
 
-    expect(Object.getOwnPropertyDescriptor(globalThis, "localStorage")?.value).toBeInstanceOf(
-      fresh.MemoryStorage,
-    )
+    const installed = Object.getOwnPropertyDescriptor(globalThis, "localStorage")?.value
+    expect(installed).not.toBe(present.localStorage)
+    expect(installed?.constructor.name).toBe("MemoryStorage")
     expect(globalThis.ResizeObserver).not.toBe(present.ResizeObserver)
     expect(Element.prototype.hasPointerCapture).not.toBe(present.hasPointerCapture)
     expect(Element.prototype.setPointerCapture).not.toBe(present.setPointerCapture)
