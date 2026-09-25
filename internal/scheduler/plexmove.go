@@ -165,7 +165,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	previous, known, notes := previousDownload(c, lib.self)
 	prevNames := namesIn(previous.Remove, seasonDir)
 	versionsAt := func(base string) []string { return recordedVersions(lib.song, prevNames, base) }
-	plan, err := planPlexTVMove(src, src.dir.Name(), seasonDir, show, title, season, episode, func(base string) []string {
+	plan, err := planPlexTVMove(src, seasonDir, show, title, season, episode, func(base string) []string {
 		// A lesson Musora no longer calls a song whose record names its own
 		// "<base>.mp4" has that video's image and nfo at "<base>.jpg" and
 		// "<base>.nfo": its kept versions keep theirs, and are not named for.
@@ -772,53 +772,11 @@ type plexMoveStep struct {
 // regular files; they go with the scratch folder). videoPath is the destination
 // of the first real lesson video in name order (isLessonVideoName), which for a
 // song is its [Drumless] version.
-func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title string, season, episode int, recorded func(episodeBase string) []string) (plexMovePlan, error) {
-	entries, err := fs.ReadDir(scratch.dir.FS(), ".")
+func planPlexTVMove(scratch *scratchDir, seasonDir, show, title string, season, episode int, recorded func(episodeBase string) []string) (plexMovePlan, error) {
+	list, videos, longest, err := readScratchEntries(scratch)
 	if err != nil {
-		return plexMovePlan{}, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+		return plexMovePlan{}, err
 	}
-	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
-	// across filesystems and across a song's multiple version files.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-
-	type entry struct {
-		step   plexMoveStep
-		suffix string
-		video  bool
-	}
-	var list []entry
-	var videos []string
-	longest := 0
-	for _, e := range entries {
-		name := e.Name()
-		en := entry{step: plexMoveStep{name: name, src: filepath.Join(lessonDir, name), dir: e.IsDir()}}
-		if en.step.dir {
-			en.suffix = " " + name
-		} else {
-			info, ierr := e.Info()
-			if ierr != nil {
-				return plexMovePlan{}, fmt.Errorf("stat scratch file %q: %w", name, ierr)
-			}
-			if !info.Mode().IsRegular() {
-				continue // skip symlinks/devices: drumdrop only produces regular files
-			}
-			en.step.mode = info.Mode()
-			en.suffix = strings.TrimPrefix(name, scratch.base)
-			// The matcher runs on the SCRATCH name (against the scratch base), so
-			// yt-dlp fragments and strays are never chosen as the video.
-			en.video = isLessonVideoName(name, scratch.base)
-			if en.video {
-				videos = append(videos, name)
-			}
-		}
-		// The base is fitted to the download's own suffixes, before the image
-		// and a song's nfo are renamed (episodeNames, whose names are never
-		// longer than a version video's), so it is the base earlier versions
-		// gave the same lesson.
-		longest = max(longest, len(en.suffix))
-		list = append(list, en)
-	}
-
 	episodeBase, err := fitEpisodeBase(show, title, season, episode, longest)
 	if err != nil {
 		return plexMovePlan{}, err
@@ -832,24 +790,99 @@ func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title strin
 		plan.labels = slices.Compact(plan.labels)
 	}
 	for _, en := range list {
-		names := []string{en.suffix}
-		if !en.step.dir {
-			names = episodeNames(en.suffix, plan.labels)
-		}
-		for _, n := range names {
-			st := en.step
-			st.dst = filepath.Join(seasonDir, episodeBase+n)
-			if n != en.suffix {
-				st.from = en.suffix
-			}
-			st.copy = len(names) > 1
-			if en.video && plan.videoPath == "" {
-				plan.videoPath = st.dst
-			}
-			plan.steps = append(plan.steps, st)
-		}
+		plan.addSteps(en, seasonDir)
 	}
 	return plan, nil
+}
+
+// scratchEntry is one entry of the scratch lesson folder as planPlexTVMove
+// reads it: its step (every field but dst, from and copy), its suffix after
+// the scratch base (" <name>" for a folder), and whether it is a real lesson
+// video (isLessonVideoName).
+type scratchEntry struct {
+	step   plexMoveStep
+	suffix string
+	video  bool
+}
+
+// readScratchEntries is planPlexTVMove's reading of the scratch lesson
+// folder: its entries in name order (scratchEntryOf; a non-regular file is
+// left out), the names of the real lesson videos among them, and the
+// longest suffix, which the episode base is fitted to.
+func readScratchEntries(scratch *scratchDir) (list []scratchEntry, videos []string, longest int, err error) {
+	entries, err := fs.ReadDir(scratch.dir.FS(), ".")
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("read scratch lesson dir %q: %w", scratch.dir.Name(), err)
+	}
+	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
+	// across filesystems and across a song's multiple version files.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, e := range entries {
+		en, ok, err := scratchEntryOf(scratch, e)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if !ok {
+			continue // skip symlinks/devices: drumdrop only produces regular files
+		}
+		if en.video {
+			videos = append(videos, en.step.name)
+		}
+		// The base is fitted to the download's own suffixes, before the image
+		// and a song's nfo are renamed (episodeNames, whose names are never
+		// longer than a version video's), so it is the base earlier versions
+		// gave the same lesson.
+		longest = max(longest, len(en.suffix))
+		list = append(list, en)
+	}
+	return list, videos, longest, nil
+}
+
+// scratchEntryOf reads the entry e of the scratch lesson folder; ok is false
+// for a file that is not a regular one.
+func scratchEntryOf(scratch *scratchDir, e fs.DirEntry) (en scratchEntry, ok bool, err error) {
+	name := e.Name()
+	en = scratchEntry{step: plexMoveStep{name: name, src: filepath.Join(scratch.dir.Name(), name), dir: e.IsDir()}}
+	if en.step.dir {
+		en.suffix = " " + name
+		return en, true, nil
+	}
+	info, err := e.Info()
+	if err != nil {
+		return scratchEntry{}, false, fmt.Errorf("stat scratch file %q: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return scratchEntry{}, false, nil
+	}
+	en.step.mode = info.Mode()
+	en.suffix = strings.TrimPrefix(name, scratch.base)
+	// The matcher runs on the SCRATCH name (against the scratch base), so
+	// yt-dlp fragments and strays are never chosen as the video.
+	en.video = isLessonVideoName(name, scratch.base)
+	return en, true, nil
+}
+
+// addSteps adds the steps of en to the plan: one per name episodeNames gives
+// a file (a song's image and nfo, one copy per version), one for a folder,
+// each at its destination in seasonDir under the plan's episode base. The
+// first real lesson video's destination becomes the plan's videoPath.
+func (plan *plexMovePlan) addSteps(en scratchEntry, seasonDir string) {
+	names := []string{en.suffix}
+	if !en.step.dir {
+		names = episodeNames(en.suffix, plan.labels)
+	}
+	for _, n := range names {
+		st := en.step
+		st.dst = filepath.Join(seasonDir, plan.episodeBase+n)
+		if n != en.suffix {
+			st.from = en.suffix
+		}
+		st.copy = len(names) > 1
+		if en.video && plan.videoPath == "" {
+			plan.videoPath = st.dst
+		}
+		plan.steps = append(plan.steps, st)
+	}
 }
 
 // episodeNames is the ONE place that says what the plex-tv move names a
