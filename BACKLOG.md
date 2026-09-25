@@ -1373,17 +1373,85 @@ D53 waits on an owner decision.
   - *Detail:* vault note drumdrop-auth-posture, §3.
 
 - **D142 · A sync button that gets blocked drops keyboard focus.**
-  - *What:* on the Dashboard, when Run sync or Dry-run gets a 503, the pressed `PendingButton`
-    is replaced by the blocked control, which is a different element, so keyboard focus falls
-    to `<body>`. A keyboard user starts again from the top of the page. This predates branch
-    `fix/sonar-gate-and-coverage`, which made the blocked control focusable (its frontend
-    agent found it, 2026-09-25).
-  - *Why:* losing focus breaks WCAG 2.4.3 (focus order). The fix renders one element for both
-    states, which changes the unblocked path too.
+  - *What:* on the Dashboard, when Run sync or Dry-run gets a 503 from the server, the pressed
+    `PendingButton` is replaced by the blocked control. The two are different components at
+    the same place, so React mounts a new `<button>`, and keyboard focus falls to `<body>`. No
+    ring shows, a second Enter does nothing, and a screen reader loses its place. Measured in
+    Orca's Chromium (2026-09-25): the next Tab lands on the new blocked button itself, because
+    the browser keeps a starting point where the removed node was. Firefox and Safari were not
+    measured. It predates branch `fix/sonar-gate-and-coverage`, which made the blocked control
+    focusable (S6845).
+  - *Fix, sketched by that branch's UI review seat:* one component path in both states. The
+    wrapper, `Tooltip` and `TooltipTrigger asChild` are always rendered around a
+    `PendingButton`, with the tooltip held shut while unblocked (Radix's controlled
+    `open`/`onOpenChange`). `PendingButton` then needs a blocked state it can't express today:
+    it sets `aria-disabled` after the caller's props, and its `aria-disabled:cursor-progress`
+    would give a blocked button a busy cursor. That also folds the Dashboard's local
+    blocked-button recipe (`BLOCKED_RING`, the per-variant `BLOCKED` map, the click guards)
+    into the shared component instead of forking the button system. Accepted side effect:
+    after the 503 the focused button doesn't open its tooltip, since no new focus event fires;
+    the toast carries the reason.
+  - *Why:* losing focus breaks WCAG 2.4.3 (focus order).
   - *Evidence:* `SyncButton`'s two return branches in `web/src/pages/Dashboard.tsx` · the
-    comment at `web/src/pages/Dashboard.test.tsx:84`
+    comment at `web/src/pages/Dashboard.test.tsx:84` (it encodes jsdom, which restarts from
+    the top)
+
+- **D143 · A blocked sync button says why only in a tooltip, and stays blocked.**
+  - *What:* when Run sync or Dry-run is blocked (the server has no daemon or planner
+    attached):
+    - its reason is in a tooltip only. Escape hides it, touch never opens it, and a screen
+      reader hears it only while the tooltip is open (Radix sets `aria-describedby` only then);
+    - the user learns about the block only by pressing the button;
+    - the block lasts until the page remounts, even if the server restarts with a daemon.
+
+    The summary DTO already carries `paused` (`web/src/types.ts:62`); a daemon or planner
+    presence field would let the buttons show blocked from the start. TopBar's Pause meets the
+    same 503 differently: it stays live and toasts on every press.
+  - *Why:* rare in practice, since `drumdrop serve` always attaches its daemon. The owner chose
+    to record it for later (2026-09-25, *"Record it for later"*), rather than add a visible
+    line beside the buttons on `fix/sonar-gate-and-coverage`.
+  - *Evidence:* `is503` and `SyncButton` in `web/src/pages/Dashboard.tsx` · `TopBar.tsx:27-31`
+
+- **D144 · The Queue's job-error tooltip can't be reached by keyboard.**
+  - *What:* the full error of a failed job shows in a tooltip whose trigger is a truncated
+    `<span>` that can't take focus (`web/src/pages/Queue.tsx:258-262`). A keyboard user sees
+    only the truncated text.
+  - *Why:* keyboard and screen-reader users lose the error text. The fix must not be a
+    `tabIndex` on a span, which is SonarQube's S6845.
+  - *Evidence:* the trigger in `Queue.tsx`; found by the UI review seat of
+    `fix/sonar-gate-and-coverage`
+
+- **D145 · No focus indicator in forced-colours mode.**
+  - *What:* Tailwind 4's `outline-none` sets `outline-style: none`, and the app draws focus with
+    `box-shadow` rings, which forced-colours mode (Windows High Contrast) removes. So no
+    control shows focus there.
+  - *Why:* minor for this owner, but a real accessibility gap. The usual fix is an
+    `outline` that stays transparent until forced colours are on.
+  - *Evidence:* `grep -rn 'outline-none' web/src/components/ui`
 
 ## Housekeeping & dependencies
+
+- **D146 · The release job installs the web dependencies while holding a write token.**
+  - *What:* goreleaser's before-hook runs `npm --prefix web ci` (`.goreleaser.yaml:8`) inside
+    a step whose environment holds `GITHUB_TOKEN`, with contents and packages write
+    (`.github/workflows/main.yml`). Any npm install script then runs beside that token. Today
+    only esbuild, msw and fsevents have one: msw's does nothing here, and fsevents is
+    macOS-only.
+  - *Options:* npm's own `--ignore-scripts` on the hook (whether esbuild works without its
+    postinstall needs one CI run), or build `web/dist` in a separate read-only job and hand
+    it over as an artifact.
+  - *Why:* supply-chain hardening. No package added so far has an install script, and the
+    security seat of `fix/sonar-gate-and-coverage` found this, not introduced by it.
+  - *Evidence:* `grep -n 'npm' .goreleaser.yaml` · `grep -n -A3 'permissions' .github/workflows/main.yml`
+
+- **D147 · `make coverage` can leave the previous run's reports behind.**
+  - *What:* when the Go tests fail, the target stops before the web half, so the earlier
+    `web/coverage/lcov.info` stays on disk. The `sonar-scan` wrapper aborts on the failure, but
+    its own hint, `SONAR_SKIP_COVERAGE=1`, would then upload this run's Go profile with the
+    previous run's web coverage. vitest empties `web/coverage/` only when the web half runs.
+  - *Fix:* start the target by removing the report files. That is a new step, so it waits
+    here (the vault's BEHAVIOR §12).
+  - *Evidence:* the `coverage:` target in `Makefile`
 
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
