@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D140 on 2026-09-25 (*moves*; re-check the
+the highest ID on this page: the next new ID is D142 on 2026-09-25 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -44,7 +44,9 @@ branch) built ruling (y), closed the round-5h security F1, and corrected D58, D1
 D128, D130, D135, D136 and D137 against its own code and the round-5h seats' probes; it
 added no entry. The round-5j pass (2026-09-25, same branch) narrowed ruling (y)'s check to
 the lesson's own files, corrected D58, D113, D128 and D137 against its own code and the
-round-5i seats' reports, and added D138 and D139._
+round-5i seats' reports, and added D138 and D139. The round-5k pass (same day and
+branch) reworded the left-behind refusals, corrected D58, D113, D128, D137, D138 and D139
+against its own code and the round-5j seats' reports, and added D140 and D141._
 
 ## Next up
 
@@ -167,7 +169,7 @@ D53 waits on an owner decision.
   - *A library folder spelled another way is not seen by ruling (f)'s refusal*
     (round-5f/5g security review, N3; the same at `5cb8fbe`, before round 5f). The
     refusal asks `inLibrary` first, and its first test is lexical
-    (`library.Inside(lib, …)`, `internal/scheduler/worker_record.go:342`). With
+    (`library.Inside(lib, …)`, `internal/scheduler/worker_record.go:352`). With
     `DRUMDROP_LIBRARY_DIR` set through a symlink (or the library remounted at another
     path) and the row's folder spelled the real way, a refused library placement falls
     back to downloads, and the library folder is left where it is, logged as "inside
@@ -177,7 +179,7 @@ D53 waits on an owner decision.
     A row spelled through the symlink is refused as it should be. The delete side of
     the same spelling gap is D67. *Fix (new mechanism, can wait):* decide containment
     by identity, as the repo already does in `Claims.within`
-    (`internal/library/ownership.go:472`, through `sameFolder`, `:181-186`) and in
+    (`internal/library/ownership.go:580`, through `sameFolder`, `:182-187`) and in
     `library.Remove`'s root lookup (`internal/library/remove.go:28-31`), both on
     `os.SameFile`. Seen in the security seat's scratch probe (S2, S2b, S3), not
     pinned by a committed test.
@@ -518,23 +520,59 @@ D53 waits on an owner decision.
       old library unmounted or renamed with the files in it, or, in Docker, the library
       moved by re-pointing the bind mount's host folder while `DRUMDROP_LIBRARY_DIR`
       stays the same (code Info 8). drumdrop sees nothing: a Delete says deleted and the
-      files stay, as on `main`. README says to move the files first;
+      files stay, as on `main`. README says to move the files first. A remembered root
+      *path* would not see the Docker case either (the Fix below);
+    - an old folder the move emptied now takes the gone-folder path through the
+      fallback (code round 5j, Low 1): `LeftBehind` answers false, and the second line,
+      `keptInLibrary`, never refuses a recorded folder outside today's library
+      (`inLibrary` reads it as spelled, `internal/scheduler/worker_record.go:352`). So a
+      legacy row whose files were moved to the same place in the new folder, and whose
+      failed placement learned nothing there (a season folder it can't list, or a legacy
+      name it can't settle), falls back: it records the downloads folder, and its moved
+      files stay in the new season folder, recorded by nothing (the code seat's scratch
+      probe; the unlistable-folder trigger was probed, the ambiguous-name one reasoned).
+      Rare, and nothing is deleted. A recorded row is safe: its relative record resolves
+      at the new place. Before round 5j the emptied folder refused, as it still existed.
+      *Later fix, the owner's call:* make `keptInLibrary` read this row's folder as it
+      is read now (`Claims.seasonFolder`, `internal/library/ownership.go:208`); that
+      changes the remount case ruling (y) keeps as before;
     - a copy kept in both folders (security round 5i, E2) is still refused, as its own
-      files are in the old folder. The refusal says to set the setting back only if
-      nothing moved: set back, a Delete removes the old copy and leaves the new one
-      recorded by nothing;
+      files are in the old folder. Since round 5k the refusal offers switching back only
+      "if the new one is still empty" (security round 5j S1: "if you moved nothing" was
+      true after a copy). Switched back anyway, a Delete removes the old copy and leaves
+      the new one recorded by nothing (probe P2), and a lesson drumdrop placed in the new
+      folder since the change is refused in turn (P5). README says to delete the old
+      copy, which finishes the move;
     - a hung stat on an old folder that *differs* from today's has no bound (security
-      round 5i, S4): the handler parks while its lease renews, and the lesson (or the
-      follow's lessons) can't be downloaded, retried, skipped or deleted until the mount
-      answers. An unchanged setting reads nothing now. Bounding `os.Stat` is a new
+      round 5i, S4; restated by code round 5j Low 2 and security S3). Since round 5j the
+      first stat runs in `refuseUpFront` (`internal/server/lessons.go:227`,
+      `follows.go:311`), before `Begin…Delete`, so no lease is held: the lesson stays
+      usable, but that Delete never answers, and each new Delete parks another request.
+      The lease-renewing park now needs the mount to stall between the up-front check
+      and the one after Begin (`lessons.go:252`, `follows.go:399`). The worker's
+      fallback check (`refuseFallback`, `internal/scheduler/worker_record.go:233`) makes
+      the same unbounded stat in the single serial worker (`daemon.go:94` →
+      `Worker.RunOnce`, `worker.go:232`), so one hung stat stalls the whole queue
+      (reasoned, not probed; true since round 5i, when `keptInLibrary` already stat'ed
+      old paths). An unchanged setting reads nothing. Bounding `os.Stat` is a new
       mechanism (`os.Stat` takes no deadline); can wait;
-    - on Windows, a not-found answer other than `ERROR_FILE_NOT_FOUND` and
-      `ERROR_PATH_NOT_FOUND` (such as `ERROR_NOT_READY` for an empty drive) counts as
-      "can't read", so it refuses (security round 5i, S3; unverified, not run on
-      Windows);
+    - on Windows, a not-found answer other than `ERROR_FILE_NOT_FOUND`,
+      `ERROR_PATH_NOT_FOUND` and `_ERROR_BAD_NETPATH` (the three Go maps to
+      `fs.ErrNotExist`, `$(go env GOROOT)/src/syscall/syscall_windows.go:201-205`), such
+      as `ERROR_NOT_READY` for an empty drive, counts as "can't read", so it refuses
+      (security round 5i, S3; code round 5j, Info 6; unverified, not run on Windows);
     - a re-download whose library placement *succeeds* after the change places a new
       copy under the new setting and leaves the old one where it was, recorded by
-      nothing, with no log line (security round 5h, S1 and S2);
+      nothing, with no log line (security round 5h, S1 and S2). *Option, the owner's
+      call* (security round 5j): ask `LeftBehind` before a placement too, and fail with
+      `failLeftBehind` while the files are left behind. That closes this without the
+      Fix below, at the cost of refusing Download until the files move, which narrows
+      ruling (y). Can wait: nothing is deleted, the old copy is a duplicate;
+    - the check after `Begin…Delete` (the backstop) answers with the up-front sentence,
+      which doesn't say a download was stopped, as the no-claims pair's late sentence
+      does (UI round 5j, 7; deliberate, `internal/server/messages.go:107-108`). It fires
+      only if the lesson's own files reappear in the old folder between the two checks;
+      a late variant would be one more sentence, not worth adding now;
     - a default-layout lesson folder that the change leaves outside both dirs (the
       library pointed sideways, `/oldlib` to `/newlib`): a refused placement falls back
       to downloads and leaves that folder where it was, no longer recorded, logged
@@ -548,7 +586,13 @@ D53 waits on an owner decision.
   - *Fix (new mechanism, can wait):* record the library root a row was written under,
     and react when the setting changes (Sonarr refuses a changed root folder). That was
     ruling (y)'s declined option *Remember the library folder*: it fixes every reader,
-    but needs its own design, so a later branch.
+    but needs its own design, so a later branch. A remembered root *path* can't see a
+    Docker bind re-pointed under an unchanged container path: the recorded path and the
+    setting stay equal (`internal/library/ownership.go:243`). That case needs an
+    identity, such as a marker file holding an ID in the library root (security round
+    5j, S2). Engine: `os.SameFile` compares two live stats only; nothing in the standard
+    library or SQLite records a folder's identity across restarts, and drumdrop writes
+    no such marker today.
   - *Evidence:* `grep -n 'func (c \*Claims) LeftBehind' -A24 internal/library/ownership.go`
     · `go test -count=1 -run 'LeftBehind|OwnFiles|CantRead|StopNothing|ChecksAgain' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     · `grep -n 'func previousFolder' -A21 internal/scheduler/place.go` (the lesson-folder
@@ -559,15 +603,53 @@ D53 waits on an owner decision.
     (y)'s round-5i note was 166 and fit at 1280px with 1.3px to spare, and a 168-character
     variant was cut (round-5i UI review, 3). Only a browser measurement says whether a
     new sentence fits; the full text is in the note's `title` (`web/src/pages/Lessons.tsx`).
+    Where it stands (round 5k): the left-behind note is 146 characters; the round-5j UI
+    seat measured that exact sentence at two lines, 99.0px spare at 448px and 40.7px at
+    424px, in a replica with the app's font and box (not the app itself). The `title`
+    fallback works on mouse hover only: a `<p>` takes no keyboard focus and touch has no
+    hover, so a cut note would lose its remedy for keyboard and touch users, which is
+    why the fit matters (UI round 5j, 5).
   - *Fix (new mechanism, can wait):* a length cap, or a test that measures the
     scheduler's lesson sentences against the clamp. Engine: none.
-  - *Evidence:* `grep -E '^\s*(lesson:|kept:|msg[A-Za-z]+ +=)' internal/scheduler/messages.go | grep -o '"[^"]*"' | awk '{ print length($0)-2 }' | sort -rn | head -1`
+  - *Evidence:* `grep -E '^\s*(const +)?(lesson:|kept:|msg[A-Za-z]+ +=)' internal/scheduler/messages.go | grep -o '"[^"]*"' | awk '{ print length($0)-2 }' | sort -rn | head -1`
+    (147 on 2026-09-25, *moves*; the `(const +)?` catches a one-line `const msgX = "…"`
+    such as `msgEarlierKept`, which the round-5j form missed)
 - **D139 · The Queue shows a failed job's sentence on one line, cut.**
-  - *What:* the job's error is cut to one line ("Couldn't put this lesson in the library:
-    its files a…"), like the older "…, so its co…"; the tooltip has the full text
-    (round-5i UI review, 5; `web/src/pages/Queue.tsx`).
-  - *Fix (can wait):* a two-line clamp, or a shorter job sentence. Needs a browser check.
+  - *What:* the job's error is cut to one line, so the left-behind sentence loses its
+    remedy past "Couldn't put this lesson in the library.", like the older "…, so its
+    co…"; the tooltip has the full text (round-5i UI review, 5; `web/src/pages/Queue.tsx`).
+    The tooltip's trigger is a `<span>` (`web/src/pages/Queue.tsx:260-261`), which takes no
+    focus, so it opens on mouse hover only: keyboard and touch users never reach the
+    sentence's end. Screen readers read all of it (`truncate` is CSS only), and the same
+    lesson's note on Lessons has the full sentence (UI round 5j, 6). A shorter job
+    sentence can't hold both outcome and remedy in the ~45 characters the column shows
+    at 1024px (the same review).
+  - *Fix (can wait):* a two-line clamp, or `tabIndex={0}` on the trigger (a corrected
+    line: Radix opens a tooltip when its trigger takes focus,
+    `web/node_modules/@radix-ui/react-tooltip/dist/index.mjs:202-203`; the cost is one
+    tab stop per failed job, and touch still has no hover). Needs a browser check.
   - *Evidence:* `grep -n 'truncate\|line-clamp' web/src/pages/Queue.tsx`
+- **D140 · The web UI never shows the library folder.**
+  - *What:* the left-behind refusals speak of "the old library folder" and "the new
+    one", but no screen says which folder the setting points at: Settings has only the
+    Musora, token and About cards (`web/src/pages/Settings.tsx:28-30`), and no API route
+    returns the setting (the server holds `cfg.LibraryDir`, `internal/server/server.go:35`,
+    and exposes it nowhere). The reader has to remember the change they made (UI round
+    5j, 8).
+  - *Fix (new mechanism, can wait):* an API field and a read-only row in Settings.
+    Engine: none.
+  - *Evidence:* `grep -rn 'LibraryDir' internal/server/*.go | grep -v _test` ·
+    `grep -n 'Card />' web/src/pages/Settings.tsx`
+- **D141 · The same refusal twice looks unchanged.**
+  - *What:* a refusal that asks for a loop (move the files, then Delete again) comes
+    back word for word while the move is incomplete, and the only visible change is a
+    ~60ms fade; screen readers re-announce it, because `InlineError` keys the sentence
+    on `error.seq` (`web/src/components/InlineError.tsx:40`). Most users close the
+    dialog while they move files, and reopening it clears the old error, so the impact
+    is small (UI round 5j, 9; first noted, unrecorded, in round 5i §5).
+  - *Fix (new mechanism, can wait):* a visible sign that the answer is new (a count or
+    a time). Needs a design decision and a browser check.
+  - *Evidence:* `grep -n 'error.seq' web/src/components/InlineError.tsx`
 - **D122 · A partial copy at the recorded video's name counts as on disk after a crash.**
   - *What:* across filesystems a placement sets the old video aside, then copies the new
     one straight to its final name (`copyFileInto`, `O_EXCL`). If drumdrop dies mid-copy,
@@ -633,7 +715,7 @@ D53 waits on an owner decision.
     a downloads folder that sits inside the library falls back to downloads when its
     library placement is refused again, but only when its recorded lesson folder is in
     the course folder the fallback goes into (`inLibrary`,
-    `internal/scheduler/worker_record.go:341-347`). Since round 5h a season folder there
+    `internal/scheduler/worker_record.go:351-357`). Since round 5h a season folder there
     counts as the library's, since the fallback only writes `NN - Title` folders
     (round-5f/5g security review, N1: after the library root moved up, a legacy plex-tv
     or default-layout season row fell back and its season files were claimed by no
@@ -2104,6 +2186,29 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       filed in a season folder and names what drumdrop can't see (code Medium 1, Info 8,
       security S6). G1 stays as a second line (code Info 5). Still open: D137, D138,
       D139.
+    - Round 5k's corrected lines (from the round-5j reviews; `9a220bf`, `e9204c7`,
+      `b6b0382`, `d083db6`, `0ecc1a8` and the docs commit after them). The delete dialogs
+      offer switching back only "if the new one is still empty": "if you moved nothing"
+      was true after a copy kept in both folders, and switching back then left the new
+      copy recorded by nothing (security S1, UI 1 and 3). The note and the job sentence
+      state the failed placement and the old folder as two facts, since the placement
+      failed for a reason only the log has and the old folder is why it didn't fall back
+      (UI 2). `ownFilesIn` is split (`videoIn`, `legacyOwnFileIn`, `anyBaseClaims`,
+      `anyExists`; gocognit 20 → 7, code Low 5), and `legacyClaims` shares its
+      any-base-claims loop. Two fail-safe arms are pinned: a recorded season folder that
+      is now a regular file reads as gone, and the video counts only inside the old
+      folder (code Info 7, security S4). `refuseFallback`'s comment says its second line
+      never refuses outside today's library (code Low 1), the follow test's comment names
+      the test that pins "before the first removal" (code Low 4), and `errNoClaims`' text
+      covers everything it stands for (code Info 8). README: the setting's table row
+      points at the warning, "the same place" has an example, switching back and a copy
+      are spelled out, a Docker bind re-pointed on the host has its own bullet, and the
+      safe order is stated (UI 4, security S1). BACKLOG: D137 gains the emptied-folder
+      fallback (code Low 1), the hung stat as it is now (code Low 2, security S3), the
+      Windows code (code Info 6), the identity a remembered root needs (security S2),
+      the placement-time option and the backstop's sentence (UI 7); D58 and D128's line
+      numbers are re-derived (code Low 3); D138 and D139 say where they stand (UI 5, 6);
+      D140 and D141 are new (UI 8, 9).
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -2119,12 +2224,15 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · round 5i: `go test -count=1 -run 'LeftBehind|TheMoveLooksForElsewhere|KeptInLibraryDecidesByWhatTheRowRecords|KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|DoesNotTakeAFileForTheLessonsFolder|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     and `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'gone in the same commit|takes itself out of scroll anchoring'`
     · round 5j: `go test -count=1 -run 'LeftBehind|OwnFiles|OwnFileAlone|CantRead|StopNothing|ChecksAgain|WhileARecordIsDamaged|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
+    · round 5k: `go test -count=1 -v -run 'ReadsAPathThroughAFileAsGone|CountsTheVideoOnlyInTheOldFolder|LeftBehind|MessagesFollowTheCopyRules' ./internal/library/ ./internal/server/ ./internal/scheduler/ | grep -c -- '--- PASS'`
+    and `~/go/bin/gocognit ./internal/library/ | grep -E 'ownFilesIn|legacyOwnFileIn|legacyClaims'`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
     the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
     web half and its rulings; D132–D134, from the round-5f/5g UI review; D135–D137,
     from the round-5h fixes (D137 narrowed by rounds 5i and 5j to what ruling (y) leaves
-    open); D138 and D139, from the round-5i UI review;
+    open); D138 and D139, from the round-5i UI review; D140 and D141, from the round-5j
+    UI review;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).

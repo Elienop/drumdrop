@@ -37,7 +37,7 @@ the defaults give a working setup with no env at all.
 | --- | --- | --- |
 | `DRUMDROP_CONFIG_DIR` | `~/.config/drumdrop` | Directory for all at-rest state: `drumdrop.db` (follow/download state), `secret.key` (credential-encryption key), `credentials.enc` (encrypted login), `session.cookie` (saved session). Override to relocate the whole config directory. |
 | `DRUMDROP_DOWNLOADS_DIR` | `./downloads` | Root directory for downloads when no `--out` is given. `--out` still overrides it per run. Downloads in progress are written in its `.drumdrop-in-progress/` folder, and a finished one is placed from there (see [Plex library](#plex-library-single-parent-bind-mount)). |
-| `DRUMDROP_LIBRARY_DIR` | _(none)_ | Optional Plex library. When set, each finished lesson folder is **moved** into this dir at the same path relative to the downloads root — a single copy, Sonarr-style. The downloads dir is then pure scratch for in-progress downloads; Plex watches a directory of **only** finished files and never the partials. drumdrop records the library path as the lesson's location, and Plex owns the file from there (no host-path mapping). Empty disables the move: finished lessons are placed in the downloads dir. For an **instant, atomic** move, downloads and library must be on **one filesystem as the process/container sees it** (see [single-parent bind mount](#run-with-docker)); across filesystems it falls back to a copy-then-delete. |
+| `DRUMDROP_LIBRARY_DIR` | _(none)_ | Optional Plex library. When set, each finished lesson folder is **moved** into this dir at the same path relative to the downloads root — a single copy, Sonarr-style. The downloads dir is then pure scratch for in-progress downloads; Plex watches a directory of **only** finished files and never the partials. drumdrop records the library path as the lesson's location, and Plex owns the file from there (no host-path mapping). Empty disables the move: finished lessons are placed in the downloads dir. For an **instant, atomic** move, downloads and library must be on **one filesystem as the process/container sees it** (see [single-parent bind mount](#run-with-docker)); across filesystems it falls back to a copy-then-delete. Changing it later? Move the files with it: see [Plex library](#plex-library-single-parent-bind-mount). |
 | `DRUMDROP_LAYOUT` | _(none)_ | Library destination layout (case-insensitive). Empty or `default` keeps the per-lesson-subfolder layout (`<library>/Course/NN - Lesson/…`). `plex-tv` switches the library copy to Plex's TV-Shows naming — see [Plex TV layout](#plex-tv-layout). Requires `DRUMDROP_LIBRARY_DIR`; has no effect without one. It shapes **only** the library move target, not the in-progress scratch layout. |
 | `DRUMDROP_HOST_DOWNLOADS_DIR` | _(none)_ | For Docker: the host path that the downloads dir is bind-mounted from. The API rewrites lesson paths under the downloads dir to this host path, so the web UI's "Copy path" gives a path that works on the host. Only paths under the downloads dir are rewritten, so with `DRUMDROP_LIBRARY_DIR` set it no longer affects finished lessons (they live in the library). Empty keeps the container paths. |
 | `DRUMDROP_LISTEN` | `127.0.0.1:8080` | Address `serve` binds. A non-loopback bind (e.g. `0.0.0.0:8080`, as in the Docker image) refuses to start without `DRUMDROP_API_TOKEN`. |
@@ -350,29 +350,39 @@ a level, from `/media/drumeo` to `/media`), drumdrop looks for them in the wrong
 While any of a lesson's own files is still in its old season folder, and that folder isn't
 the same folder as its place under the new setting, drumdrop refuses rather than lose track
 of them: a refused placement doesn't fall back to downloads (the attempt fails, and the
-lesson stays downloaded with the note "Couldn't put this lesson in the library: its files
-are in the old library folder. Move them to the same place in the new one, then Download
+lesson stays downloaded with the note "Couldn't put this lesson in the library. Its files
+are in the old library folder: move them to the same place in the new one, then Download
 again."), and a *Delete* removes nothing (below). That holds wherever the old folder is,
 the downloads dir included (a library moved down from it). An old folder it can't read
-counts as holding them; the server log says why.
+counts as holding them; the server log says why. The safe order: stop drumdrop, move the
+files to the same place, change the setting, then start it again.
 
-- **Move the files to the same place** in the new folder: `<Show>/Season NN/`, not loose
-  in it (a file drumdrop doesn't find where its record says, it takes for gone). An old
+- **Move the files to the same place** in the new folder, `<Show>/Season 01/` and not
+  loose in it: `/media/drumeo/Beginner Course/Season 01/` goes to
+  `/media/Beginner Course/Season 01/`
+  (drumdrop looks for each file exactly where it recorded it, and takes one it doesn't find
+  there for gone). If you copied them, delete the old copy: that finishes the move. An old
   season folder left empty, or holding only other lessons' files, doesn't block anything.
-- **Set the old folder back only if you moved nothing.** A lesson whose files you did move
-  is then looked for in the old folder, and a *Delete* of it says deleted while its files
-  stay.
+- **Point the setting back at the old folder only while the new one is still empty.** A
+  lesson whose files you moved is then looked for in the old folder, and a *Delete* of it
+  says deleted while its files stay; one you copied loses its old copy and keeps the new
+  one, recorded by nothing; and a lesson drumdrop placed in the new folder since the change
+  is refused in turn.
+- **In Docker, moving the library on the host** (re-pointing the bind mount's host folder,
+  with `DRUMDROP_LIBRARY_DIR` unchanged): stop the container, move the files to the same
+  place, re-point the bind, then start it. drumdrop can't see this change, since the path it
+  reads stays the same, so after it a *Delete* of a lesson whose files you left behind says
+  deleted and the files stay (BACKLOG D137).
 - A library moved or remounted with its files (the old path is gone), and the same folder
   under another spelling (a symlink, a bind path), work as before.
 - **Not covered yet** (BACKLOG D137): drumdrop can't see an old folder whose path is gone
-  while its files still exist elsewhere, such as an unmounted drive, or in Docker a library
-  moved by re-pointing the bind mount's host folder (the container path stays the same). A
-  *Delete* then says deleted and the files stay, as on earlier versions: move the files
-  first. The same goes for a lesson kept in downloads whose record still names season files
-  in the library. A re-download whose library placement *succeeds* after such a change
-  places a new copy under the new setting and leaves the old one where it was, recorded by
-  nothing, and so does a refused placement of a default-layout lesson whose folder is
-  outside both dirs now.
+  while its files still exist elsewhere, such as an unmounted drive, nor a bind mount
+  re-pointed on the host (above). A *Delete* then says deleted and the files stay, as on
+  earlier versions: move the files first. The same goes for a lesson kept in downloads
+  whose record still names season files in the library. A re-download whose library
+  placement *succeeds* after such a change places a new copy under the new setting and
+  leaves the old one where it was, recorded by nothing, and so does a refused placement of
+  a default-layout lesson whose folder is outside both dirs now.
 
 Every download, with a library or without one, writes into a folder of its own, named after
 its job, `<downloads>/.drumdrop-in-progress/job-<id>/`, and only a finished one is placed
@@ -461,10 +471,10 @@ its files keeps the follow and all its lessons in that case, so no file is left 
 drumdrop no longer tracks. That also depends on the library setting pointing where the
 files are: a lesson filed in a plex-tv season folder whose files stayed in the old folder
 after `DRUMDROP_LIBRARY_DIR` was pointed at another one can't be deleted until you move them
-to the same place in the new library folder (or set the old one back, if you moved
-nothing). The delete answers so before it stops any download, and removes nothing;
-for a follow with its files, nothing of any of its lessons, and the follow stays (see
-above).
+to the same place in the new library folder (or point the setting back at the old folder,
+if the new one is still empty). The delete answers so before it stops any download, and
+removes nothing; for a follow with its files, nothing of any of its lessons, and the
+follow stays (see above).
 
 A delete stops the lesson's downloads first. While it runs, the lesson can't be downloaded,
 retried, skipped or deleted again (each is refused until it finishes), so a delete never
