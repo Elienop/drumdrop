@@ -347,19 +347,32 @@ filed in a plex-tv season folder is always looked for under the library setting 
 now (its record is relative to it, see [Plex TV layout](#plex-tv-layout)). So if you point
 the setting at a different folder and leave the files where they were (say you move it up
 a level, from `/media/drumeo` to `/media`), drumdrop looks for them in the wrong place.
-While a lesson's old season folder is still on disk and isn't the same folder as its place
-under the new setting, drumdrop refuses rather than lose track of the files: a refused
-placement doesn't fall back to downloads (the attempt fails, and the lesson stays
-downloaded with the note "Couldn't put this lesson in the library: its files are still in
-the old library folder. Move them to the new one, or set the library folder back, then
-Download again."), and a *Delete* removes nothing (below). That holds wherever the old
-folder is, the downloads dir included (a library moved down from it). Move the files to
-the new library folder, or set the old one back. A library moved or remounted with its
-files (the old path is gone), and the same folder under another spelling (a symlink, a
-bind path), work as before. Not covered yet: a re-download whose library placement
-*succeeds* after such a change places a new copy under the new setting and leaves the old
-one where it was, recorded by nothing, and so does a refused placement of a default-layout
-lesson whose folder is outside both dirs now (BACKLOG D137).
+While any of a lesson's own files is still in its old season folder, and that folder isn't
+the same folder as its place under the new setting, drumdrop refuses rather than lose track
+of them: a refused placement doesn't fall back to downloads (the attempt fails, and the
+lesson stays downloaded with the note "Couldn't put this lesson in the library: its files
+are in the old library folder. Move them to the same place in the new one, then Download
+again."), and a *Delete* removes nothing (below). That holds wherever the old folder is,
+the downloads dir included (a library moved down from it). An old folder it can't read
+counts as holding them; the server log says why.
+
+- **Move the files to the same place** in the new folder: `<Show>/Season NN/`, not loose
+  in it (a file drumdrop doesn't find where its record says, it takes for gone). An old
+  season folder left empty, or holding only other lessons' files, doesn't block anything.
+- **Set the old folder back only if you moved nothing.** A lesson whose files you did move
+  is then looked for in the old folder, and a *Delete* of it says deleted while its files
+  stay.
+- A library moved or remounted with its files (the old path is gone), and the same folder
+  under another spelling (a symlink, a bind path), work as before.
+- **Not covered yet** (BACKLOG D137): drumdrop can't see an old folder whose path is gone
+  while its files still exist elsewhere, such as an unmounted drive, or in Docker a library
+  moved by re-pointing the bind mount's host folder (the container path stays the same). A
+  *Delete* then says deleted and the files stay, as on earlier versions: move the files
+  first. The same goes for a lesson kept in downloads whose record still names season files
+  in the library. A re-download whose library placement *succeeds* after such a change
+  places a new copy under the new setting and leaves the old one where it was, recorded by
+  nothing, and so does a refused placement of a default-layout lesson whose folder is
+  outside both dirs now.
 
 Every download, with a library or without one, writes into a folder of its own, named after
 its job, `<downloads>/.drumdrop-in-progress/job-<id>/`, and only a finished one is placed
@@ -446,9 +459,10 @@ records the files still there, or, for a folder outside both dirs, the path it h
 delete answers with an error, and the detail goes to the server log. Deleting a follow with
 its files keeps the follow and all its lessons in that case, so no file is left that
 drumdrop no longer tracks. That also depends on the library setting pointing where the
-files are: a plex-tv lesson whose files stayed in the old folder after
-`DRUMDROP_LIBRARY_DIR` was pointed at another one can't be deleted until you move them to
-the new library folder or set the old one back. The delete answers so and removes nothing;
+files are: a lesson filed in a plex-tv season folder whose files stayed in the old folder
+after `DRUMDROP_LIBRARY_DIR` was pointed at another one can't be deleted until you move them
+to the same place in the new library folder (or set the old one back, if you moved
+nothing). The delete answers so before it stops any download, and removes nothing;
 for a follow with its files, nothing of any of its lessons, and the follow stays (see
 above).
 
@@ -516,7 +530,8 @@ Each course becomes one *show*, each lesson an *episode*:
   is. The record is kept relative to `DRUMDROP_LIBRARY_DIR` (`<Show>/Season 01/<entry>`), so
   it stays true if the library is mounted at another path or the setting is spelled another
   way. Point the setting at a different folder without moving the files, and drumdrop
-  refuses to delete the lesson or to fall back to downloads for it until they're moved (see
+  refuses to delete a lesson filed in a season folder, or to fall back to downloads for it,
+  until they're moved (see
   [Plex library](#plex-library-single-parent-bind-mount)). Whether a file is claimed is decided by the file itself, not its spelling: the same
   file reached under another name (a hard link, or another letter case on a
   case-insensitive disk, in the file's name or in any of its folders') counts as claimed

@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D138 on 2026-09-24 (*moves*; re-check the
+the highest ID on this page: the next new ID is D140 on 2026-09-25 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -42,7 +42,9 @@ added D132–D137, settled D129 by ruling (v), and corrected D58, D113, D128 and
 against its own code and the round-5f/5g seats' probes. The round-5i pass (same day and
 branch) built ruling (y), closed the round-5h security F1, and corrected D58, D101, D113,
 D128, D130, D135, D136 and D137 against its own code and the round-5h seats' probes; it
-added no entry._
+added no entry. The round-5j pass (2026-09-25, same branch) narrowed ruling (y)'s check to
+the lesson's own files, corrected D58, D113, D128 and D137 against its own code and the
+round-5i seats' reports, and added D138 and D139._
 
 ## Next up
 
@@ -157,9 +159,11 @@ D53 waits on an owner decision.
     (`TestWorkerPlacementWithoutALibraryLeavesTheFolderASymlinkLedTo`). (e) The library
     setting pointed at a different folder with the files not moved (recorded rows too,
     not only legacy ones): every reader looks for the season folder under the new
-    setting. Since round 5i (ruling (y)) a Delete and a refused placement's fallback
-    refuse while the old season folder is still there; a re-download whose placement
-    succeeds still leaves the old files claimed by nobody (D137).
+    setting. Since round 5i (ruling (y), narrowed by round 5j), for a lesson filed in a
+    season folder, a Delete and a refused placement's fallback refuse while one of the
+    lesson's own files is still in its old season folder; a re-download whose placement
+    succeeds still leaves the old files claimed by nobody, and a lesson kept in downloads
+    whose record names season files is not covered at all (D137).
   - *A library folder spelled another way is not seen by ruling (f)'s refusal*
     (round-5f/5g security review, N3; the same at `5cb8fbe`, before round 5f). The
     refusal asks `inLibrary` first, and its first test is lexical
@@ -479,21 +483,55 @@ D53 waits on an owner decision.
       rows (M4, M5), and a library moved down with the old folder now inside downloads
       (D1, D2);
     - nothing was ever deleted wrongly: no placement or delete reached the old folder.
-  - *Now (round 5i, owner ruling (y), 2026-09-24):* while a season-folder row's recorded
-    folder is still there and isn't the folder it is read as now (by path, or by
-    identity through `os.SameFile`: `library.Claims.LeftBehind`), `DELETE
+  - *Now (round 5i, owner ruling (y), 2026-09-24; narrowed by round 5j):* while one of a
+    season-folder row's own files (its record's entries, its video, or a legacy row's
+    episode names) is still in the folder it records, and that folder isn't the one it is
+    read as now (by path, then by identity through `os.SameFile`:
+    `library.Claims.LeftBehind`), `DELETE
     /api/lessons/{id}` answers 409 and removes nothing; `DELETE
     /api/follows/{id}?files=true` answers 409 and removes nothing of any of its lessons,
     and the follow stays (the refusal is known before the first removal, so the follow
     is never half deleted); and a refused library placement fails with `failLeftBehind`
     instead of falling back, the lesson staying downloaded with a note that says the fix
-    (move the files to the new library folder, or set the setting back). The moved-down
-    case (D1, D2) is refused too: the old folder is still there, wherever it now sits.
-    A library moved or remounted with its files (the old path is gone), another spelling
-    of the same folder (a symlink, a bind path), and nothing moved work as before.
-    `library.Remove` still refuses anything outside today's roots, so the delete does not
-    act on the old folder as `main` did.
+    (move the files to the same place in the new library folder). The moved-down case
+    (D1, D2) is refused too, wherever the old folder now sits. A library moved or
+    remounted with its files (the old path is gone), another spelling of the same folder
+    (a symlink, a bind path), nothing moved, and an old folder the lesson's files were
+    moved out of (emptied, as `rsync --remove-source-files` leaves it, or holding only
+    other lessons' files) work as before. Round 5j: the paths are compared before any
+    stat, so an unchanged setting reads nothing on disk; `ENOTDIR` counts as gone; an
+    old folder or file that can't be read still refuses (the delete's fixed 500, the
+    fallback's `failKeptInLibrary`), with the error in the log; and a delete refused
+    for either reason is refused before `Begin…Delete`, so it stops no download, drops
+    no queued job and records no intent (security round 5i S5), with the check after
+    Begin kept as a backstop. `library.Remove` still refuses anything outside today's
+    roots, so the delete does not act on the old folder as `main` did.
   - *Still open:*
+    - a lesson kept in downloads whose record still names season files in the library
+      (a refused plex-tv placement that fell back, ruling (i)): its output_dir is not a
+      season folder, so `LeftBehind` never asks, and its record is read under today's
+      library; after the setting moves, a Delete answers 200 "deleted" (a follow delete
+      204) and every season file stays, recorded by nothing (code round 5i, Medium 1,
+      probe P1). The row holds no absolute path to the old folder, so no check can see
+      it without the root recorded (the fix below);
+    - a path that is gone while the files exist elsewhere (security round 5i, S6): the
+      old library unmounted or renamed with the files in it, or, in Docker, the library
+      moved by re-pointing the bind mount's host folder while `DRUMDROP_LIBRARY_DIR`
+      stays the same (code Info 8). drumdrop sees nothing: a Delete says deleted and the
+      files stay, as on `main`. README says to move the files first;
+    - a copy kept in both folders (security round 5i, E2) is still refused, as its own
+      files are in the old folder. The refusal says to set the setting back only if
+      nothing moved: set back, a Delete removes the old copy and leaves the new one
+      recorded by nothing;
+    - a hung stat on an old folder that *differs* from today's has no bound (security
+      round 5i, S4): the handler parks while its lease renews, and the lesson (or the
+      follow's lessons) can't be downloaded, retried, skipped or deleted until the mount
+      answers. An unchanged setting reads nothing now. Bounding `os.Stat` is a new
+      mechanism (`os.Stat` takes no deadline); can wait;
+    - on Windows, a not-found answer other than `ERROR_FILE_NOT_FOUND` and
+      `ERROR_PATH_NOT_FOUND` (such as `ERROR_NOT_READY` for an empty drive) counts as
+      "can't read", so it refuses (security round 5i, S3; unverified, not run on
+      Windows);
     - a re-download whose library placement *succeeds* after the change places a new
       copy under the new setting and leaves the old one where it was, recorded by
       nothing, with no log line (security round 5h, S1 and S2);
@@ -511,10 +549,25 @@ D53 waits on an owner decision.
     and react when the setting changes (Sonarr refuses a changed root folder). That was
     ruling (y)'s declined option *Remember the library folder*: it fixes every reader,
     but needs its own design, so a later branch.
-  - *Evidence:* `grep -n 'func (c \*Claims) LeftBehind' -A13 internal/library/ownership.go`
-    · `go test -count=1 -run 'LeftBehind' ./internal/library/ ./internal/scheduler/ ./internal/server/`
+  - *Evidence:* `grep -n 'func (c \*Claims) LeftBehind' -A24 internal/library/ownership.go`
+    · `go test -count=1 -run 'LeftBehind|OwnFiles|CantRead|StopNothing|ChecksAgain' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     · `grep -n 'func previousFolder' -A21 internal/scheduler/place.go` (the lesson-folder
     case)
+- **D138 · Nothing checks a lesson note's length against the Lessons row's clamp.**
+  - *What:* the note under a lesson is clamped to two lines from 1280px (28rem) and three
+    below. The longest note the server writes is failMusora's, 147 characters; ruling
+    (y)'s round-5i note was 166 and fit at 1280px with 1.3px to spare, and a 168-character
+    variant was cut (round-5i UI review, 3). Only a browser measurement says whether a
+    new sentence fits; the full text is in the note's `title` (`web/src/pages/Lessons.tsx`).
+  - *Fix (new mechanism, can wait):* a length cap, or a test that measures the
+    scheduler's lesson sentences against the clamp. Engine: none.
+  - *Evidence:* `grep -E '^\s*(lesson:|kept:|msg[A-Za-z]+ +=)' internal/scheduler/messages.go | grep -o '"[^"]*"' | awk '{ print length($0)-2 }' | sort -rn | head -1`
+- **D139 · The Queue shows a failed job's sentence on one line, cut.**
+  - *What:* the job's error is cut to one line ("Couldn't put this lesson in the library:
+    its files a…"), like the older "…, so its co…"; the tooltip has the full text
+    (round-5i UI review, 5; `web/src/pages/Queue.tsx`).
+  - *Fix (can wait):* a two-line clamp, or a shorter job sentence. Needs a browser check.
+  - *Evidence:* `grep -n 'truncate\|line-clamp' web/src/pages/Queue.tsx`
 - **D122 · A partial copy at the recorded video's name counts as on disk after a crash.**
   - *What:* across filesystems a placement sets the old video aside, then copies the new
     one straight to its final name (`copyFileInto`, `O_EXCL`). If drumdrop dies mid-copy,
@@ -594,9 +647,9 @@ D53 waits on an owner decision.
     `TestWorkerPlexTvRefusedMoveKeepsALegacyEpisodeTheMoveLooksForElsewhere`). The trade,
     accepted: a legacy row whose episode files are all really gone is refused too while
     its library placement keeps failing, and syncs retry it. Since ruling (y) a moved-up
-    season row whose old folder is still there is refused before this rule is asked
-    (`failLeftBehind`, D137), so for season folders the rule is a second line, pinned on
-    its own by `TestKeptInLibraryDecidesByWhatTheRowRecords`.
+    season row whose own files are still in its old folder is refused before this rule
+    is asked (`failLeftBehind`, D137), so for season folders the rule is a second line,
+    pinned on its own by `TestKeptInLibraryDecidesByWhatTheRowRecords`.
   - *Refused (nothing lost: the attempt fails with `failKeptInLibrary`, and the old
     folder stays whole and recorded), on every* Download *press:*
     - the course folder changed too (the follow was retitled, or an instructor
@@ -2029,6 +2082,28 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       RowMenu comment says what the render-time reset buys, and the `overflow-anchor`
       comment is widened (a lesson starting mid-view pulled the view too, 2270→0) and
       records (x); the (w) and (t) tests each carry their own comment again (code Info 2).
+    - Round 5j's corrected lines (from the round-5i reviews; `05f5b92`, `1af417b`, `f505a41`
+      and the docs commit after them). `Claims.LeftBehind` asks for the
+      lesson's own files: an old season folder the files were moved out of (emptied, or
+      holding only a sibling's episode) no longer refuses, and a partial move or a copy
+      in both still does (UI 1b, security S1, code Low 4); it compares paths before any
+      stat (security S4), takes `ENOTDIR` for gone (S3b), and puts the error of a folder
+      it can't read in the log (S3a), which the delete answers with the fixed 500 and
+      the fallback with `failKeptInLibrary`. A delete refused for that, or because which
+      files are whose can't be read, is refused before `Begin…Delete`: no download
+      stopped, no queued job dropped, no intent written (security S5; UI 6); the check
+      after Begin stays, pinned by making the change while the delete stops the
+      download. The refusal says "to the same place in the new one" (UI 1a) and puts the
+      cause before the fix (UI 2); the delete dialogs offer "set it back if you moved
+      nothing", and the note and the job sentence offer only the move, which fits the
+      row (D138). The no-claims sentences now say "which files belong to which lesson",
+      true for a damaged record, a store error and an unreadable old folder alike. The
+      fail-closed arm is pinned (security S2, code Low 3), the follow test seeds the
+      left-behind lesson last (code Low 2), `UnskipLesson`'s comment no longer names the
+      removed `updateStatus` (code Info 6), and README scopes the promises to lessons
+      filed in a season folder and names what drumdrop can't see (code Medium 1, Info 8,
+      security S6). G1 stays as a second line (code Info 5). Still open: D137, D138,
+      D139.
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -2043,11 +2118,13 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     (web commits `3e04844`, `e4a71a2`, `909f7fb`, `b040729`, `6bb675c`)
     · round 5i: `go test -count=1 -run 'LeftBehind|TheMoveLooksForElsewhere|KeptInLibraryDecidesByWhatTheRowRecords|KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|DoesNotTakeAFileForTheLessonsFolder|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     and `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'gone in the same commit|takes itself out of scroll anchoring'`
+    · round 5j: `go test -count=1 -run 'LeftBehind|OwnFiles|OwnFileAlone|CantRead|StopNothing|ChecksAgain|WhileARecordIsDamaged|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
     the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
     web half and its rulings; D132–D134, from the round-5f/5g UI review; D135–D137,
-    from the round-5h fixes (D137 narrowed by round 5i to what ruling (y) leaves open);
+    from the round-5h fixes (D137 narrowed by rounds 5i and 5j to what ruling (y) leaves
+    open); D138 and D139, from the round-5i UI review;
     D95 (two processes on one database, and `--once`), D72 (merged subfolders are Windows
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
