@@ -681,12 +681,15 @@ Plex **chooses** a local image only if it is there when Plex first matches the s
 episode. Added later, it is only offered in the image picker. New shows and episodes are
 fine, since drumdrop places their files first. A show that was already in Plex before
 its files were written needs a one-time **"Plex Dance"** to be matched afresh. First
-pause drumdrop (**Pause** in the web UI) or stop its container, so no download re-creates
-the show's folder and no delete finds its files missing while it is away. Then move the
-show's folder out of the library folder, run *Scan Library Files*, *Empty Trash* and
-*Clean Bundles*, move the folder back, scan again, and resume drumdrop once the scan is
-done. An image you pick by hand in Plex
-is locked: Plex keeps it and ignores the local file from then on, until you unlock it.
+pause drumdrop (**Pause** in the web UI) and wait until the **Queue** shows no download
+running (Pause starts no new download, but the one in progress still finishes and is
+placed, which would re-create the show's folder), or stop its container. Don't delete
+lessons of that show meanwhile: Pause does not stop a delete, which would find the
+show's files missing while it is away. Then move the show's folder out of the library
+folder, run *Scan Library Files*, *Empty Trash* and *Clean Bundles*, move the folder
+back, scan again, and resume drumdrop once the scan is done. An image you pick by hand
+in Plex is locked: Plex keeps it and ignores the local file from then on, until you
+unlock it.
 
 The third-party [XBMCnfoTVImporter](https://github.com/gboudreau/XBMCnfoTVImporter.bundle)
 agent (last updated 2019) also reads these files, if you already use it.

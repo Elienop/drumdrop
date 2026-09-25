@@ -2179,14 +2179,32 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     "<title> [L]" of a lesson that is not a song, so when such a lesson is retitled to
     "<title>" its old title's video, image and nfo are kept and stay recorded beside the new
     download (a later delete removes them), where before the per-version files they went.
-    Only an old title still recorded with its `<episode> [L]-poster.jpg` (not yet renamed)
-    goes as before. The show-file step has no per-cycle memory of a show Musora answered
-    nothing for beyond the process: it is asked again after each restart. Two drumdrop
-    processes on one library each leave their own hidden temp file if they crash mid-write;
-    one of another process id stays (Plex ignores it).
+    This follows owner ruling #72 (e): after a title change the old title's video stays, and
+    the owner deletes it by hand (here it also stays recorded, so the lesson's Delete removes
+    it too). Only an old title still recorded with its `<episode> [L]-poster.jpg` (not yet
+    renamed) goes as before. The other way round, a lesson recorded as an ordinary one that
+    Musora now calls a song keeps its `<episode>.mp4` with its own `.jpg` and `.nfo`,
+    recorded, beside the versions the re-download brings. The show-file step has no per-cycle
+    memory of a show Musora answered nothing for beyond the process: it is asked again after
+    each restart. An empty image field, or an image URL drumdrop refuses (a scheme other
+    than https, no host name), leaves that slot empty for good once the show's `tvshow.nfo`
+    is written; delete `tvshow.nfo` to have the next cycle fill it again. An image URL with
+    no scheme at all is not final: that show gets no `tvshow.nfo` and is asked about again
+    every cycle (one Musora request each). Each writer's hidden temp file is its own, named
+    by host name and process id, since the image runs drumdrop as process 1 of every
+    container; two containers given one host name (a compose `hostname:`, host networking)
+    can still publish each other's unfinished file, so run a second drumdrop on the same
+    library with `docker exec` in the serve container. A writer that crashed mid-write
+    removes its own temp file next time; one left by a container since recreated stays (Plex
+    ignores it). The record swap's running-job guard (`SwapLibraryEntries`) misses a job
+    canceled while its worker is still placing: that needs two processes and a Cancel during
+    the placement, no file is lost, and the next re-download repairs the record. A real guard
+    needs a marker the worker writes when it ends, a new mechanism, so it is not built.
   - *Evidence:* `internal/scheduler/showfiles.go`, `internal/scheduler/episodefiles.go`,
     `episodeNames` and `recordedVersions` in `internal/scheduler/plexmove.go`,
-    `library.VersionEntry` · `TestAVersionIsKeptWhateverMusorasSongFlagSays`
+    `library.VersionEntry` · `TestAVersionIsKeptWhateverMusorasSongFlagSays`,
+    `TestALessonNowASongKeepsItsOwnVideosFiles`, `TestWriterID`,
+    `TestFetchJPEGAsksAgainForAURLWithNoScheme`
 
 - **D18 · Test coverage reaches SonarQube.** Branch `fix/sonar-gate-and-coverage`.
   - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of
