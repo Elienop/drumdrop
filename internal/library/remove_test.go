@@ -91,6 +91,27 @@ func TestRemoveUsesTheLongestRoot(t *testing.T) {
 	}
 }
 
+// TestRemoveRefusesARootInsideAnotherRoot covers a library folder inside the
+// downloads folder: removing the library folder itself is refused by name,
+// whichever order the roots come in, and not read as an entry of the outer
+// root, which would remove the whole library. A missing one is refused too,
+// never reported as removed.
+func TestRemoveRefusesARootInsideAnotherRoot(t *testing.T) {
+	tmp := t.TempDir()
+	dl := filepath.Join(tmp, "dl")
+	lib := filepath.Join(dl, "lib")
+	seedSeason(t, filepath.Join(lib, "Show", "Season 01"), "x.mp4")
+	gone := filepath.Join(dl, "gone")
+	for _, roots := range [][]string{{dl, lib, gone}, {gone, lib, dl}} {
+		for _, root := range []string{lib, gone} {
+			if err := Remove(roots, root); err == nil || !strings.Contains(err.Error(), "itself") {
+				t.Errorf("roots %v: Remove(%q) = %v, want the named refusal", roots, root, err)
+			}
+		}
+		assertExist(t, true, filepath.Join(lib, "Show", "Season 01", "x.mp4"))
+	}
+}
+
 // TestRemoveFindsTheRootUnderAnotherSpelling covers a record or a folder
 // written under another spelling of a root (a symlink to it, a second mount):
 // it is removed through the real root, by identity; a path outside every
@@ -110,8 +131,10 @@ func TestRemoveFindsTheRootUnderAnotherSpelling(t *testing.T) {
 		t.Fatalf("remove under an alias of the root: %v", err)
 	}
 	assertExist(t, false, filepath.Join(lib, "F", "05 - Lesson"))
-	if err := Remove([]string{lib}, alias); err == nil {
-		t.Error("removed the root through its alias, want a refusal")
+	// Refused by name, as the root itself is (TestRemoveConfinesTheRemoval),
+	// not only by os.Root's bare "invalid argument" for ".".
+	if err := Remove([]string{lib}, alias); err == nil || !strings.Contains(err.Error(), "itself") {
+		t.Errorf("Remove(an alias of the root) = %v, want the named refusal", err)
 	}
 	assertExist(t, true, lib)
 
