@@ -136,8 +136,9 @@ type Assignment struct {
 	SheetMusicImageURLs stringOrSlice `json:"sheet_music_image_url"`
 }
 
-// Instructor is one entry of a lesson's instructor[]. Slug, Biography and
-// CoachCardImage only feed a plex-tv show's own files (tvshow.nfo and its
+// Instructor is one entry of a lesson's instructor[]. Slug, Biography,
+// CoachCardImage and Thumbnail (the instructor's square photo,
+// thumbnail_url) only feed a plex-tv show's own files (tvshow.nfo and its
 // poster), so they decode loosely: a shape Musora changes reads as empty,
 // never as a failed lesson (hard rule 10).
 type Instructor struct {
@@ -145,6 +146,7 @@ type Instructor struct {
 	Slug           looseString `json:"slug"`
 	Biography      looseString `json:"biography"`
 	CoachCardImage looseString `json:"coach_card_image"`
+	Thumbnail      looseString `json:"thumbnail"`
 }
 
 // ParentContent is one entry of a lesson's parent_content_data: a course (or

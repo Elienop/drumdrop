@@ -90,8 +90,10 @@ func isWide(u string) bool {
 //   - poster: the document's square header image (a guided course); a song's
 //     own thumbnail (a song has no course, and its thumbnail is square); else
 //     the portrait coach card of the first instructor that has one; else the
-//     document's thumbnail, whatever its shape (Plex crops it), so a course
-//     whose instructors have no coach card still gets a poster;
+//     photo (thumbnail_url, square) of the first instructor that has one
+//     (the owner's "Photo, else crop", 2026-09-25); else the document's
+//     thumbnail, whatever its shape (Plex crops it), so a course whose
+//     instructors have neither still gets a poster;
 //   - fanart: the document's thumbnail when it is wide (a course's 16:9); a
 //     show with no wide image (a song, an instructor) gets none.
 //
@@ -113,6 +115,11 @@ func ShowArt(doc *Lesson) (poster, fanart string) {
 	for _, in := range doc.Instructors {
 		if in.CoachCardImage != "" {
 			return string(in.CoachCardImage), fanart
+		}
+	}
+	for _, in := range doc.Instructors {
+		if in.Thumbnail != "" {
+			return string(in.Thumbnail), fanart
 		}
 	}
 	return thumb, fanart

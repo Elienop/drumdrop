@@ -30,6 +30,7 @@ func TestResolveProjectsTheShowFields(t *testing.T) {
 		`'thumbnail': thumbnail.asset->url`,
 		`'type': _type`,
 		`"coach_card_image": coach_card_image.asset->url`,
+		`'thumbnail': thumbnail_url.asset->url`,
 		`"biography": short_bio[0].children[0].text`,
 		`'slug': slug.current`,
 		`"id": railcontent_id`,
@@ -50,7 +51,7 @@ func TestLessonDecodesShowFields(t *testing.T) {
 	const good = `[{"id":7,"title":"L","type":"guided-course",
 	  "header_image_url":"https://cdn.sanity.io/images/p/d/h-4500x4500.png",
 	  "parent_content_data":[{"id":455014,"title":"Kick, Snare, Hat"},{"id":"42","title":"Two"}],
-	  "instructor":[{"name":"Ash Soan","slug":"ash-soan","biography":"<p>Session drummer.</p>","coach_card_image":"https://cdn.sanity.io/images/p/d/c-1947x2832.png"}]}]`
+	  "instructor":[{"name":"Ash Soan","slug":"ash-soan","biography":"<p>Session drummer.</p>","coach_card_image":"https://cdn.sanity.io/images/p/d/c-1947x2832.png","thumbnail":"https://cdn.sanity.io/images/p/d/p-600x600.jpg"}]}]`
 	var res []Lesson
 	if err := json.Unmarshal([]byte(good), &res); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -59,14 +60,15 @@ func TestLessonDecodesShowFields(t *testing.T) {
 	in := l.Instructors[0]
 	if l.Type != "guided-course" || l.HeaderImageURL != "https://cdn.sanity.io/images/p/d/h-4500x4500.png" ||
 		l.ParentContentData[0].ID != 455014 || l.ParentContentData[1].ID != 42 || l.ParentContentData[0].Title != "Kick, Snare, Hat" ||
-		in.Slug != "ash-soan" || in.Biography != "<p>Session drummer.</p>" || in.CoachCardImage != "https://cdn.sanity.io/images/p/d/c-1947x2832.png" {
+		in.Slug != "ash-soan" || in.Biography != "<p>Session drummer.</p>" || in.CoachCardImage != "https://cdn.sanity.io/images/p/d/c-1947x2832.png" ||
+		in.Thumbnail != "https://cdn.sanity.io/images/p/d/p-600x600.jpg" {
 		t.Errorf("decoded %+v", l)
 	}
 
 	for _, odd := range []string{`null`, `12`, `{"a":1}`, `["x"]`, `true`, `"not-a-number"`, `1e99`} {
 		doc := `[{"id":7,"title":"L","type":` + odd + `,"header_image_url":` + odd +
 			`,"parent_content_data":[{"id":` + odd + `,"title":"P"}],"instructor":[{"name":"N","slug":` + odd +
-			`,"biography":` + odd + `,"coach_card_image":` + odd + `}]}]`
+			`,"biography":` + odd + `,"coach_card_image":` + odd + `,"thumbnail":` + odd + `}]}]`
 		var res []Lesson
 		if err := json.Unmarshal([]byte(doc), &res); err != nil {
 			t.Errorf("%s: decode failed: %v", odd, err)
@@ -77,8 +79,8 @@ func TestLessonDecodesShowFields(t *testing.T) {
 		if l.ID != 7 || l.ParentContentData[0].Title != "P" || in.Name != "N" {
 			t.Errorf("%s: the rest of the lesson was lost: %+v", odd, l)
 		}
-		if odd != `"not-a-number"` && (l.Type != "" || l.HeaderImageURL != "" || in.Slug != "" || in.Biography != "" || in.CoachCardImage != "") {
-			t.Errorf("%s: strings = %q %q %q %q %q, want all empty", odd, l.Type, l.HeaderImageURL, in.Slug, in.Biography, in.CoachCardImage)
+		if odd != `"not-a-number"` && (l.Type != "" || l.HeaderImageURL != "" || in.Slug != "" || in.Biography != "" || in.CoachCardImage != "" || in.Thumbnail != "") {
+			t.Errorf("%s: strings = %q %q %q %q %q %q, want all empty", odd, l.Type, l.HeaderImageURL, in.Slug, in.Biography, in.CoachCardImage, in.Thumbnail)
 		}
 		if l.ParentContentData[0].ID != 0 && odd != `12` {
 			t.Errorf("%s: parent id = %d, want 0", odd, l.ParentContentData[0].ID)
@@ -104,9 +106,10 @@ func TestJPEGURL(t *testing.T) {
 }
 
 // TestShowArt pins owner ruling #78, 2: the poster is a square header image,
-// else a song's own thumbnail, else the first instructor's coach card (else,
-// so a show is never left without one, the thumbnail); the background is a
-// wide thumbnail, and nothing when there is none.
+// else a song's own thumbnail, else the first instructor's coach card, else
+// the first instructor's photo (the owner's "Photo, else crop"), else, so a
+// show is never left without one, the thumbnail; the background is a wide
+// thumbnail, and nothing when there is none.
 func TestShowArt(t *testing.T) {
 	wide := sanityImage("t", "1920x1080", "png")
 	square := sanityImage("s", "1500x1500", "jpg")
@@ -114,7 +117,9 @@ func TestShowArt(t *testing.T) {
 	nearSquare := sanityImage("h", "1956x1916", "webp")
 	banner := sanityImage("b", "3640x1120", "webp")
 	coach := sanityImage("c", "1947x2832", "png")
-	withCoach := []Instructor{{Name: "No Card"}, {Name: "Ash Soan", CoachCardImage: looseString(coach)}}
+	photo := sanityImage("p", "600x600", "jpg")
+	withCoach := []Instructor{{Name: "No Card", Thumbnail: looseString(photo)}, {Name: "Ash Soan", CoachCardImage: looseString(coach)}}
+	photoOnly := []Instructor{{Name: "Nothing"}, {Name: "Photo", Thumbnail: looseString(photo)}}
 	for _, tc := range []struct {
 		name           string
 		doc            *Lesson
@@ -126,7 +131,9 @@ func TestShowArt(t *testing.T) {
 		{"wide header: the coach card", &Lesson{Thumbnail: wide, HeaderImageURL: looseString(banner), Instructors: withCoach}, coach, wide},
 		{"course: the coach card", &Lesson{Thumbnail: wide, Instructors: withCoach}, coach, wide},
 		{"song: its own thumbnail", &Lesson{Type: "song", Thumbnail: square, Instructors: withCoach}, square, ""},
-		{"no coach card: the thumbnail", &Lesson{Thumbnail: wide, Instructors: []Instructor{{Name: "No Card"}}}, wide, wide},
+		{"no coach card: the photo", &Lesson{Thumbnail: wide, HeaderImageURL: looseString(banner), Instructors: photoOnly}, photo, wide},
+		{"instructor: no coach card, the photo", &Lesson{Instructors: photoOnly[1:]}, photo, ""},
+		{"no coach card, no photo: the thumbnail", &Lesson{Thumbnail: wide, Instructors: []Instructor{{Name: "No Card"}}}, wide, wide},
 		{"square course thumbnail: no background", &Lesson{Thumbnail: square}, square, ""},
 		{"instructor: coach card, no background", &Lesson{Instructors: withCoach[1:]}, coach, ""},
 		{"size unknown: no background", &Lesson{Thumbnail: "https://example.com/t.png"}, "https://example.com/t.png", ""},
