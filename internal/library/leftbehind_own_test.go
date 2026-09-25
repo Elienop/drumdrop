@@ -104,26 +104,36 @@ func TestLeftBehindAsksForTheLessonsOwnFiles(t *testing.T) {
 // 7, security S4): read as a folder, a legacy row's listing would fail and
 // refuse with "couldn't read" instead.
 func TestLeftBehindReadsAPathThroughAFileAsGone(t *testing.T) {
-	for _, file := range []string{"the old library folder", "the season folder"} {
+	for _, c := range []struct {
+		name string
+		// file is the path made a regular file, given <tmp> and the old
+		// season folder.
+		file func(tmp, oldSeason string) string
+	}{
+		{"the old library folder", func(tmp, _ string) string { return filepath.Join(tmp, "old") }},
+		{"the season folder", func(_, oldSeason string) string { return oldSeason }},
+	} {
 		for _, recorded := range []bool{true, false} {
-			t.Run(file+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
+			t.Run(c.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
 				tmp, lib, oldSeason := movedLibrary(t)
 				seedSeason(t, filepath.Join(lib, "Show", "Season 01"), ownNames...)
-				path := filepath.Join(tmp, "old")
-				if file == "the season folder" {
-					path = oldSeason
-					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if err := os.WriteFile(path, []byte("not a folder"), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeNotAFolder(t, c.file(tmp, oldSeason))
 				if dir, left, err := leftBehind(t, lib, leftBehindRow(oldSeason, recorded)); left || err != nil {
 					t.Errorf("LeftBehind = %q, %v, %v; want false, no error", dir, left, err)
 				}
 			})
 		}
+	}
+}
+
+// writeNotAFolder makes path a regular file, making its parent folders.
+func writeNotAFolder(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a folder"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
