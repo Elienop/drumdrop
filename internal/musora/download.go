@@ -300,47 +300,75 @@ type auxFailure struct {
 // stopped, each remaining one fails at once instead of writing on.
 func fetchAuxArtifacts(ctx context.Context, l *Lesson, root *os.Root, dir, base string) []auxFailure {
 	var failures []auxFailure
-	record := func(artifact, url string, err error) {
-		if err != nil {
-			failures = append(failures, auxFailure{Artifact: artifact, URL: url, Err: err})
+	for _, f := range auxFetches(l, dir, base) {
+		if err := fetchToFile(ctx, f.url, root, f.dest); err != nil {
+			failures = append(failures, auxFailure{Artifact: f.artifact, URL: f.url, Err: err})
 		}
 	}
+	return failures
+}
 
+// auxFetch is one auxiliary artifact to fetch: its kind (as an auxFailure
+// names it), its URL, and the file it is written to, relative to the open root.
+type auxFetch struct {
+	artifact, url, dest string
+}
+
+// auxFetches lists a lesson's auxiliary artifacts in the order they are
+// fetched: the poster, the resources, the play-along stems, the sheet music.
+func auxFetches(l *Lesson, dir, base string) []auxFetch {
+	var out []auxFetch
 	if thumb := firstNonEmpty(l.Thumbnail, l.Video.PosterImageURL); thumb != "" {
-		record("poster", thumb, fetchToFile(ctx, thumb, root, filepath.Join(dir, base+"-poster.jpg")))
+		out = append(out, auxFetch{artifact: "poster", url: thumb, dest: filepath.Join(dir, base+"-poster.jpg")})
 	}
-	for _, r := range l.Resources {
+	out = append(out, resourceFetches(l.Resources, dir)...)
+	out = append(out, playAlongFetches(l, dir)...)
+	return append(out, sheetMusicFetches(l.Assignments, dir)...)
+}
+
+// resourceFetches lists the lesson's attached resources, skipping any without
+// a URL.
+func resourceFetches(resources []Resource, dir string) []auxFetch {
+	var out []auxFetch
+	for _, r := range resources {
 		if r.URL != "" {
 			// Node: sanitizeName(r.resource_name || r.resource_url.split('/').pop())
-			name := r.Name
-			if name == "" {
-				name = urlBasename(r.URL)
-			}
-			record("resource", r.URL, fetchToFile(ctx, r.URL, root, filepath.Join(dir, "resources", Sanitize(name))))
+			name := firstNonEmpty(r.Name, urlBasename(r.URL))
+			out = append(out, auxFetch{artifact: "resource", url: r.URL, dest: filepath.Join(dir, "resources", Sanitize(name))})
 		}
 	}
+	return out
+}
+
+// playAlongFetches lists the mp3 play-along stems the lesson has.
+func playAlongFetches(l *Lesson, dir string) []auxFetch {
 	mp3s := map[string]string{
 		"play-along (no drums, no click).mp3": l.Mp3NoDrumsNoClick,
 		"play-along (no drums, click).mp3":    l.Mp3NoDrumsYesClick,
 		"play-along (drums, no click).mp3":    l.Mp3YesDrumsNoClick,
 		"play-along (drums, click).mp3":       l.Mp3YesDrumsYesClick,
 	}
+	var out []auxFetch
 	for name, u := range mp3s {
 		if u != "" {
-			record("mp3", u, fetchToFile(ctx, u, root, filepath.Join(dir, "play-along", name)))
+			out = append(out, auxFetch{artifact: "mp3", url: u, dest: filepath.Join(dir, "play-along", name)})
 		}
 	}
+	return out
+}
+
+// sheetMusicFetches lists every sheet-music page of the lesson's assignments.
+// Songs carry multi-page sheet music (an array of page URLs); legacy lessons
+// carry a single page (a one-element slice). The number keeps counting across
+// pages and assignments so every file is uniquely numbered, and a (pN) page
+// suffix is added only for multi-page assignments — single-page names stay
+// byte-for-byte identical to before. An empty page URL is skipped and takes
+// no number.
+func sheetMusicFetches(assignments []Assignment, dir string) []auxFetch {
+	var out []auxFetch
 	sheetNo := 0
-	for _, a := range l.Assignments {
-		title := a.Title
-		if title == "" {
-			title = "assignment"
-		}
-		// Songs carry multi-page sheet music (an array of page URLs); legacy
-		// lessons carry a single page (a one-element slice). sheetNo keeps counting
-		// across pages and assignments so every file is uniquely numbered, and a
-		// (pN) page suffix is added only for multi-page assignments — single-page
-		// names stay byte-for-byte identical to before.
+	for _, a := range assignments {
+		title := Sanitize(firstNonEmpty(a.Title, "assignment"))
 		pages := a.SheetMusicImageURLs
 		for pi, u := range pages {
 			if u == "" {
@@ -349,14 +377,14 @@ func fetchAuxArtifacts(ctx context.Context, l *Lesson, root *os.Root, dir, base 
 			sheetNo++
 			// Node: ext = url.split('?')[0].split('.').pop() (|| 'png'), .slice(0,4)
 			ext := sheetExt(u)
-			name := fmt.Sprintf("%02d - %s.%s", sheetNo, Sanitize(title), ext)
+			name := fmt.Sprintf("%02d - %s.%s", sheetNo, title, ext)
 			if len(pages) > 1 {
-				name = fmt.Sprintf("%02d - %s (p%d).%s", sheetNo, Sanitize(title), pi+1, ext)
+				name = fmt.Sprintf("%02d - %s (p%d).%s", sheetNo, title, pi+1, ext)
 			}
-			record("sheet-music", u, fetchToFile(ctx, u, root, filepath.Join(dir, "sheet-music", name)))
+			out = append(out, auxFetch{artifact: "sheet-music", url: u, dest: filepath.Join(dir, "sheet-music", name)})
 		}
 	}
-	return failures
+	return out
 }
 
 // DownloadLesson downloads video (yt-dlp) + resources/stems/sheet-music/poster + writes NFO.

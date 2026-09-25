@@ -61,8 +61,12 @@ onboarding session's proposal, not an owner ruling; the owner may reorder.
   - *What:* `go.mod` pins `go 1.26.3`, and CI and the release binaries build on exactly that
     version (setup-go reads `go-version-file`). `govulncheck` finds standard-library
     vulnerabilities that drumdrop's code actually reaches, in `net/http`, `crypto/tls`,
-    `crypto/x509`, `net/url`, `net/textproto` and `encoding/asn1`. All are fixed by go1.26.6
-    (8 on 2026-09-23, *moves*).
+    `crypto/x509`, `net/url`, `net/textproto`, `encoding/asn1` and `os`. All are fixed by
+    go1.26.6 (9 on 2026-09-25, *moves*). The `os` one, GO-2026-4970, is an `os.Root` escape
+    through a final symlink when the path ends in `/` (fixed in go1.26.5). The library
+    placement guards are built on `os.Root`; drumdrop's paths never end in `/`
+    (`filepath.Join` strips it), so it isn't reachable that way today, but it is the one
+    closest to the guards.
   - *Why:* drumdrop is a network server (the HTTP API) and a TLS client (Musora, soundslice,
     YouTube). These are the packages it uses for both. The fix should be a version bump plus
     the normal gates, not a code change. While you're there, the Dockerfile's Go stage uses
@@ -925,9 +929,12 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'Copy path' web/src/pages/Lessons.tsx`
 - **D71 · Touch targets are under 44px.**
   - *What:* row buttons are 32px, *Actions* 36px, dialog buttons 36px: shadcn's default
-    density (round-3 UI review, P18).
+    density (round-3 UI review, P18). A failure toast's close × is 20px (sonner's own
+    stylesheet), and for a toast that stays until closed it is the only visible way to close
+    it on a phone (a swipe works too, but nothing shows that).
   - *Why:* below the usual 44px minimum for touch.
-  - *Evidence:* `grep -n 'h-8\|h-9\|size-8\|size-9' web/src/components/ui/button.tsx`
+  - *Evidence:* `grep -n 'h-8\|h-9\|size-8\|size-9' web/src/components/ui/button.tsx` ·
+    `grep -n 'close-button' web/node_modules/sonner/dist/styles.css`
 - **D91 · PlayBass's name in the UI is unconfirmed.**
   - *What:* the UI names a brand as Musora does: Drumeo, Pianote, Guitareo, Singeo (the
     add dialog's preview ends "… lessons on Pianote"). For `playbass` no spelling is
@@ -1303,17 +1310,21 @@ D53 waits on an owner decision.
   - *Detail:* `drumdrop-song-soundslice-video.md`.
 
 - **D12 · Fix the open SonarQube findings.**
-  - *What:* the only analysis so far (2026-08-15, of `1c2dbda`) left 67 open issues (*moves*).
-    Most are cognitive complexity (`go:S3776`, mostly in test files), read-only props
-    (`typescript:S6759`), nested ternaries (`typescript:S3358`) and repeated strings
-    (`go:S1192`). Two are accessibility: `ProgressRow` uses a `progressbar` role instead of
-    `<progress>` (S6819), and `Dashboard.tsx` puts `tabIndex` on an element that isn't
-    interactive (S6845, also the one reliability issue).
+  - *What:* the latest analysis of `main` (2026-09-25, `344ee1f` = v0.8.0) has 43 open issues
+    (*moves*), down from 67 at `1c2dbda`. Most are cognitive complexity (`go:S3776` ×12) and
+    read-only props (`typescript:S6759` ×12), then nested ternaries (`typescript:S3358` ×4).
+    One is accessibility: `ProgressRow` uses a `progressbar` role instead of `<progress>`
+    (S6819). Branch `fix/sonar-gate-and-coverage` fixes the five that `main`'s gate counts as
+    new code: three `go:S3776`, `StatusBadge`'s props, and `Dashboard.tsx`'s focusable span
+    (S6845, which was the one reliability issue), and the 4 in `web/src/test/` (D30). Its
+    branch scan at `96eed52` has 34 open (*moves*), so 34 should remain after its release.
   - *Why:* the owner's standing rule is that Sonar findings get fixed: no false-positive
-    marking, no rule deactivation, no custom profile (decisions #3 in the vault). The two
-    accessibility findings are real problems for keyboard and screen-reader users.
+    marking, no rule deactivation, no custom profile (decisions #3 in the vault). The
+    accessibility finding is a real problem for screen-reader users. Leaving the rest open
+    also costs the gate. An older issue on a line a PR changes counts as new code, which is how
+    v0.8.0's scan got `new_violations` 5.
   - *Evidence:* `sonar-issues --all` (read-only)
-  - *Detail:* vault note drumdrop-sonarqube. The 5 findings in `web/src/test/` wait on D30.
+  - *Detail:* vault note drumdrop-sonarqube.
 
 - **D13 · Status colours bypass the design tokens.**
   - *What:* `web/src/index.css` defines the shadcn base tokens (including `--destructive`)
@@ -1369,13 +1380,141 @@ D53 waits on an owner decision.
     match) · `authorized` and `isLoopbackAddr` in `internal/server/auth.go`
   - *Detail:* vault note drumdrop-auth-posture, §3.
 
+- **D142 · A sync button that gets blocked drops keyboard focus.**
+  - *What:* on the Dashboard, when Run sync or Dry-run gets a 503 from the server, the pressed
+    `PendingButton` is replaced by the blocked control. The two are different components at
+    the same place, so React mounts a new `<button>`, and keyboard focus falls to `<body>`. No
+    ring shows, a second Enter does nothing, and a screen reader loses its place. Measured in
+    Orca's Chromium (2026-09-25): the next Tab lands on the new blocked button itself, because
+    the browser keeps a starting point where the removed node was. Firefox and Safari were not
+    measured. It predates branch `fix/sonar-gate-and-coverage`, which made the blocked control
+    focusable (S6845).
+  - *Fix, sketched by that branch's UI review seat:* one component path in both states. The
+    wrapper, `Tooltip` and `TooltipTrigger asChild` are always rendered around a
+    `PendingButton`, with the tooltip held shut while unblocked (Radix's controlled
+    `open`/`onOpenChange`). `PendingButton` then needs a blocked state it can't express today:
+    it sets `aria-disabled` after the caller's props, and its `aria-disabled:cursor-progress`
+    would give a blocked button a busy cursor. That also folds the Dashboard's local
+    blocked-button recipe (`BLOCKED_RING`, the per-variant `BLOCKED` map, the click guards)
+    into the shared component instead of forking the button system. Accepted side effect:
+    after the 503 the focused button doesn't open its tooltip, since no new focus event fires;
+    the toast carries the reason.
+  - *Why:* losing focus breaks WCAG 2.4.3 (focus order).
+  - *Evidence:* `SyncButton`'s two return branches in `web/src/pages/Dashboard.tsx` · the
+    comment "The pressed node was replaced, so focus starts from the page." in
+    `web/src/pages/Dashboard.test.tsx` (it encodes jsdom, which restarts from the top)
+
+- **D143 · A blocked sync button says why only after a press, and stays blocked.**
+  - *What:* when Run sync or Dry-run is blocked (the server has no daemon or planner
+    attached):
+    - its reason shows in the press's toast, which stays until closed (since
+      `fix/sonar-gate-and-coverage`, on the owner's choice: *"Use the server's sentence"*),
+      and once that is closed, only in a tooltip. Escape hides that, touch can't open it by
+      hovering (whether a tap focuses the button, which would open it, is unmeasured), and a
+      screen reader hears it only while it is open (Radix sets `aria-describedby` only then);
+    - the user learns about the block only by pressing the button;
+    - the block lasts until the page remounts, even if the server restarts with a daemon.
+
+    The summary DTO already carries `paused` (`web/src/types.ts:62`); a daemon or planner
+    presence field would let the buttons show blocked from the start. TopBar's Pause meets the
+    same 503 differently: it stays live and toasts on every press. Since these toasts stay
+    until closed, repeats pile up: leaving the Dashboard and coming back makes the buttons
+    live again, and each new press, and each Pause, adds another. sonner already updates a
+    toast in place when given an id it has (`toast(…, { id })`), so a fixed id per sentence
+    would stop it; that is a new parameter on `failureToast`, so it waits here.
+  - *Why:* rare in practice, since `drumdrop serve` always attaches its daemon. The owner chose
+    to record it for later (2026-09-25, *"Record it for later"*), rather than add a visible
+    line beside the buttons on `fix/sonar-gate-and-coverage`.
+  - *Also:* "only DrumDrop's own 503 blocks" holds by the body's shape, not its origin:
+    `fromServer` is set for any JSON error body with a string `error`
+    (`web/src/lib/api.ts`), so a gateway answering 503 in that shape would block the button
+    and show its sentence, as text. Most proxies send HTML, plain text or nothing. A
+    DrumDrop-only marker would be a new mechanism, so it waits here (security seat of
+    `fix/sonar-gate-and-coverage`).
+  - *Evidence:* `nothingAttached` and `SyncButton` in `web/src/pages/Dashboard.tsx` · the
+    `toggle` mutation's `onError` in `web/src/components/app-shell/TopBar.tsx`
+
+- **D144 · The Queue's job-error tooltip can't be reached by keyboard.**
+  - *What:* the full error of a failed job shows in a tooltip whose trigger is a truncated
+    `<span>` that can't take focus (`web/src/pages/Queue.tsx:258-262`). A keyboard user sees
+    only the truncated text.
+  - *Why:* keyboard and screen-reader users lose the error text. The fix must not be a
+    `tabIndex` on a span, which is SonarQube's S6845.
+  - *Evidence:* the trigger in `Queue.tsx`; found by the UI review seat of
+    `fix/sonar-gate-and-coverage`
+
+- **D145 · No focus indicator in forced-colours mode.**
+  - *What:* Tailwind 4's `outline-none` sets `outline-style: none`, and the app draws focus with
+    `box-shadow` rings, which forced-colours mode (Windows High Contrast) removes. So buttons,
+    inputs, checkboxes, select triggers and the blocked sync buttons' wrapper ring show no
+    focus there. Two kinds do: menu and select items use `outline-hidden`, which Tailwind 4
+    turns into a transparent outline that forced colours repaint, and tab triggers draw a
+    real 1px outline.
+  - *Why:* minor for this owner, but a real accessibility gap. The usual fix is an
+    `outline` that stays transparent until forced colours are on.
+  - *Evidence:* `grep -rn 'outline-none\|outline-hidden\|outline-1' web/src/components/ui`
+
 ## Housekeeping & dependencies
+
+- **D146 · The release job installs the web dependencies while holding a write token.**
+  - *What:* goreleaser's before-hook runs `npm --prefix web ci` (`.goreleaser.yaml:8`) inside
+    a step whose environment holds `GITHUB_TOKEN`, with contents and packages write
+    (`.github/workflows/main.yml`). Any npm install script then runs beside that token. Today
+    only esbuild, msw and fsevents have one: msw's does nothing here, and fsevents is
+    macOS-only.
+    The same hook list then runs the build (`npm --prefix web run build`,
+    `.goreleaser.yaml:9`), which executes dependency code (tsc, vite, rollup, esbuild,
+    Tailwind's native module, every Vite plugin) beside the same token. And the token is
+    already on disk before the hooks run: `actions/checkout` keeps its credentials by default
+    (`persist-credentials: true`), and the registry login lasts the job.
+  - *Options:* npm's own `--ignore-scripts` on the hook narrows this but doesn't close it
+    (the build and the token on disk remain); the security seat measured `npm ci
+    --ignore-scripts` then `npm run build` to give byte-identical JS and CSS locally (Node 26;
+    one CI run would confirm). Only building `web/dist` in a separate read-only job, handed
+    over as an artifact, closes all three routes.
+  - *Why:* supply-chain hardening. No package added so far has an install script, and the
+    security seat of `fix/sonar-gate-and-coverage` found this, not introduced by it.
+  - *Evidence:* `grep -n 'npm' .goreleaser.yaml` · `grep -n -A3 'permissions' .github/workflows/main.yml`
+
+- **D147 · `make coverage` can leave the previous run's reports behind.**
+  - *What:* when the Go tests fail, the target stops before the web half, so the earlier
+    `web/coverage/lcov.info` stays on disk. The `sonar-scan` wrapper aborts on the failure, but
+    its own hint, `SONAR_SKIP_COVERAGE=1`, would then upload this run's Go profile with the
+    previous run's web coverage. vitest empties `web/coverage/` only when the web half runs.
+  - *Fix:* start the target by removing the report files. That is a new step, so it waits
+    here (the vault's BEHAVIOR §12).
+  - *Evidence:* the `coverage:` target in `Makefile`
+
+- **D151 · A failed resource download logs its full URL.**
+  - *What:* when a lesson's PDF, play-along or sheet-music fetch fails, the download writes
+    the whole URL to stderr (`internal/musora/download.go`, the loop over
+    `fetchAuxArtifacts`). Whether Musora's resource URLs carry a signature or token in the
+    query string, which would make a logged URL usable by whoever reads the log, has not been
+    checked.
+  - *To do:* check a real resource URL's shape (from `internal/musora/`, never the `*.har`
+    files). If it carries one, log the URL without its query.
+  - *Why:* container logs outlive the request, and the image runs on the owner's NAS.
+  - *Evidence:* `grep -n 'failed to fetch' internal/musora/download.go`; found by the security
+    seat of `fix/sonar-gate-and-coverage` (it predates the branch)
+
+- **D152 · Commands without flags ignore `-h`, and `logout --help` logs out.**
+  - *What:* `login`, `whoami`, `logout` and `follows` never parse their arguments, and
+    `unfollow` reads only its first. So `drumdrop logout --help` removes the saved session
+    and credentials, `drumdrop login -h` asks for an email, and `drumdrop whoami -h` fails
+    when logged out. Commands with flags answer `-h` with their usage and exit 0 (fixed on
+    `fix/sonar-gate-and-coverage`).
+  - *Fix:* Go's flag package already does this: an empty `flag.NewFlagSet("drumdrop logout",
+    flag.ContinueOnError)` parsed before each such command prints its usage for `-h` and
+    rejects an unknown flag. That last part changes behaviour (today any extra argument is
+    ignored), so it waits for the owner.
+  - *Evidence:* `cmdLogin`, `cmdWhoami`, `cmdLogout`, `cmdFollows`, `cmdUnfollow` in
+    `cmd/drumdrop/`; found by the fix round of that branch
 
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
     (`node:20-alpine`) still build on Node 20. `web/package.json` has no `engines` field.
-    Local development already runs a much newer Node, where the tests only pass thanks to a
-    `localStorage` polyfill in `web/src/test/setup.ts`.
+    Local development already runs a much newer Node. The tests run the same on both, because
+    `web/src/test/jsdom-shims.ts` installs its in-memory `localStorage` unconditionally.
   - *Why:* an end-of-life runtime gets no security fixes, and the build environment has
     drifted away from the development one.
   - *Evidence:* `grep -rn node-version .github/workflows` · `grep -n 'node:' Dockerfile` · `node --version`
@@ -1383,39 +1522,21 @@ D53 waits on an owner decision.
 
 - **D17 · npm: dev-tool advisories and majors behind.**
   - *What:* besides react-router (D2), `npm audit` reports advisories in the build and test
-    tools, plus transitive ones (11 findings in total on 2026-09-23, *moves*). They include a
+    tools, plus transitive ones (12 findings in total on 2026-09-25, *moves*). They include a
     critical one in vitest 2.x (the fix is vitest 5, a breaking upgrade) and one in vite ≤6.4.2
     (fixed inside v6). Several majors are behind: vite 6 → 8, vitest 2 → 5, TypeScript 5.9 → 7,
     lucide-react 0.x → 1.x, sonner 1 → 2, tailwind-merge 2 → 3, jsdom 25 → 30 and
     @vitejs/plugin-react 4 → 6. Nothing tracks this automatically (D31).
   - *Why:* dev-only advisories don't ship to users, but they run on the developer machine and
-    in CI, and the longer the majors wait, the bigger the eventual jump. The vitest major also
-    gates the coverage wiring (D18).
-  - *Evidence:* `cd web && npm audit` · `cd web && npm outdated`
-
-- **D18 · Wire test coverage into SonarQube.**
-  - *What:* there's no `make coverage` target, so `sonar-scan` uploads no coverage and the scan
-    reports 0%. SpenDrop is the template. It has a Makefile `coverage:` target (a Go cover
-    profile and `go test -json`, plus vitest lcov and a test-execution report), the report
-    paths in `sonar-project.properties`, `sonar.coverage.exclusions` for entry points that
-    can't be tested, and the report files in `.gitignore`. First check whether vitest 2.x
-    supports the reporter and `@vitest/coverage-v8`, or whether D17's upgrade has to come
-    first.
-  - *Why:* the "Sonar way" quality gate has a coverage condition on new code. At 0%, the first
-    scan that includes new lines will fail it. Until then the gate passes only because it has
-    nothing to check.
-  - *Evidence:* `grep -n '^coverage:' Makefile` (no match) · the commented coverage lines in
-    `sonar-project.properties`
-  - *Detail:* vault note drumdrop-sonarqube.
-
-- **D19 · Rescan DrumDrop in SonarQube once.**
-  - *What:* the project has only ever had one analysis (2026-08-15). The server has been
-    upgraded since then and the TypeScript/JS/CSS rule sets have changed, so D12's numbers
-    will shift. Best done right after D18, so the new baseline includes real coverage.
-  - *Why:* fixing D12 against stale numbers wastes effort.
-  - *Needs:* the owner's OK, because a scan writes to the Sonar server.
-  - *Evidence:* the header of `sonar-issues --all` · run `sonar-scan` from the repo root
-  - *Detail:* vault note drumdrop-sonarqube.
+    in CI, and the longer the majors wait, the bigger the eventual jump. Coverage (D18) runs on
+    vitest 2.1: `@vitest/coverage-v8` is pinned to 2.1.9, which peers exactly vitest 2.1.9, so a
+    vitest upgrade moves both together. `npm audit` also lists `@vitest/coverage-v8` as
+    critical, through vitest's own advisory. That coverage also reports line 1 of a module that
+    imports anything as never run (46 of 51 files on 2026-09-25, *moves*), so a new file's
+    first line counts against new-code coverage. Whether a newer `@vitest/coverage-v8` fixes
+    it is unchecked.
+  - *Evidence:* `cd web && npm audit` · `cd web && npm outdated` · after `make coverage`,
+    `awk '/^SF:/{f=$0} /^DA:1,0$/{print f}' web/coverage/lcov.info | wc -l`
 
 - **D20 · `make test` is weaker than CI.**
   - *What:* `make test` is `go test ./...`, which is cached and runs without `-race`. CI runs
@@ -1437,17 +1558,17 @@ D53 waits on an owner decision.
   - *Evidence:* `cd web && npx vitest run`
 
 - **D22 · Local clean-up, in this checkout only.**
-  - *What:* this checkout has:
-    - a stale 16 MB `./drumdrop` binary, built 2026-05-31 with version `dev`, before 11 later
-      commits to `cmd/` and `internal/`;
-    - a `web/dist` built on 2026-06-01 at 18:50, while #11 was being finished. Its timestamps
-      make it look older than #11, but the bundle already holds #11's UI ("Edit follow", the
-      `PATCH` call in `updateFollow`), and no web change has landed since
-      (`git log ad6afd6..HEAD -- web/` is empty), so it is probably current. Run
-      `make build-ui` to be sure before relying on a bare `go build -tags webui`;
-    - empty `downloads/` and `.claude/worktrees/` folders;
-    - five `origin/*` remote-tracking refs for branches that are already deleted on GitHub
-      (`git fetch --prune` drops them).
+  - *What:* this checkout has a stale 16 MB `./drumdrop` binary, built 2026-05-31 with version
+    `dev`, long before v0.8.0, and an empty `downloads/` folder. The rest was cleared on
+    2026-09-25, after v0.8.0 merged:
+    - the 42 agent worktrees under `.claude/worktrees/` and their 42 branches, each checked
+      first for uncommitted work and for commits missing from the merged code;
+    - the stale `origin/*` refs (`git fetch --prune`).
+
+    `web/dist` is rebuilt only by `npm run build` or `make build-ui`; the gate (the project
+    rules' hard rule 1, and `ci.yml`) doesn't build it. So run `make build-ui` before a bare
+    `go build -tags webui`. New agent worktrees keep appearing
+    under `.claude/worktrees/` while a branch is being built.
   - *Why:* stale artefacts get run or embedded by mistake. They're all gitignored or local, so
     none of them affects the repo. Read before deleting anything.
   - *Evidence:* `ls -la drumdrop downloads .claude/worktrees web/dist` · `git branch -r` compared
@@ -1703,13 +1824,14 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     `gh release list -R mathieudutour/github-tag-action --limit 3`
 
 - **D29 · Keep `web/src/components/ui/**` out of SonarQube?**
-  - *What:* the 13 vendored shadcn primitives are excluded from analysis. SpenDrop's test is
-    that an edited primitive has become our code and should be analysed. SpenDrop analyses
-    its copy for that reason (more than half of its primitives had been edited); MusicDrop
-    excludes its folder. Here, one file is edited: `sonner.tsx`. In PR #6, commit `5f1541c`
-    removed its theme lookup (next-themes) and hardcoded `theme="dark"`, because the app is
-    dark-only (the comment at the top of the file). In their PRs' own commits the other 12
-    were added once and never changed.
+  - *What:* the 14 vendored shadcn primitives (plus `sonner.test.tsx`) are excluded from
+    analysis. SpenDrop's test is that an edited primitive has become our code and should be
+    analysed. SpenDrop analyses its copy for that reason (more than half of its primitives
+    had been edited); MusicDrop excludes its folder. Here, 9 of the 14 now carry a
+    `LOCAL EDIT` comment: alert-dialog, badge, button, checkbox, dialog, input, select,
+    sonner and tabs (*moves*). The first was `sonner.tsx`: in PR #6, commit `5f1541c` removed
+    its theme lookup (next-themes) and hardcoded `theme="dark"`, because the app is dark-only.
+    When this entry was first written, that was the only edit.
   - *How to check, and how not to:* `git log` on main can't show an edit like that. PRs are
     squash-merged, so main has one "added" line per file and hides whatever happened on the
     PR branch. That is how this board and `sonar-project.properties` first said "none has
@@ -1717,28 +1839,22 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     shadcn registry. The registry diff is the stronger check, because it also catches an edit
     made before a file's first commit; it hasn't been run.
   - *Options:* (a) keep excluding the whole folder, accepting that one edited file goes
-    unanalysed. (b) exclude only the 12 unedited files by name and let Sonar analyse
-    `sonner.tsx`. (c) analyse the whole folder, SpenDrop's choice.
-  - *To weigh:* (b) applies SpenDrop's test exactly, but the list of 12 then has to be updated
+    unanalysed. (b) exclude only the unedited files by name (5 today) and let Sonar analyse
+    the edited ones. (c) analyse the whole folder, SpenDrop's choice.
+  - *To weigh:* (b) applies SpenDrop's test exactly, but the list then has to be updated
     by hand whenever a primitive is edited or added. (c) needs no list, but under decisions #3
     every finding in vendored code then has to be fixed, not marked.
   - *Why it's the owner's:* what Sonar sees is the owner's call under decisions #3. The reason
-    and the check are written in `sonar-project.properties`.
-  - *Evidence:* `gh api repos/elienop/drumdrop/pulls/6/commits --jq '.[].sha'`, then
+    and the check are written in `sonar-project.properties`. The owner's 2026-09-25 ruling on
+    coverage (decisions #75, *"no work around sonarqube find fixes instead"*) may bear on it;
+    whether it also covers what Sonar analyses is the owner's to say.
+  - *Evidence:* `grep -l "LOCAL EDIT" web/src/components/ui/*` ·
+    `gh api repos/elienop/drumdrop/pulls/6/commits --jq '.[].sha'`, then
     `gh api repos/elienop/drumdrop/commits/<sha> --jq '.files[].filename'` for each; the
     folder came in through #6, #8 and #11 ·
     `gh api repos/elienop/drumdrop/commits/5f1541c --jq '.files[] | select(.filename|endswith("sonner.tsx")) | .patch'` ·
     not `git log -- web/src/components/ui` on main, which shows only `A` lines whatever
     happened on the PR branches
-
-- **D30 · The 5 SonarQube findings in `web/src/test/`: fix them, or exclude the folder?**
-  - *What:* `msw.ts` and `setup.ts` are test infrastructure, but Sonar analyses them as source,
-    and they carry 5 open findings.
-  - *Options:* (a) fix the 5 and add `web/src/test/**` only to `sonar.coverage.exclusions`
-    (MusicDrop's pattern). This is the recommended one. (b) Add the folder to
-    `sonar.exclusions` (SpenDrop's pattern). That makes the 5 disappear without fixing them,
-    which decisions #3 treats as hiding code from the rules.
-  - *Evidence:* `sonar-issues --all | grep web/src/test`
 
 - **D31 · Turn on Dependabot and vulnerability alerts?**
   - *What:* there's no `.github/dependabot.yml`, and the repo's vulnerability alerts are off
@@ -1773,6 +1889,26 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Options:* keep it for setups without a library, or retire it.
   - *Evidence:* `hostPath` in `internal/server/dto.go` · `grep -rn HOST_DOWNLOADS --include=*.go --include=*.yml .`
   - *Detail:* `musora-downloader-project.md`.
+
+- **D149 · The status badges' tone borders differ in strength.**
+  - *What:* since D148, each status badge draws its tone's border at the same alpha
+    (`web/src/components/StatusBadge.tsx`), which reads unevenly against the page: amber
+    (downloading, running, deleting) about 2.6:1, emerald (done) 1.9:1, red (failed) and zinc
+    (queued) about 1.5:1. In-progress pills look outlined, failed ones soft.
+  - *Why it's the owner's:* a visual tuning call. All four beat the grey rim they had before
+    (1.0 to 1.2:1 against their own fill).
+  - *Evidence:* the tone classes in `StatusBadge.tsx`; measured by the UI review seat of
+    `fix/sonar-gate-and-coverage`
+
+- **D150 · The border token is faint where it is a control's only edge.**
+  - *What:* `--border` and `--input` (`oklch(0.3 0 0)`) are 1.38:1 against the background and
+    1.30:1 against cards. For an unchecked checkbox or an empty input, that border is the
+    control's only visible edge, and WCAG 1.4.11 asks 3:1 for the parts that identify a
+    control.
+  - *Why it's the owner's:* it is a theme token; raising it changes every card, table and
+    dialog border too, unless the controls get their own token.
+  - *Evidence:* the tokens in `web/src/index.css`; found by the UI review seat of
+    `fix/sonar-gate-and-coverage` (it predates the branch)
 
 ## Accepted residuals and deliberate decisions (not work)
 
@@ -1922,6 +2058,72 @@ lease holder token goes into the unreleased migration 004 (before this branch me
 
 ## Recently shipped
 
+- **D18 · Test coverage reaches SonarQube.** Branch `fix/sonar-gate-and-coverage`.
+  - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of
+    `main`, the first with new code since v0.7.1, failed the gate's new-code coverage condition
+    (0 against 80), and would have failed it on every release.
+  - *Now:* `make coverage` writes three reports: the Go cover profile (`coverage.out`), the
+    `go test -json` stream (`go-test-report.json`) and vitest's v8 lcov
+    (`web/coverage/lcov.info`). `sonar-scan` runs it before each upload, and a failing test
+    fails it. `sonar-project.properties` names the three files and excludes nothing from
+    coverage: the owner's ruling on 2026-09-25 (decisions #75) was *"no work around sonarqube
+    find fixes instead"*. So the code that was hard to test was made testable:
+    - `main` hands the command line to `run(args, stdout, stderr)`, which the tests drive;
+      only `main()`'s own `os.Exit` line is left unrun;
+    - the Musora test fake (`internal/musora/musoratest`) has tests of its own;
+    - the vitest setup moved into `web/src/test/jsdom-shims.ts` and `msw.ts`, which coverage
+      sees (it leaves setup files out), and installs the same stand-ins on every Node (D30).
+
+    `web/src/main.tsx` and `web/vite.config.ts` have no tests and stay uncovered. lcov
+    doesn't list `vite.config.ts` (coverage takes `src/**`); Sonar counted it at 0 of 2 lines
+    in a branch scan on 2026-09-25. It runs on vitest 2.1 (see D17 for the pin).
+  - *Measured:* at `9efb083`, the source lines this branch changed are 171/173 lines and 32/32
+    branch conditions covered (99.0%), not counting `web/vite.config.ts` and
+    `web/src/test/setup.ts`, which lcov does not list. The gate's own figure comes from the
+    next release's scan of `main` (D19).
+  - *Evidence:* `make coverage` · `grep -n 'reportPaths\|exclusions' sonar-project.properties`
+    (no `coverage.exclusions`)
+- **D30 · The findings in `web/src/test/` are fixed, not excluded.** Branch
+  `fix/sonar-gate-and-coverage`. The owner's ruling on 2026-09-25 (decisions #75): *"no work
+  around sonarqube find fixes instead"*.
+  - *Was:* `msw.ts` and `setup.ts` carried open findings (4 at v0.8.0), and the recommended
+    option was to add `web/src/test/**` to `sonar.coverage.exclusions`.
+  - *Now:* the findings are fixed, and the folder is analysed and covered like any other
+    source. `setup.ts` only imports: jest-dom's matchers, then `jsdom-shims.ts` and `msw.ts`,
+    each of which has its own test file. Every stub installs unconditionally, so the tests (and the coverage) are
+    the same on CI's Node 20 and on a newer local Node.
+  - *Evidence:* a branch scan lists nothing in `web/src/test/`; `sonar-issues --all` reports
+    `main`, so it lists the 4 until the release's scan · `ls web/src/test`
+- **D148 · Border colour classes paint.** Branch `fix/sonar-gate-and-coverage`, found by its
+  browser pass on 2026-09-25.
+  - *Was:* `web/src/index.css` set `* { border-color: var(--color-border) }` outside any
+    cascade layer, since web/src's first commit (PR #6), so no release ever painted these. A
+    rule outside a layer outranks every layered Tailwind utility whatever its specificity, so
+    no `border-*` colour class painted: a focused control's amber
+    border (the outline one restored on this branch included), a checked checkbox's primary, a
+    status badge's tone, a `border-transparent` badge. Class tests passed throughout, since
+    jsdom builds no CSS.
+  - *Now:* the rule sits in `@layer base`, as shadcn's Tailwind v4 setup has it. Measured in
+    the browser: a focused button, input or checkbox and a checked checkbox draw the ring
+    colour; StatusBadge's border takes its tone (emerald at 30% for done); the Lessons filter
+    badge's border is transparent. Tab strips lose the grey frame every inactive tab had, so
+    only the active tab is framed (Lessons, Queue, Add follow). A focused tab then kept a grey
+    border inside its amber outline: Radix Tabs activate on focus, and the active tab's
+    `dark:data-[state=active]:border-input` beat the focus border. `tabs.tsx` now takes
+    `dark:focus-visible:border-ring` as important, because Tailwind emits the plain class
+    before the active one (the plain class is what fixed the outline button). `aria-invalid:border-destructive`
+    now paints on inputs, selects and checkboxes; an outline button in the dark theme still
+    loses it to `dark:border-input` (same specificity, later in the CSS), the collision the
+    focus border had. No page sets `aria-invalid`, so nothing shows it today.
+  - *Evidence:* the `the default border colour` tests in `web/src/design-tokens.test.ts` ·
+    in a browser, `getComputedStyle(el).borderTopColor` on a focused outline button
+- **D19 · `main` rescanned at v0.8.0.** No PR, since a scan writes only to the Sonar server. The
+  owner's OK on 2026-09-25: *"Yes, right after the merge"*.
+  - *Was:* one analysis, of `1c2dbda` (v0.7.1) on 2026-08-15: 67 open, under older rule sets.
+  - *Now:* a second analysis, of `344ee1f` = v0.8.0: 43 open, gate ERROR. New-code coverage was
+    0 (D18), and five older issues sit on lines PR #21 changed (D12). The next release's scan
+    is the check that `fix/sonar-gate-and-coverage` turns it green.
+  - *Evidence:* the header of `sonar-issues --all` · vault note drumdrop-sonarqube
 - **D28 · The tracked git hooks are back on.** Local git config only, so there is no PR. The
   owner asked on 2026-09-23: *"drumdrop: turn its Git hooks back on."*
   - *Was:* `core.hooksPath` pointed at `.git/hooks`, which holds only the `*.sample` files, so

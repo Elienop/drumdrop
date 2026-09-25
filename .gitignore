@@ -9,6 +9,9 @@ docs/superpowers/
 
 # Go
 /drumdrop
+# `go build` run inside cmd/drumdrop. Anchored: a bare `drumdrop` would also ignore
+# the cmd/drumdrop source folder.
+/cmd/drumdrop/drumdrop
 /dist/
 *.test
 
@@ -26,6 +29,12 @@ session.cookie
 
 # Built web UI assets
 /web/dist/
+
+# Test reports `make coverage` writes for SonarQube. The Go two are unanchored, so
+# a run from any directory leaves nothing to commit.
+coverage.out
+go-test-report.json
+/web/coverage/
 
 # Claude Code's local folder: its settings, agent worktrees, and the CLAUDE.md
 # symlink into the owner's Obsidian vault (the project rules note). Kept local on

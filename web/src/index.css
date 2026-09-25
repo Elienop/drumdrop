@@ -62,7 +62,13 @@
   --radius-lg: var(--radius);
 }
 
-* { border-color: var(--color-border); }
+/* The default border colour, in the base layer as shadcn's Tailwind v4 setup
+   has it. Outside any layer it would outrank every layered utility whatever
+   their specificity, and each border-* colour class (a focused control's
+   ring border, an invalid field's red, a status badge's tone) would lose. */
+@layer base {
+  * { border-color: var(--color-border); }
+}
 
 /* Reduced motion: overlays still fade (a dissolve does not move anything),
    but drop their enter/exit zoom, slide and rotation (tw-animate-css's

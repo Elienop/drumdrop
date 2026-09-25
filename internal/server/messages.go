@@ -43,7 +43,7 @@ const (
 	msgUnauthorized = "This needs DrumDrop's API token. Enter it, then try again."
 	// msgNoDaemon answers a pause, resume or sync on a server running
 	// without the daemon.
-	msgNoDaemon = "This server runs without the download daemon, so there's nothing to pause, resume or sync."
+	msgNoDaemon = "This server runs without the download daemon, so it can't pause, resume or run a sync."
 	// msgNoPlanner answers a dry-run sync on a server without a planner.
 	msgNoPlanner = "This server runs without the sync planner, so it can't say what a sync would queue."
 	// msgDryRunFailed answers a dry-run sync that failed.

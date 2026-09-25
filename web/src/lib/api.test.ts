@@ -2,10 +2,19 @@ import { api, ApiHttpError } from "./api"
 import { setToken, clearToken } from "./auth"
 
 const fetchMock = vi.fn()
+// Each test stubs fetch; each leaves the global as it found it
+// (vite.config.ts does not set unstubGlobals). Found at the start of the
+// test, not at load: MSW (test/msw.ts) swaps in its own fetch in a beforeAll.
+let foundFetch: typeof fetch
 beforeEach(() => {
   clearToken()
   fetchMock.mockReset()
+  foundFetch = globalThis.fetch
   vi.stubGlobal("fetch", fetchMock)
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+  expect(globalThis.fetch).toBe(foundFetch)
 })
 
 function jsonResponse(body: unknown, status = 200) {

@@ -25,7 +25,7 @@ export function errorMessage(err: unknown, fallback: string = UNREACHABLE): stri
 // any fixed time is a guess tuned to one length, and WCAG 2.2.1 asks that
 // text a user must read does not time out. A dialog's late failure already
 // stayed until dismissed; this makes it one rule for every such toast. A
-// title-only toast ("No daemon attached") keeps sonner's default.
+// title-only toast ("Sync triggered") keeps sonner's default.
 export function failureToast(title: string, description: string): void {
   toast.error(title, { description, duration: Infinity, closeButton: true })
 }

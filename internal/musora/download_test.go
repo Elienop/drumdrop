@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -550,6 +551,39 @@ func TestDownloadLessonLayout(t *testing.T) {
 	}
 	if len(got) != 4 {
 		t.Errorf("sheet-music files = %v, want 4", got)
+	}
+}
+
+// auxFetches lists every auxiliary artifact once, in fetch order (poster,
+// resources, play-along, sheet music), with the file each is written to. It
+// falls back to the video's poster image, skips a resource without a URL, and
+// skips an empty sheet-music page without spending a number on it, while a
+// later page of the same assignment keeps its own (pN).
+func TestAuxFetchesListsEachArtifactInOrder(t *testing.T) {
+	l := &Lesson{
+		Video: Video{PosterImageURL: "https://cdn/poster.jpg"},
+		Resources: []Resource{
+			{Name: "Chart", URL: "https://cdn/chart.pdf"},
+			{Name: "No URL"},
+			{URL: "https://cdn/dir/pack.zip"},
+		},
+		Mp3YesDrumsYesClick: "https://cdn/m.mp3",
+		Assignments: []Assignment{
+			{Title: "Song", SheetMusicImageURLs: []string{"https://cdn/p1.png", "", "https://cdn/p3.png?x=1"}},
+			{SheetMusicImageURLs: []string{"https://cdn/one.jpeg"}},
+		},
+	}
+	want := []auxFetch{
+		{artifact: "poster", url: "https://cdn/poster.jpg", dest: filepath.Join("L", "01 - L-poster.jpg")},
+		{artifact: "resource", url: "https://cdn/chart.pdf", dest: filepath.Join("L", "resources", "Chart")},
+		{artifact: "resource", url: "https://cdn/dir/pack.zip", dest: filepath.Join("L", "resources", "pack.zip")},
+		{artifact: "mp3", url: "https://cdn/m.mp3", dest: filepath.Join("L", "play-along", "play-along (drums, click).mp3")},
+		{artifact: "sheet-music", url: "https://cdn/p1.png", dest: filepath.Join("L", "sheet-music", "01 - Song (p1).png")},
+		{artifact: "sheet-music", url: "https://cdn/p3.png?x=1", dest: filepath.Join("L", "sheet-music", "02 - Song (p3).png")},
+		{artifact: "sheet-music", url: "https://cdn/one.jpeg", dest: filepath.Join("L", "sheet-music", "03 - assignment.jpeg")},
+	}
+	if got := auxFetches(l, "L", "01 - L"); !slices.Equal(got, want) {
+		t.Errorf("auxFetches =\n%+v\nwant\n%+v", got, want)
 	}
 }
 

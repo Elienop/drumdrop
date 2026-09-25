@@ -21,7 +21,15 @@ class MockEventSource {
   close() { this.closed = true }
 }
 
+// Each test stubs EventSource; each leaves the global as it found it
+// (vite.config.ts does not set unstubGlobals).
+let foundEventSource: typeof EventSource
+beforeEach(() => {
+  foundEventSource = globalThis.EventSource
+})
 afterEach(() => {
+  vi.unstubAllGlobals()
+  expect(globalThis.EventSource).toBe(foundEventSource)
   clearToken({ silent: true })
   MockEventSource.last = null
 })

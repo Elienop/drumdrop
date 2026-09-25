@@ -35,8 +35,14 @@ const buttonVariants = cva(
         //   on it is 7.7:1.
         destructive:
           `bg-destructive text-white hover:bg-destructive/90 ${FILLED_RING_OFFSET} dark:bg-destructive/60 dark:hover:bg-destructive/50`,
+        // LOCAL EDIT (owner's ruling 2026-09-25): dark:focus-visible:border-
+        // ring. The base focus-visible:border-ring loses to dark:border-input
+        // (same specificity, later in the CSS, as the dark hover above), so
+        // in the dark theme an outline button's border never turned amber on
+        // focus, as an Input's and a Select's do. Re-apply when updating the
+        // component from upstream.
         outline:
-          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
+          "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 dark:focus-visible:border-ring",
         secondary: `bg-secondary text-secondary-foreground hover:bg-secondary/80 ${FILLED_RING_OFFSET}`,
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",

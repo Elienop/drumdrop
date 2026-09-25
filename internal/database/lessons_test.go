@@ -234,31 +234,16 @@ func TestUpsertLessonFillsNullPosition(t *testing.T) {
 // stamped. The stamp is set to a fixed past time first, so CURRENT_TIMESTAMP's
 // one-second grain can't hide a write.
 func TestUpsertLessonStampsUpdatedAtOnlyOnAChange(t *testing.T) {
-	const past = "2026-01-01 00:00:00"
-	num := func(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
-	type upsert struct {
-		title      string
-		parent     sql.NullInt64
-		brand      string
-		position   sql.NullInt64
-		wantTitle  string
-		wantPos    sql.NullInt64
-		wantParent sql.NullInt64
-		stamped    bool
-	}
-	// Who the sync comes from, against the follow the lesson was stored with.
+	// Short local names keep each row of the table on one readable line.
+	num := validInt
 	const (
-		noFollow = ""        // no follow, before and now
-		same     = "same"    // the follow the lesson is attributed to
-		other    = "other"   // another follow that lists it too
-		removed  = "removed" // another follow, after the lesson's own was removed
+		noFollow = stampFromNone
+		same     = stampFromSame
+		other    = stampFromOther
+		removed  = stampFromRemoved
 	)
-	for _, c := range []struct {
-		name     string
-		position sql.NullInt64 // the stored position before the sync
-		from     string
-		sync     upsert
-	}{
+	type upsert = stampSync
+	for _, c := range []stampCase{
 		{"nothing changed", num(5), noFollow, upsert{title: "Lesson", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
 		{"only a brand, follow or position a conflict leaves alone", num(5), other, upsert{title: "Lesson", parent: num(7), brand: "pianote", position: num(9), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
 		{"the title changed", num(5), noFollow, upsert{title: "New Title", parent: num(7), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
@@ -272,46 +257,95 @@ func TestUpsertLessonStampsUpdatedAtOnlyOnAChange(t *testing.T) {
 		{"another follow's title change", num(5), other, upsert{title: "New Title", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "New Title", wantPos: num(5), wantParent: num(7), stamped: true}},
 		{"another follow's parent, the lesson's follow removed", num(5), removed, upsert{title: "Lesson", parent: num(8), brand: "drumeo", position: num(5), wantTitle: "Lesson", wantPos: num(5), wantParent: num(7)}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			s := newTestStore(t)
-			ctx := context.Background()
-			flw, syncFlw := sql.NullInt64{}, sql.NullInt64{}
-			if c.from != noFollow {
-				flw = num(seedFollowForLesson(t, s))
-				syncFlw = flw
-				if c.from != same {
-					syncFlw = num(seedFollowForLesson(t, s))
-				}
-			}
-			if err := s.UpsertLesson(ctx, 1, "Lesson", num(7), "drumeo", c.position, flw); err != nil {
-				t.Fatalf("first UpsertLesson: %v", err)
-			}
-			if c.from == removed {
-				if _, err := s.rawDB().Exec(`DELETE FROM follows WHERE id = ?`, flw.Int64); err != nil {
-					t.Fatalf("remove the follow: %v", err)
-				}
-				flw = sql.NullInt64{} // ON DELETE SET NULL
-			}
-			if _, err := s.rawDB().Exec(`UPDATE lessons SET updated_at = ? WHERE railcontent_id = 1`, past); err != nil {
-				t.Fatalf("set updated_at: %v", err)
-			}
-			if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, syncFlw); err != nil {
-				t.Fatalf("second UpsertLesson: %v", err)
-			}
-			got, err := s.GetLesson(ctx, 1)
-			if err != nil {
-				t.Fatalf("GetLesson: %v", err)
-			}
-			if got.Title != c.sync.wantTitle || got.Position != c.sync.wantPos || got.ParentRailcontentID != c.sync.wantParent || got.FollowID != flw {
-				t.Errorf("stored title %q, position %+v, parent %+v, follow %+v; want %q, %+v, %+v, %+v",
-					got.Title, got.Position, got.ParentRailcontentID, got.FollowID, c.sync.wantTitle, c.sync.wantPos, c.sync.wantParent, flw)
-			}
-			stamped := !got.UpdatedAt.Valid || got.UpdatedAt.Time.UTC().Format("2006-01-02 15:04:05") != past
-			if stamped != c.sync.stamped {
-				t.Errorf("updated_at = %+v after the sync; want it stamped: %v", got.UpdatedAt, c.sync.stamped)
-			}
-		})
+		t.Run(c.name, func(t *testing.T) { checkUpsertStamp(t, c) })
 	}
+}
+
+// stampPast is the updated_at a stamp case sets before its sync, so any write
+// the sync makes shows, whatever CURRENT_TIMESTAMP's one-second grain.
+const stampPast = "2026-01-01 00:00:00"
+
+// stampFrom says who a stamp case's sync comes from, against the follow the
+// lesson was stored with.
+type stampFrom string
+
+const (
+	stampFromNone    stampFrom = ""        // no follow, before and now
+	stampFromSame    stampFrom = "same"    // the follow the lesson is attributed to
+	stampFromOther   stampFrom = "other"   // another follow that lists it too
+	stampFromRemoved stampFrom = "removed" // another follow, after the lesson's own was removed
+)
+
+// stampSync is the second upsert of a stamp case, and what it must leave.
+type stampSync struct {
+	title      string
+	parent     sql.NullInt64
+	brand      string
+	position   sql.NullInt64
+	wantTitle  string
+	wantPos    sql.NullInt64
+	wantParent sql.NullInt64
+	stamped    bool
+}
+
+// stampCase is one row of TestUpsertLessonStampsUpdatedAtOnlyOnAChange.
+type stampCase struct {
+	name     string
+	position sql.NullInt64 // the stored position before the sync
+	from     stampFrom
+	sync     stampSync
+}
+
+func validInt(n int64) sql.NullInt64 { return sql.NullInt64{Int64: n, Valid: true} }
+
+// checkUpsertStamp stores lesson 1, sets its stamp to stampPast, runs the
+// case's sync, and checks what the sync stored and whether it stamped.
+func checkUpsertStamp(t *testing.T, c stampCase) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	flw, syncFlw := seedStampFollows(t, s, c.from)
+	if err := s.UpsertLesson(ctx, 1, "Lesson", validInt(7), "drumeo", c.position, flw); err != nil {
+		t.Fatalf("first UpsertLesson: %v", err)
+	}
+	if c.from == stampFromRemoved {
+		if _, err := s.rawDB().Exec(`DELETE FROM follows WHERE id = ?`, flw.Int64); err != nil {
+			t.Fatalf("remove the follow: %v", err)
+		}
+		flw = sql.NullInt64{} // ON DELETE SET NULL
+	}
+	if _, err := s.rawDB().Exec(`UPDATE lessons SET updated_at = ? WHERE railcontent_id = 1`, stampPast); err != nil {
+		t.Fatalf("set updated_at: %v", err)
+	}
+	if err := s.UpsertLesson(ctx, 1, c.sync.title, c.sync.parent, c.sync.brand, c.sync.position, syncFlw); err != nil {
+		t.Fatalf("second UpsertLesson: %v", err)
+	}
+	got, err := s.GetLesson(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetLesson: %v", err)
+	}
+	if got.Title != c.sync.wantTitle || got.Position != c.sync.wantPos || got.ParentRailcontentID != c.sync.wantParent || got.FollowID != flw {
+		t.Errorf("stored title %q, position %+v, parent %+v, follow %+v; want %q, %+v, %+v, %+v",
+			got.Title, got.Position, got.ParentRailcontentID, got.FollowID, c.sync.wantTitle, c.sync.wantPos, c.sync.wantParent, flw)
+	}
+	stamped := !got.UpdatedAt.Valid || got.UpdatedAt.Time.UTC().Format("2006-01-02 15:04:05") != stampPast
+	if stamped != c.sync.stamped {
+		t.Errorf("updated_at = %+v after the sync; want it stamped: %v", got.UpdatedAt, c.sync.stamped)
+	}
+}
+
+// seedStampFollows seeds the follows a stamp case needs and returns the one
+// the lesson is stored with and the one its sync comes from: none for
+// stampFromNone, one follow for both with stampFromSame, else two.
+func seedStampFollows(t *testing.T, s *Store, from stampFrom) (flw, syncFlw sql.NullInt64) {
+	t.Helper()
+	if from == stampFromNone {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	flw = validInt(seedFollowForLesson(t, s))
+	if from == stampFromSame {
+		return flw, flw
+	}
+	return flw, validInt(seedFollowForLesson(t, s))
 }
 
 // seedFollowForLesson inserts a node follow and returns its id, so lesson rows can

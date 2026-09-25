@@ -17,9 +17,9 @@ import { Settings } from "@/pages/Settings"
 //
 // This finds every row of paired buttons a page renders, rather than
 // listing them, so a new pair is checked too: an element with two or more
-// children that are buttons (or a wrapper around exactly one, like the
-// tooltip trigger around a blocked Run sync). jsdom computes no layout, so
-// it reads the row's gap class; the browser pass measures the space.
+// children that are buttons (or a wrapper around exactly one button).
+// jsdom computes no layout, so it reads the row's gap class; the browser
+// pass measures the space.
 
 const TAILWIND_STEP_PX = 4
 

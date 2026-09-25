@@ -1,15 +1,44 @@
-.git
-node_modules
-web/node_modules
+# An allowlist: the build context holds only what the Dockerfile reads, so a file that
+# lands in the repo folder (a HAR with a live Musora session, an agent's worktree, a
+# local config) never reaches the image or the build cache unless it is let in here.
+# The last matching line wins: `*` drops everything, the `!` lines let back in exactly
+# the Dockerfile's inputs (go.mod and go.sum, `COPY . .` building ./cmd/drumdrop, which
+# imports internal/ and web/, `COPY web/` for the web stage, entrypoint.sh), and the lines
+# after them drop what can sit inside those folders. `**/` matches at any depth.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!web/
+!entrypoint.sh
+
+# Installed packages and built output: each stage installs and builds its own.
+**/node_modules
 web/dist
-dist
-downloads
-docs
-*.db
-*.db-wal
-*.db-shm
-secret.key
-credentials.enc
-session.cookie
-.env*
-.secrets*
+**/*.tsbuildinfo
+**/*.test
+cmd/drumdrop/drumdrop
+# Local state and secrets, in case DRUMDROP_CONFIG_DIR or a download points in here.
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/secret.key
+**/credentials.enc
+**/session.cookie
+**/.env*
+**/.secrets*
+**/*.har
+**/*.log
+**/*.pid
+**/*.sock
+**/downloads
+# Test reports `make coverage` writes for SonarQube.
+**/coverage.out
+**/go-test-report.json
+web/coverage
+# Local-only folders and config: Claude Code's (agent worktrees included), the
+# brainstorm companion's, and the per-machine MCP server config.
+**/.claude
+**/.superpowers
+**/.mcp.json
