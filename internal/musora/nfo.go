@@ -4,13 +4,36 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var reTags = regexp.MustCompile(`<[^>]+>`)
 
+// esc is s as XML 1.0 text: the five markup characters escaped, and every
+// character XML forbids even escaped (C0 controls but tab, newline and
+// carriage return; surrogates; U+FFFE and U+FFFF; bytes that are not UTF-8)
+// replaced by U+FFFD, as encoding/xml.EscapeText does. An nfo is never
+// ill-formed, which matters most for tvshow.nfo: it is written once and never
+// replaced. Valid text comes out exactly as before (EscapeText itself would
+// also escape newlines and use numeric references).
 func esc(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if isXMLChar(r) {
+			return r
+		}
+		return '\uFFFD'
+	}, s)
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
 	return r.Replace(s)
+}
+
+// isXMLChar reports whether r may appear in an XML 1.0 document (its Char
+// production; encoding/xml's isInCharacterRange, which is not exported).
+func isXMLChar(r rune) bool {
+	return r == 0x09 || r == 0x0A || r == 0x0D ||
+		r >= 0x20 && r <= 0xD7FF ||
+		r >= 0xE000 && r <= 0xFFFD ||
+		r >= 0x10000 && r <= 0x10FFFF
 }
 
 func decodeEntities(s string) string {
@@ -18,11 +41,17 @@ func decodeEntities(s string) string {
 	return r.Replace(s)
 }
 
+// dateOnly is the date s starts with, "YYYY-MM-DD", when it is a real one
+// (time.Parse checks the digits and the ranges: no month 13, no February 30),
+// else "". It is written unescaped, so nothing else may get through.
 func dateOnly(s string) string {
-	if len(s) >= 10 && s[4] == '-' && s[7] == '-' {
-		return s[:10]
+	if len(s) < 10 {
+		return ""
 	}
-	return ""
+	if _, err := time.Parse(time.DateOnly, s[:10]); err != nil {
+		return ""
+	}
+	return s[:10]
 }
 
 // BuildNFO renders a Kodi/Plex <movie> nfo for a lesson. This is the default-layout

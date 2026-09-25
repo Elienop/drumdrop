@@ -1,6 +1,8 @@
 package musora
 
 import (
+	"encoding/xml"
+	"io"
 	"strings"
 	"testing"
 )
@@ -109,5 +111,66 @@ func TestBuildShowNFO(t *testing.T) {
 `
 	if got := BuildShowNFO("content-7", nil); got != titleOnly {
 		t.Errorf("BuildShowNFO with no document =\n%s\nwant\n%s", got, titleOnly)
+	}
+}
+
+// wellFormed fails unless doc is a well-formed XML 1.0 document, as
+// encoding/xml reads one (which refuses every character XML forbids).
+func wellFormed(t *testing.T, name, doc string) {
+	t.Helper()
+	d := xml.NewDecoder(strings.NewReader(doc))
+	for {
+		_, err := d.Token()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Errorf("%s is not well-formed XML: %v\n%q", name, err, doc)
+			return
+		}
+	}
+}
+
+// TestNFOTextIsAlwaysWellFormed pins that an nfo is well-formed XML whatever
+// Musora sends: a character XML forbids even escaped (a C0 control, a
+// surrogate's bytes, U+FFFF, a byte that is not UTF-8) becomes U+FFFD, in
+// every text field of every nfo; and a published date is written only when
+// it is a real "YYYY-MM-DD" (it goes in unescaped). tvshow.nfo is written
+// once and never replaced, so an ill-formed one would stay ill-formed.
+func TestNFOTextIsAlwaysWellFormed(t *testing.T) {
+	bad := "a\x00b\x0bc\x1fd\uffffe\xed\xa0\x80f\xffg"
+	doc := &Lesson{
+		ID: 1, Title: "Title " + bad, Description: "<p>Plot " + bad + "</p>", Brand: "drumeo" + bad,
+		DifficultyString: "Level " + bad, PublishedOn: "2024-02-29T00:00:00Z", LengthInSeconds: 60,
+		Instructors: []Instructor{{Name: "Coach " + bad}},
+		Genre: []struct {
+			Name string `json:"name"`
+		}{{Name: "Genre " + bad}},
+		ParentContentData: []ParentContent{{Title: "Course " + bad}},
+	}
+	for name, out := range map[string]string{
+		"tvshow.nfo":  BuildShowNFO("Show "+bad, doc),
+		"episode nfo": BuildEpisodeNFO(doc, "Show "+bad, 1, 2),
+		"movie nfo":   BuildNFO(doc),
+	} {
+		wellFormed(t, name, out)
+		if !strings.Contains(out, "a\uFFFDb\uFFFDc\uFFFDd\uFFFDe") {
+			t.Errorf("%s does not replace the forbidden characters with U+FFFD:\n%q", name, out)
+		}
+		if !strings.Contains(out, "2024-02-29") {
+			t.Errorf("%s lost the real date 2024-02-29:\n%s", name, out)
+		}
+	}
+	// Tab, newline and carriage return are XML characters: kept as they are.
+	if got := esc("a\tb\nc\rd & <e>"); got != "a\tb\nc\rd &amp; &lt;e&gt;" {
+		t.Errorf("esc = %q, want the whitespace kept and the markup escaped", got)
+	}
+	for _, date := range []string{"2024-13-01", "2024-02-30", "2024-1a-01", "20x4-01-01", "2024-01-0<", "2024/01/01", "2024-01-1", ""} {
+		d := &Lesson{ID: 1, Title: "T", PublishedOn: date + "T00:00:00Z"}
+		for name, out := range map[string]string{"tvshow.nfo": BuildShowNFO("T", d), "episode nfo": BuildEpisodeNFO(d, "S", 1, 1), "movie nfo": BuildNFO(d)} {
+			if strings.Contains(out, "premiered>") || strings.Contains(out, "aired>") || strings.Contains(out, "<year>") {
+				t.Errorf("%s writes the date %q, which is not a real YYYY-MM-DD:\n%s", name, date, out)
+			}
+		}
 	}
 }
