@@ -310,7 +310,7 @@ func (w *Worker) showDoc(f database.Follow, lesson *musora.Lesson) (*musora.Less
 // Musora answered nothing for its id, or the id could not be read (a shape
 // change the lenient decoder read as 0). Such a show gets no files at all,
 // never a title-only tvshow.nfo, which would mark it done for good.
-var errNoShowDoc = errors.New("Musora gave no document for the show")
+var errNoShowDoc = errors.New("no document for the show from Musora")
 
 // resolveShowDoc asks Musora for the document id; errNoShowDoc when there is
 // no id or no document.
