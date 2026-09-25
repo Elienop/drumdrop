@@ -40,14 +40,30 @@ func noClaims(t *testing.T, lib string) *library.Claims {
 	return c
 }
 
-// openFDs counts this process's open descriptors (Linux: /proc/self/fd).
-func openFDs(t *testing.T) int {
+// openFDsUnder counts this process's open descriptors on dir or anything in
+// it (Linux: /proc/self/fd, whose links name what each is open on). Only
+// those count: another test's leaked descriptors, which a finalizer may close
+// at any moment, are elsewhere (round-5l security seat I2).
+func openFDsUnder(t *testing.T, dir string) int {
 	t.Helper()
+	// The links name the resolved path.
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	entries, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		t.Fatalf("read /proc/self/fd: %v", err)
 	}
-	return len(entries)
+	n := 0
+	for _, e := range entries {
+		// A descriptor closed since the listing has no link: not open.
+		target, lerr := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if lerr == nil && library.Inside(dir, target) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestPlacementReleasesItsFolders (round-5 fix security I-2) proves a
@@ -84,7 +100,7 @@ func checkPlacementReleasesItsFolders(t *testing.T, layout string, commit bool) 
 		t.Fatal(err)
 	}
 	defer src.close()
-	before := openFDs(t)
+	before := openFDsUnder(t, tmp)
 	pl, err := pendingFiveFrom(t, layout, dl, lib, src)
 	if err != nil || pl == nil {
 		t.Fatalf("placement = %v, %v", pl, err)
@@ -92,11 +108,11 @@ func checkPlacementReleasesItsFolders(t *testing.T, layout string, commit bool) 
 	if len(pl.merged) == 0 {
 		t.Fatal("nothing was merged: the fixture does not exercise the held levels")
 	}
-	if held := openFDs(t); held <= before {
+	if held := openFDsUnder(t, tmp); held <= before {
 		t.Fatalf("descriptors %d while placed, %d before: the count sees nothing held", held, before)
 	}
 	commitOrUndo(t, pl, commit)
-	if after := openFDs(t); after != before {
+	if after := openFDsUnder(t, tmp); after != before {
 		t.Errorf("descriptors %d after, %d before: %d still held", after, before, after-before)
 	}
 }
