@@ -159,6 +159,35 @@ func TestLeftBehindFailsClosed(t *testing.T) {
 	}
 }
 
+// TestLeftBehindCountsEachOwnFileAlone proves each of the lesson's names is
+// asked on its own: a legacy row that records no video still fails closed
+// when its season folder can't be listed, and a record that doesn't name the
+// video still counts the video, when it is all that is left.
+func TestLeftBehindCountsEachOwnFileAlone(t *testing.T) {
+	t.Run("a legacy row without a video, its folder unreadable", func(t *testing.T) {
+		_, lib, oldSeason := movedLibrary(t)
+		seedSeason(t, oldSeason, ownNames[1:]...)
+		row := legacyRow(100, "Lesson A", 5, oldSeason, "")
+		claims, err := NewClaims(lib, []database.Lesson{row})
+		if err != nil {
+			t.Fatal(err)
+		}
+		chmodOrSkip(t, oldSeason, 0)
+		if dir, left, err := claims.LeftBehind(row); !left || !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("LeftBehind = %q, %v, %v; want true and the permission error", dir, left, err)
+		}
+	})
+	t.Run("a record that doesn't name the video, only the video left", func(t *testing.T) {
+		_, lib, oldSeason := movedLibrary(t)
+		seedSeason(t, oldSeason, ownNames[0])
+		row := recordedRow(100, oldSeason, ownNames[1:]...)
+		row.VideoPath = sql.NullString{String: filepath.Join(oldSeason, ownNames[0]), Valid: true}
+		if dir, left, err := leftBehind(t, lib, row); !left || err != nil {
+			t.Errorf("LeftBehind = %q, %v, %v; want true, no error", dir, left, err)
+		}
+	})
+}
+
 // TestLeftBehindReadsNothingWithTheSettingUnchanged pins round 5i's S4: the
 // paths are compared before any stat, so a row filed where the setting points
 // now is never looked up on disk (a hung mount would park the delete). The
