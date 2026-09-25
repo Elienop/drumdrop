@@ -99,16 +99,51 @@ func TestLeftBehindAsksForTheLessonsOwnFiles(t *testing.T) {
 // TestLeftBehindReadsAPathThroughAFileAsGone pins round 5i's S3b: an old
 // library folder that is now a regular file makes the recorded season folder
 // answer ENOTDIR, which proves it gone (Go maps only ENOENT to
-// fs.ErrNotExist), so the lesson is read as before, not refused.
+// fs.ErrNotExist), so the lesson is read as before, not refused. A recorded
+// season folder that is itself a regular file is gone too (round 5j code Info
+// 7, security S4): read as a folder, a legacy row's listing would fail and
+// refuse with "couldn't read" instead.
 func TestLeftBehindReadsAPathThroughAFileAsGone(t *testing.T) {
+	for _, file := range []string{"the old library folder", "the season folder"} {
+		for _, recorded := range []bool{true, false} {
+			t.Run(file+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
+				tmp, lib, oldSeason := movedLibrary(t)
+				seedSeason(t, filepath.Join(lib, "Show", "Season 01"), ownNames...)
+				path := filepath.Join(tmp, "old")
+				if file == "the season folder" {
+					path = oldSeason
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(path, []byte("not a folder"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if dir, left, err := leftBehind(t, lib, leftBehindRow(oldSeason, recorded)); left || err != nil {
+					t.Errorf("LeftBehind = %q, %v, %v; want false, no error", dir, left, err)
+				}
+			})
+		}
+	}
+}
+
+// TestLeftBehindCountsTheVideoOnlyInTheOldFolder pins round 5j code Info 7
+// (X3): the recorded video counts as one of the lesson's own files in the old
+// folder only when it is in that folder. A video path naming a file anywhere
+// else (here the new season folder, where it exists) says nothing about what
+// was left behind, so an old folder holding only a sibling's files is not.
+// The worker never records such a path; a count of it would refuse a lesson
+// whose files all moved.
+func TestLeftBehindCountsTheVideoOnlyInTheOldFolder(t *testing.T) {
 	for _, recorded := range []bool{true, false} {
 		t.Run("recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
-			tmp, lib, oldSeason := movedLibrary(t)
-			seedSeason(t, filepath.Join(lib, "Show", "Season 01"), ownNames...)
-			if err := os.WriteFile(filepath.Join(tmp, "old"), []byte("not a folder"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if dir, left, err := leftBehind(t, lib, leftBehindRow(oldSeason, recorded)); left || err != nil {
+			_, lib, oldSeason := movedLibrary(t)
+			newSeason := filepath.Join(lib, "Show", "Season 01")
+			seedSeason(t, oldSeason, siblingNames...)
+			seedSeason(t, newSeason, ownNames...)
+			row := leftBehindRow(oldSeason, recorded)
+			row.VideoPath = sql.NullString{String: filepath.Join(newSeason, ownNames[0]), Valid: true}
+			if dir, left, err := leftBehind(t, lib, row); left || err != nil {
 				t.Errorf("LeftBehind = %q, %v, %v; want false, no error", dir, left, err)
 			}
 		})
