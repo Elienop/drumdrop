@@ -61,8 +61,12 @@ onboarding session's proposal, not an owner ruling; the owner may reorder.
   - *What:* `go.mod` pins `go 1.26.3`, and CI and the release binaries build on exactly that
     version (setup-go reads `go-version-file`). `govulncheck` finds standard-library
     vulnerabilities that drumdrop's code actually reaches, in `net/http`, `crypto/tls`,
-    `crypto/x509`, `net/url`, `net/textproto` and `encoding/asn1`. All are fixed by go1.26.6
-    (8 on 2026-09-23, *moves*).
+    `crypto/x509`, `net/url`, `net/textproto`, `encoding/asn1` and `os`. All are fixed by
+    go1.26.6 (9 on 2026-09-25, *moves*). The `os` one, GO-2026-4970, is an `os.Root` escape
+    through a final symlink when the path ends in `/` (fixed in go1.26.5). The library
+    placement guards are built on `os.Root`; drumdrop's paths never end in `/`
+    (`filepath.Join` strips it), so it isn't reachable that way today, but it is the one
+    closest to the guards.
   - *Why:* drumdrop is a network server (the HTTP API) and a TLS client (Musora, soundslice,
     YouTube). These are the packages it uses for both. The fix should be a version bump plus
     the normal gates, not a code change. While you're there, the Dockerfile's Go stage uses
@@ -1394,8 +1398,8 @@ D53 waits on an owner decision.
     the toast carries the reason.
   - *Why:* losing focus breaks WCAG 2.4.3 (focus order).
   - *Evidence:* `SyncButton`'s two return branches in `web/src/pages/Dashboard.tsx` · the
-    comment at `web/src/pages/Dashboard.test.tsx:84` (it encodes jsdom, which restarts from
-    the top)
+    comment "The pressed node was replaced, so focus starts from the page." in
+    `web/src/pages/Dashboard.test.tsx` (it encodes jsdom, which restarts from the top)
 
 - **D143 · A blocked sync button says why only in a tooltip, and stays blocked.**
   - *What:* when Run sync or Dry-run is blocked (the server has no daemon or planner
@@ -1411,7 +1415,14 @@ D53 waits on an owner decision.
   - *Why:* rare in practice, since `drumdrop serve` always attaches its daemon. The owner chose
     to record it for later (2026-09-25, *"Record it for later"*), rather than add a visible
     line beside the buttons on `fix/sonar-gate-and-coverage`.
-  - *Evidence:* `is503` and `SyncButton` in `web/src/pages/Dashboard.tsx` · `TopBar.tsx:27-31`
+  - *Also:* "only DrumDrop's own 503 blocks" holds by the body's shape, not its origin:
+    `fromServer` is set for any JSON error body with a string `error`
+    (`web/src/lib/api.ts`), so a gateway answering 503 in that shape would block the button
+    and show its sentence, as text. Most proxies send HTML, plain text or nothing. A
+    DrumDrop-only marker would be a new mechanism, so it waits here (security seat of
+    `fix/sonar-gate-and-coverage`).
+  - *Evidence:* `nothingAttached` and `SyncButton` in `web/src/pages/Dashboard.tsx` ·
+    `TopBar.tsx:27-31`
 
 - **D144 · The Queue's job-error tooltip can't be reached by keyboard.**
   - *What:* the full error of a failed job shows in a tooltip whose trigger is a truncated
@@ -1424,11 +1435,14 @@ D53 waits on an owner decision.
 
 - **D145 · No focus indicator in forced-colours mode.**
   - *What:* Tailwind 4's `outline-none` sets `outline-style: none`, and the app draws focus with
-    `box-shadow` rings, which forced-colours mode (Windows High Contrast) removes. So no
-    control shows focus there.
+    `box-shadow` rings, which forced-colours mode (Windows High Contrast) removes. So buttons,
+    inputs, checkboxes, select triggers and the blocked sync buttons' wrapper ring show no
+    focus there. Two kinds do: menu and select items use `outline-hidden`, which Tailwind 4
+    turns into a transparent outline that forced colours repaint, and tab triggers draw a
+    real 1px outline.
   - *Why:* minor for this owner, but a real accessibility gap. The usual fix is an
     `outline` that stays transparent until forced colours are on.
-  - *Evidence:* `grep -rn 'outline-none' web/src/components/ui`
+  - *Evidence:* `grep -rn 'outline-none\|outline-hidden\|outline-1' web/src/components/ui`
 
 ## Housekeeping & dependencies
 
@@ -1438,9 +1452,16 @@ D53 waits on an owner decision.
     (`.github/workflows/main.yml`). Any npm install script then runs beside that token. Today
     only esbuild, msw and fsevents have one: msw's does nothing here, and fsevents is
     macOS-only.
-  - *Options:* npm's own `--ignore-scripts` on the hook (whether esbuild works without its
-    postinstall needs one CI run), or build `web/dist` in a separate read-only job and hand
-    it over as an artifact.
+    The same hook list then runs the build (`npm --prefix web run build`,
+    `.goreleaser.yaml:9`), which executes dependency code (tsc, vite, rollup, esbuild,
+    Tailwind's native module, every Vite plugin) beside the same token. And the token is
+    already on disk before the hooks run: `actions/checkout` keeps its credentials by default
+    (`persist-credentials: true`), and the registry login lasts the job.
+  - *Options:* npm's own `--ignore-scripts` on the hook narrows this but doesn't close it
+    (the build and the token on disk remain); the security seat measured `npm ci
+    --ignore-scripts` then `npm run build` to give byte-identical JS and CSS locally (Node 26;
+    one CI run would confirm). Only building `web/dist` in a separate read-only job, handed
+    over as an artifact, closes all three routes.
   - *Why:* supply-chain hardening. No package added so far has an install script, and the
     security seat of `fix/sonar-gate-and-coverage` found this, not introduced by it.
   - *Evidence:* `grep -n 'npm' .goreleaser.yaml` · `grep -n -A3 'permissions' .github/workflows/main.yml`
@@ -1454,11 +1475,23 @@ D53 waits on an owner decision.
     here (the vault's BEHAVIOR §12).
   - *Evidence:* the `coverage:` target in `Makefile`
 
+- **D151 · A failed resource download logs its full URL.**
+  - *What:* when a lesson's PDF, play-along or sheet-music fetch fails, the download writes
+    the whole URL to stderr (`internal/musora/download.go`, the loop over
+    `fetchAuxArtifacts`). Whether Musora's resource URLs carry a signature or token in the
+    query string, which would make a logged URL usable by whoever reads the log, has not been
+    checked.
+  - *To do:* check a real resource URL's shape (from `internal/musora/`, never the `*.har`
+    files). If it carries one, log the URL without its query.
+  - *Why:* container logs outlive the request, and the image runs on the owner's NAS.
+  - *Evidence:* `grep -n 'failed to fetch' internal/musora/download.go`; found by the security
+    seat of `fix/sonar-gate-and-coverage` (it predates the branch)
+
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
     (`node:20-alpine`) still build on Node 20. `web/package.json` has no `engines` field.
-    Local development already runs a much newer Node, where the tests only pass thanks to a
-    `localStorage` polyfill in `web/src/test/setup.ts`.
+    Local development already runs a much newer Node. The tests run the same on both, because
+    `web/src/test/jsdom-shims.ts` installs its in-memory `localStorage` unconditionally.
   - *Why:* an end-of-life runtime gets no security fixes, and the build environment has
     drifted away from the development one.
   - *Evidence:* `grep -rn node-version .github/workflows` · `grep -n 'node:' Dockerfile` · `node --version`
@@ -1466,7 +1499,7 @@ D53 waits on an owner decision.
 
 - **D17 · npm: dev-tool advisories and majors behind.**
   - *What:* besides react-router (D2), `npm audit` reports advisories in the build and test
-    tools, plus transitive ones (11 findings in total on 2026-09-23, *moves*). They include a
+    tools, plus transitive ones (12 findings in total on 2026-09-25, *moves*). They include a
     critical one in vitest 2.x (the fix is vitest 5, a breaking upgrade) and one in vite ≤6.4.2
     (fixed inside v6). Several majors are behind: vite 6 → 8, vitest 2 → 5, TypeScript 5.9 → 7,
     lucide-react 0.x → 1.x, sonner 1 → 2, tailwind-merge 2 → 3, jsdom 25 → 30 and
@@ -1509,8 +1542,9 @@ D53 waits on an owner decision.
       first for uncommitted work and for commits missing from the merged code;
     - the stale `origin/*` refs (`git fetch --prune`).
 
-    `web/dist` is rebuilt by every local gate run, so it no longer lags. Still run
-    `make build-ui` before a bare `go build -tags webui`. New agent worktrees keep appearing
+    `web/dist` is rebuilt only by `npm run build` or `make build-ui`; the gate (the project
+    rules' hard rule 1, and `ci.yml`) doesn't build it. So run `make build-ui` before a bare
+    `go build -tags webui`. New agent worktrees keep appearing
     under `.claude/worktrees/` while a branch is being built.
   - *Why:* stale artefacts get run or embedded by mistake. They're all gitignored or local, so
     none of them affects the repo. Read before deleting anything.
@@ -1833,6 +1867,26 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `hostPath` in `internal/server/dto.go` · `grep -rn HOST_DOWNLOADS --include=*.go --include=*.yml .`
   - *Detail:* `musora-downloader-project.md`.
 
+- **D149 · The status badges' tone borders differ in strength.**
+  - *What:* since D148, each status badge draws its tone's border at the same alpha
+    (`web/src/components/StatusBadge.tsx`), which reads unevenly against the page: amber
+    (downloading, running, deleting) about 2.6:1, emerald (done) 1.9:1, red (failed) and zinc
+    (queued) about 1.5:1. In-progress pills look outlined, failed ones soft.
+  - *Why it's the owner's:* a visual tuning call. All four beat the grey rim they had before
+    (1.0 to 1.2:1 against their own fill).
+  - *Evidence:* the tone classes in `StatusBadge.tsx`; measured by the UI review seat of
+    `fix/sonar-gate-and-coverage`
+
+- **D150 · The border token is faint where it is a control's only edge.**
+  - *What:* `--border` and `--input` (`oklch(0.3 0 0)`) are 1.38:1 against the background and
+    1.30:1 against cards. For an unchecked checkbox or an empty input, that border is the
+    control's only visible edge, and WCAG 1.4.11 asks 3:1 for the parts that identify a
+    control.
+  - *Why it's the owner's:* it is a theme token; raising it changes every card, table and
+    dialog border too, unless the controls get their own token.
+  - *Evidence:* the tokens in `web/src/index.css`; found by the UI review seat of
+    `fix/sonar-gate-and-coverage` (it predates the branch)
+
 ## Accepted residuals and deliberate decisions (not work)
 
 - **D120 · With the library drive unplugged, a failed re-download is retried until one
@@ -1997,8 +2051,9 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     - the vitest setup moved into `web/src/test/jsdom-shims.ts` and `msw.ts`, which coverage
       sees (it leaves setup files out), and installs the same stand-ins on every Node (D30).
 
-    `web/src/main.tsx` and `web/vite.config.ts` stay uncovered, and are counted as such. It
-    runs on vitest 2.1 (see D17 for the pin).
+    `web/src/main.tsx` and `web/vite.config.ts` have no tests and stay uncovered. lcov
+    doesn't list `vite.config.ts` (coverage takes `src/**`); Sonar counted it at 0 of 2 lines
+    in a branch scan on 2026-09-25. It runs on vitest 2.1 (see D17 for the pin).
   - *Measured:* at `9efb083`, the source lines this branch changed are 171/173 lines and 32/32
     branch conditions covered (99.0%), not counting `web/vite.config.ts` and
     `web/src/test/setup.ts`, which lcov does not list. The gate's own figure comes from the
@@ -2011,23 +2066,28 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Was:* `msw.ts` and `setup.ts` carried open findings (4 at v0.8.0), and the recommended
     option was to add `web/src/test/**` to `sonar.coverage.exclusions`.
   - *Now:* the findings are fixed, and the folder is analysed and covered like any other
-    source. `setup.ts` only imports `jsdom-shims.ts` and `msw.ts`, and each of those has its
-    own test file. Every stub installs unconditionally, so the tests (and the coverage) are
+    source. `setup.ts` only imports: jest-dom's matchers, then `jsdom-shims.ts` and `msw.ts`,
+    each of which has its own test file. Every stub installs unconditionally, so the tests (and the coverage) are
     the same on CI's Node 20 and on a newer local Node.
-  - *Evidence:* `sonar-issues --all | grep web/src/test` (nothing) · `ls web/src/test`
-- **D148 · Border colour classes paint again.** Branch `fix/sonar-gate-and-coverage`, found by
-  its browser pass on 2026-09-25.
+  - *Evidence:* a branch scan lists nothing in `web/src/test/`; `sonar-issues --all` reports
+    `main`, so it lists the 4 until the release's scan · `ls web/src/test`
+- **D148 · Border colour classes paint.** Branch `fix/sonar-gate-and-coverage`, found by its
+  browser pass on 2026-09-25.
   - *Was:* `web/src/index.css` set `* { border-color: var(--color-border) }` outside any
-    cascade layer, since PR #6. A rule outside a layer outranks every layered Tailwind utility
-    whatever its specificity, so no `border-*` colour class painted: a focused control's amber
+    cascade layer, since web/src's first commit (PR #6), so no release ever painted these. A
+    rule outside a layer outranks every layered Tailwind utility whatever its specificity, so
+    no `border-*` colour class painted: a focused control's amber
     border (the outline one restored on this branch included), a checked checkbox's primary, a
     status badge's tone, a `border-transparent` badge. Class tests passed throughout, since
     jsdom builds no CSS.
   - *Now:* the rule sits in `@layer base`, as shadcn's Tailwind v4 setup has it. Measured in
     the browser: a focused button, input or checkbox and a checked checkbox draw the ring
     colour; StatusBadge's border takes its tone (emerald at 30% for done); the Lessons filter
-    badge's border is transparent. `aria-invalid:border-destructive` works again too, though
-    no page sets `aria-invalid` today.
+    badge's border is transparent. Tab strips lose the grey frame every inactive tab had, so
+    only the active tab is framed (Lessons, Queue, Add follow). `aria-invalid:border-destructive`
+    now paints on inputs, selects and checkboxes; an outline button in the dark theme still
+    loses it to `dark:border-input` (same specificity, later in the CSS), the collision the
+    focus border had. No page sets `aria-invalid`, so nothing shows it today.
   - *Evidence:* the `the default border colour` tests in `web/src/design-tokens.test.ts` ·
     in a browser, `getComputedStyle(el).borderTopColor` on a focused outline button
 - **D19 · `main` rescanned at v0.8.0.** No PR, since a scan writes only to the Sonar server. The
