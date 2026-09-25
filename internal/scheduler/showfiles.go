@@ -195,17 +195,57 @@ func createOnly(dir *os.Root, name string, data []byte) (created bool, err error
 // tempWriter tells this process's hidden files from another's: createOnly
 // writes into folders that are shared (a show folder, a season folder), and
 // two drumdrop processes can write one slot at once (drumdrop sync beside
-// serve). A test sets it to play a second process.
-var tempWriter = strconv.Itoa(os.Getpid())
+// serve, each maybe in its own container). A test sets it to play a second
+// process.
+var tempWriter = writerID(hostname(), os.Getpid())
+
+// maxWriterHost bounds the host part of a writer id, so every hidden name
+// still fits (createTempName).
+const maxWriterHost = 32
+
+// writerID is the writer id of the process pid on the host named host:
+// "<host>.<pid>", the host cut to its letters, digits and "-" and to
+// maxWriterHost bytes, or "<pid>" alone when no host is known. A process id
+// alone is not enough: the image runs drumdrop as process 1 of each
+// container (entrypoint.sh execs it), and a container's host name is its own
+// (Docker's is the container id, kept across a restart).
+func writerID(host string, pid int) string {
+	var b strings.Builder
+	for _, r := range host {
+		if b.Len() == maxWriterHost {
+			break
+		}
+		if r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return strconv.Itoa(pid)
+	}
+	return b.String() + "." + strconv.Itoa(pid)
+}
+
+// hostname is the host (a container's own) name, or "" when it can not be
+// read.
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
 
 // createTempName is the hidden name createOnly writes name's data under
 // first: ".<name>.<writer>.drumdrop-part", or, when that would not fit in
 // maxNameBytes (an episode's file under a long title), a short one keyed on
-// name. Each writer has its own (tempWriter, the process id), so no writer
-// ever removes, or publishes, another's unfinished file; a run that died
-// leaves a name the same writer removes next time. The container's serve is
-// the same process id on every start; a leftover of another process stays,
-// a hidden file Plex ignores.
+// name. Each writer has its own (tempWriter: the host name and the process
+// id), so no writer removes, or publishes, another's unfinished file, as
+// long as no two writers share both: two containers given one host name (a
+// compose "hostname:", host networking) and the same process id still do. A
+// run that died leaves a name the same writer removes next time: the
+// container's serve has the same host name and process id on every start;
+// a leftover of another writer (a container since recreated) stays, a
+// hidden file Plex ignores.
 func createTempName(name string) string {
 	if tmp := "." + name + "." + tempWriter + musora.TempSuffix; len(tmp) <= maxNameBytes {
 		return tmp

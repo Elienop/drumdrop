@@ -248,8 +248,9 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 }
 
 // TestCreateOnlyNeverPublishesAnotherWritersFile pins that two writers of one
-// slot (drumdrop sync beside serve: two processes, one library) never touch
-// each other's unfinished file: B starts while A's file is written but not
+// slot (drumdrop sync beside serve: two processes, one library, here each
+// process 1 of its own container, as the image runs it) never touch each
+// other's unfinished file: B starts while A's file is written but not
 // yet renamed, and gets as far as writing its own; A must still publish its
 // own flushed bytes, never B's unflushed ones (which, write-once, would stay
 // truncated forever if B then died), and B finds the slot filled.
@@ -279,7 +280,7 @@ func TestCreateOnlyNeverPublishesAnotherWritersFile(t *testing.T) {
 		}
 		switch temps.Add(1) {
 		case 1: // A's file is written: B, a second process, starts
-			tempWriter = "B"
+			tempWriter = writerID("container-b", 1)
 			go func() {
 				created, err := createOnly(r, "poster.jpg", []byte("B's, unflushed"))
 				bResult <- result{created, err}
@@ -291,7 +292,7 @@ func TestCreateOnlyNeverPublishesAnotherWritersFile(t *testing.T) {
 		}
 		return origSync(f)
 	}
-	tempWriter = "A"
+	tempWriter = writerID("container-a", 1)
 	created, err := createOnly(r, "poster.jpg", []byte("A's"))
 	close(aDone)
 	b := <-bResult
@@ -306,6 +307,40 @@ func TestCreateOnlyNeverPublishesAnotherWritersFile(t *testing.T) {
 	}
 	if got := showFileNames(t, dir); !reflect.DeepEqual(got, []string{"poster.jpg"}) {
 		t.Errorf("folder holds %v, want poster.jpg only", got)
+	}
+}
+
+// TestWriterID pins what tells one writer's hidden files from another's: the
+// host name and the process id, so two containers each running drumdrop as
+// process 1 differ; a host name is cut to letters, digits and "-" and to
+// maxWriterHost bytes (it goes into a file name), and a process with no host
+// name known is told apart by its id alone. This process's id is its own.
+func TestWriterID(t *testing.T) {
+	for _, tc := range []struct {
+		host string
+		pid  int
+		want string
+	}{
+		{"3f2a9c1b7e4d", 1, "3f2a9c1b7e4d.1"},
+		{"nas.local", 42, "naslocal.42"},
+		{"../a\\/b\n\x00é", 7, "ab.7"},
+		{strings.Repeat("h", 40), 1, strings.Repeat("h", maxWriterHost) + ".1"},
+		{"", 9, "9"},
+		{"..", 9, "9"},
+	} {
+		if got := writerID(tc.host, tc.pid); got != tc.want {
+			t.Errorf("writerID(%q, %d) = %q, want %q", tc.host, tc.pid, got, tc.want)
+		}
+	}
+	if writerID("container-a", 1) == writerID("container-b", 1) {
+		t.Error("two containers' process 1 share a writer id")
+	}
+	h, err := os.Hostname()
+	if err != nil {
+		h = ""
+	}
+	if want := writerID(h, os.Getpid()); tempWriter != want {
+		t.Errorf("tempWriter = %q, want %q (this host, this process)", tempWriter, want)
 	}
 }
 
