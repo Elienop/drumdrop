@@ -426,6 +426,26 @@ func TestMoveToLibraryPlexTVFolderCopyFailsPartWayIsRemoved(t *testing.T) {
 	assertScratchWhole(t, lessonDir)
 }
 
+// TestPlexTVLongTitleKeepsItsEpisodeBase proves a long title's episode base
+// is the one earlier versions gave it: the base is fitted to the download's
+// own "-poster.jpg", not to the shorter ".jpg" the image is placed as, so a
+// re-download keeps the episode's names (and its entries at them, ruling
+// (j)) rather than moving it to a longer base.
+func TestPlexTVLongTitleKeepsItsEpisodeBase(t *testing.T) {
+	tmp := t.TempDir()
+	show := strings.Repeat("S", 120)
+	title := strings.Repeat("T", 140)
+	lessonDir := scratchLesson(t, tmp, 5, title, []string{".mp4", ".nfo", "-poster.jpg"})
+	res, err := testMovePlexTV(t, filepath.Join(tmp, "lib"), plexEpisode{show, 1, 5, title}, lessonDir, plexLibrary{})
+	if err != nil || res.seasonDir == "" {
+		t.Fatalf("move = (%+v, %v), want a move", res, err)
+	}
+	if want := maxNameBytes - len("-poster.jpg"); len(res.episodeBase) != want {
+		t.Errorf("episodeBase is %d bytes, want %d (fitted to \"-poster.jpg\")", len(res.episodeBase), want)
+	}
+	assertExist(t, true, filepath.Join(res.seasonDir, res.episodeBase+".jpg"))
+}
+
 // TestPlexTVMoveFitsLongNames proves a long show plus a long title still
 // reaches the library, every name within 255 bytes (multi-byte titles too),
 // and that a show name leaving no room at all is refused with the lesson whole

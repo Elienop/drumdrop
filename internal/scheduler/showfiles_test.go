@@ -236,6 +236,33 @@ func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
 	})
 }
 
+// TestShowFilesLeaveTheNFOOutWhenAnImageIsNotWritten proves tvshow.nfo, the
+// mark of a done show, is written only once every image it was given is in
+// place: an image that could not be written leaves the show to the next
+// cycle.
+func TestShowFilesLeaveTheNFOOutWhenAnImageIsNotWritten(t *testing.T) {
+	dir := t.TempDir()
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	stubRename(t, func(oldpath, newpath string) error {
+		if filepath.Base(newpath) == "poster.jpg" {
+			return errors.New("injected")
+		}
+		return renameNoReplace(oldpath, newpath)
+	})
+	sf := &showFiles{poster: []byte("p"), fanart: []byte("f"), nfo: []byte("<tvshow/>")}
+	created, err := sf.writeIn(r)
+	if err == nil || !reflect.DeepEqual(created, []string{"fanart.jpg"}) {
+		t.Errorf("writeIn = %v, %v; want the background only, and the failure", created, err)
+	}
+	if got := showFileNames(t, dir); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
+		t.Errorf("show folder holds %v, want the background only", got)
+	}
+}
+
 // artWorker is plexWorker (lesson 100 "Lesson A", episode 5 of the node
 // follow "Beginner Course", 4242) with the show's course on Musora and an
 // image server: lesson 100 is in a pack of its own ("Some Pack"), which is
@@ -755,6 +782,36 @@ func TestDaemonCycleEndsWithTheShowFileStep(t *testing.T) {
 		stepRan := last >= 0 && ops[last] == "with-files" && slices.Contains(ops[:last], "drain-empty")
 		if stepRan == paused {
 			t.Errorf("paused=%v: ops %v, want the show-file step last %v", paused, ops, map[bool]string{false: "", true: "skipped"}[paused])
+		}
+	}
+}
+
+// TestShowFolderOf pins which show folder a lesson row files episodes in, for
+// the cycle's show-file step: its record's show (so a library that moved
+// still reads right), or a legacy row's season folder's parent directly under
+// today's library; never a folder elsewhere, the private folder, or a row
+// whose record is damaged.
+func TestShowFolderOf(t *testing.T) {
+	lib := filepath.Join(t.TempDir(), "lib")
+	moved := recordedRow(1, filepath.Join("/old/lib", "Show", "Season 01"), "x.mp4")
+	damaged := recordedRow(2, filepath.Join(lib, "Show", "Season 01"))
+	damaged.LibraryEntries = sql.NullString{String: `["../x"]`, Valid: true}
+	for _, tc := range []struct {
+		name string
+		row  database.Lesson
+		want string
+	}{
+		{"recorded, library moved", moved, "Show"},
+		{"legacy", legacyRow(3, "T", 1, filepath.Join(lib, "Legacy Show", "Season 02"), ""), "Legacy Show"},
+		{"legacy, another library", legacyRow(4, "T", 1, filepath.Join("/elsewhere", "Show", "Season 01"), ""), ""},
+		{"legacy, nested deeper", legacyRow(5, "T", 1, filepath.Join(lib, "A", "Show", "Season 01"), ""), ""},
+		{"default layout folder", database.Lesson{OutputDir: sql.NullString{String: filepath.Join(lib, "Course", "05 - T"), Valid: true}}, ""},
+		{"private folder", legacyRow(6, "T", 1, filepath.Join(lib, privateRootName, "Season 01"), ""), ""},
+		{"private folder, recorded", recordedRow(7, filepath.Join(lib, privateRootName, "Season 01"), "x.mp4"), ""},
+		{"damaged record", damaged, ""},
+	} {
+		if got := showFolderOf(lib, tc.row); got != tc.want {
+			t.Errorf("%s: showFolderOf = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
