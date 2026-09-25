@@ -198,6 +198,44 @@ describe("the focus border in the dark theme", () => {
   })
 })
 
+// The browser pass on 2026-09-25 found every border-* colour class dead, the
+// one above included: index.css set the default border colour outside any
+// @layer, and a rule outside a layer outranks all of Tailwind's layered
+// utilities whatever their specificity. jsdom has no cascade, so this reads
+// where each rule of index.css sits.
+describe("the default border colour", () => {
+  // index.css's rules, each with the @-rules around it. Enough of a parser for
+  // this file: comments are stripped, and no string in it holds a brace.
+  const rules: { selector: string; body: string; within: string[] }[] = []
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "")
+  const open: string[] = []
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{") {
+      open.push(text.slice(from, i).split(";").at(-1)!.trim())
+      from = i + 1
+    } else if (text[i] === "}") {
+      const selector = open.pop() ?? ""
+      if (!selector.startsWith("@")) rules.push({ selector, body: text.slice(from, i), within: [...open] })
+      from = i + 1
+    }
+  }
+
+  it("is set in the base layer, where a border-* colour class can replace it", () => {
+    const base = rules.filter((r) => r.selector === "*" && r.within.includes("@layer base"))
+    expect(base.map((r) => r.body.trim())).toEqual(["border-color: var(--color-border);"])
+  })
+
+  it("is not set, nor any other border property, by a rule outside a layer", () => {
+    // Positive control: the scan sees the rules outside a layer (:root's tokens).
+    expect(rules.some((r) => r.selector === ":root" && r.within.length === 0)).toBe(true)
+    const unlayered = rules.filter(
+      (r) => !r.within.some((w) => w.startsWith("@layer")) && /(^|[;\s])border(-[a-z]+)*\s*:/.test(r.body),
+    )
+    expect(unlayered.map((r) => r.selector)).toEqual([])
+  })
+})
+
 // Owner's ruling (g), 2026-09-24: every control with a solid fill while
 // focused sets its ring 2px off the fill, over the page background, so the
 // amber ring never touches an amber (or red) fill and reads as a fatter
