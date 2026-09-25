@@ -97,6 +97,7 @@ func TestJPEGURL(t *testing.T) {
 		sanityImage("abc", "1920x1080", "webp") + "?w=500":       sanityImage("abc", "1920x1080", "webp") + "?fm=jpg&w=500",
 		sanityImage("abc", "1920x1080", "png") + "?fm=png":       sanityImage("abc", "1920x1080", "png") + "?fm=jpg",
 		"https://i.vimeocdn.com/video/1-d_640.jpg":               "https://i.vimeocdn.com/video/1-d_640.jpg",
+		"https://i.vimeocdn.com/video/1 d.jpg":                   "https://i.vimeocdn.com/video/1 d.jpg",
 		"https://cdn.sanity.io/files/4032r8py/production_v2/a.x": "https://cdn.sanity.io/files/4032r8py/production_v2/a.x",
 		"//cdn.sanity.io/images/p/d/abc-10x10.png":               "https://cdn.sanity.io/images/p/d/abc-10x10.png?fm=jpg",
 		"//i.vimeocdn.com/video/1-d_640.jpg":                     "https://i.vimeocdn.com/video/1-d_640.jpg",

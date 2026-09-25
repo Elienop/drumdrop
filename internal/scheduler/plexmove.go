@@ -344,14 +344,14 @@ type seasonPrevious struct {
 // aside. An error means the move must fail.
 func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[string]bool, kept []keptFolder, stays []string, err error) {
 	ours = make(map[string]bool, len(remove))
-	plainStays := s.plainVideoStays()
+	plainThere := s.plainVideoThere()
 	for _, p := range remove {
 		ours[p] = true
 		if dst := placedAt(p, s.plan.steps); dst != "" {
 			ours[dst] = true
 			continue
 		}
-		if s.replacedByVersion(p, plainStays) {
+		if s.replacedByVersion(p, plainThere) {
 			if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
 				return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
 			}
@@ -372,17 +372,17 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 	return ours, kept, stays, nil
 }
 
-// plainVideoStays reports whether a plain video, "<episode base>.mp4", is in
-// the season folder and stays there: no step places anything at its name.
-// That happens when Musora calls a lesson a song whose record is an
-// ordinary lesson's (the re-download brings versions, never that video, and
-// keeps what it did not bring back, owner ruling #72), or when a video is
-// there that no record names. Plex reads that video's image and nfo only
-// under its own name, "<base>.jpg" and "<base>.nfo".
-func (s seasonPrevious) plainVideoStays() bool {
-	name := s.plan.episodeBase + ".mp4"
-	isDir, there := s.listing[name]
-	return there && !isDir && placedAt(filepath.Join(filepath.Clean(s.seasonDir), name), s.plan.steps) == ""
+// plainVideoThere reports whether a plain video, "<episode base>.mp4", is in
+// the season folder. It stays there when Musora calls a lesson a song whose
+// record is an ordinary lesson's (the re-download brings versions, never
+// that video, and keeps what it did not bring back, owner ruling #72), or
+// when it is a video no record names. Plex reads that video's image and nfo
+// only under its own name, "<base>.jpg" and "<base>.nfo". (A download brings
+// either a plain video or versions, never both, so one the move places
+// anew gets its files at those names too.)
+func (s seasonPrevious) plainVideoThere() bool {
+	isDir, there := s.listing[s.plan.episodeBase+".mp4"]
+	return there && !isDir
 }
 
 // replacedByVersion reports whether p, an entry the lesson's record names,
@@ -394,27 +394,27 @@ func (s seasonPrevious) plainVideoStays() bool {
 // (j)). The download brought the file back, so the old one goes like any
 // replaced entry (removed once the download is recorded, put back by an
 // undo), and the episode keeps its file, never none, never two. While a
-// plain video stays (plainStays, plainVideoStays), only a file the move
+// plain video is there (plainThere, plainVideoThere), only a file the move
 // places under that video's own name ("<base>.jpg", "<base>.nfo") brings
 // the old one back: the versions' own files are no image or nfo of that
 // video, so without it the video would lose its own.
-func (s seasonPrevious) replacedByVersion(p string, plainStays bool) bool {
+func (s seasonPrevious) replacedByVersion(p string, plainThere bool) bool {
 	season := filepath.Clean(s.seasonDir)
 	if filepath.Dir(p) != season {
 		return false
 	}
 	base := s.plan.episodeBase
-	var kind, plain string
+	var kind string
 	switch filepath.Base(p) {
 	case base + musora.PosterSuffix, base + library.EpisodeImageSuffix:
-		kind, plain = musora.PosterSuffix, base+library.EpisodeImageSuffix
+		kind = musora.PosterSuffix
 	case base + ".nfo":
-		kind, plain = ".nfo", base+".nfo"
+		kind = ".nfo"
 	default:
 		return false
 	}
 	for _, st := range s.plan.steps {
-		if st.from == kind && st.dst != p && (!plainStays || st.dst == filepath.Join(season, plain)) {
+		if st.from == kind && st.dst != p && (!plainThere || st.dst == filepath.Join(season, base+filepath.Ext(st.dst))) {
 			return true
 		}
 	}
