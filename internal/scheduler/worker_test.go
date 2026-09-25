@@ -86,6 +86,20 @@ type fakeWorkerStore struct {
 	// withFiles is what ListLessonsWithFiles returns (or withFilesErr).
 	withFiles    []database.Lesson
 	withFilesErr error
+	// swaps are the records SwapLibraryEntries wrote, in order. It writes on
+	// withFiles' row, as the store's compare-and-swap does: only while the
+	// row records before's files (database.ErrLessonChanged) and is not held
+	// by a delete (database.ErrLessonDeleting). onSwap, when set, runs first
+	// (a delete or a download landing just before the write); swapErr, when
+	// set, is what it answers, writing nothing.
+	swaps   []swapCall
+	onSwap  func()
+	swapErr error
+}
+
+type swapCall struct {
+	id      int
+	entries []string
 }
 
 type markDownloadedCall struct {
@@ -213,7 +227,31 @@ func (s *fakeWorkerStore) ConfirmDownload(ctx context.Context, jobID int64, id i
 }
 
 func (s *fakeWorkerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
-	return s.withFiles, s.withFilesErr
+	return append([]database.Lesson(nil), s.withFiles...), s.withFilesErr
+}
+
+func (s *fakeWorkerStore) SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error {
+	if s.onSwap != nil {
+		s.onSwap()
+	}
+	if s.swapErr != nil {
+		return s.swapErr
+	}
+	for i, r := range s.withFiles {
+		if r.RailcontentID != before.RailcontentID {
+			continue
+		}
+		switch {
+		case r.Deleting:
+			return database.ErrLessonDeleting
+		case r.OutputDir != before.OutputDir || r.VideoPath != before.VideoPath || r.LibraryEntries != before.LibraryEntries:
+			return database.ErrLessonChanged
+		}
+		s.withFiles[i].LibraryEntries = database.EncodeLibraryEntries(entries)
+		s.swaps = append(s.swaps, swapCall{id: before.RailcontentID, entries: entries})
+		return nil
+	}
+	return sql.ErrNoRows
 }
 
 func (s *fakeWorkerStore) StartDownload(ctx context.Context, jobID int64, id int) error {

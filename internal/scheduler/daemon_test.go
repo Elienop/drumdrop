@@ -104,6 +104,10 @@ func (s *fakeDaemonStore) MarkJobRunning(ctx context.Context, id int64) error { 
 func (s *fakeDaemonStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
 	return nil, nil
 }
+func (s *fakeDaemonStore) SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error {
+	s.record("swap")
+	return nil
+}
 func (s *fakeDaemonStore) StartDownload(ctx context.Context, jobID int64, id int) error { return nil }
 func (s *fakeDaemonStore) ConfirmDownload(ctx context.Context, jobID int64, id int) error {
 	return nil

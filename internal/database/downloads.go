@@ -720,33 +720,64 @@ func (s *Store) KeepLessonFiles(ctx context.Context, before Lesson, kept KeptFil
 			sameFilesArgs(before)...)...)
 }
 
-// casLesson runs a compare-and-swap UPDATE on one lesson row and turns "no row
-// matched" into ErrLessonChanged (the row exists but moved on) or a wrapped
-// sql.ErrNoRows (the row is gone).
+// SwapLibraryEntries records entries as lesson before's library record: the
+// write of the one-time rename of the plex-tv episode files (owner ruling #78
+// 4 and 5), which records a legacy row's files, or swaps a record's old names
+// for the new ones. It writes only while the row still records exactly
+// before's files, each column compared on its own as the delete's final
+// write does, and no delete holds the lesson. Otherwise it writes nothing and
+// returns ErrLessonDeleting (a delete holds it), ErrLessonChanged (something
+// recorded other files meanwhile) or a wrapped sql.ErrNoRows (the row is
+// gone). entries must not be nil: a rename never writes "no record". Nothing
+// else changes, updated_at included: the lesson's files are the same, only
+// their names are not.
+func (s *Store) SwapLibraryEntries(ctx context.Context, before Lesson, entries []string) error {
+	if entries == nil {
+		return fmt.Errorf("lesson %d: a rename records a list of entries, never no record", before.RailcontentID)
+	}
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := lessonDeletingTx(ctx, tx, before.RailcontentID); err != nil {
+			return err
+		}
+		return casLessonTx(ctx, tx, before,
+			`UPDATE lessons SET library_entries = ? WHERE `+sameFilesClause,
+			append([]any{EncodeLibraryEntries(entries)}, sameFilesArgs(before)...)...)
+	})
+}
+
+// casLesson runs a compare-and-swap UPDATE on one lesson row (casLessonTx) in
+// a transaction of its own.
 func (s *Store) casLesson(ctx context.Context, before Lesson, query string, args ...any) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, query, args...)
-		if err != nil {
-			return fmt.Errorf("update lesson %d: %w", before.RailcontentID, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("rows affected updating lesson %d: %w", before.RailcontentID, err)
-		}
-		if n == 1 {
-			return nil
-		}
-		var exists int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM lessons WHERE railcontent_id = ?`, before.RailcontentID,
-		).Scan(&exists); err != nil {
-			return fmt.Errorf("check lesson %d: %w", before.RailcontentID, err)
-		}
-		if exists == 0 {
-			return fmt.Errorf("lesson %d: %w", before.RailcontentID, sql.ErrNoRows)
-		}
-		return fmt.Errorf("lesson %d: %w", before.RailcontentID, ErrLessonChanged)
+		return casLessonTx(ctx, tx, before, query, args...)
 	})
+}
+
+// casLessonTx runs a compare-and-swap UPDATE on one lesson row and turns "no
+// row matched" into ErrLessonChanged (the row exists but moved on) or a
+// wrapped sql.ErrNoRows (the row is gone).
+func casLessonTx(ctx context.Context, tx *sql.Tx, before Lesson, query string, args ...any) error {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("update lesson %d: %w", before.RailcontentID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected updating lesson %d: %w", before.RailcontentID, err)
+	}
+	if n == 1 {
+		return nil
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM lessons WHERE railcontent_id = ?`, before.RailcontentID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("check lesson %d: %w", before.RailcontentID, err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("lesson %d: %w", before.RailcontentID, sql.ErrNoRows)
+	}
+	return fmt.Errorf("lesson %d: %w", before.RailcontentID, ErrLessonChanged)
 }
 
 // RemoveFilelessFollowCascade is RemoveFollowCascade for a delete that removed

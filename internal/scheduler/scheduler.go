@@ -88,6 +88,10 @@ type Store interface {
 	NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error
 	CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
+	// the one-time rename of plex-tv episode files (episodefiles.go): a
+	// compare-and-swap of the lesson's library record that a delete's hold
+	// refuses (database.ErrLessonDeleting, ErrLessonChanged, sql.ErrNoRows).
+	SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error
 }
 
 // Compile-time assertion that the real store satisfies the scheduler's Store

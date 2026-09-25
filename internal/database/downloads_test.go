@@ -653,6 +653,79 @@ func TestTombstoneAndKeepCompareEachColumn(t *testing.T) {
 	}
 }
 
+// TestSwapLibraryEntries pins the one-time rename's write (owner ruling #78):
+// it records the new list only while the row still records exactly the files
+// that were read (any ONE column changed is caught) and no delete holds it,
+// writing nothing else (not even updated_at); a legacy row's NULL record is
+// matched as NULL; and it never writes "no record".
+func TestSwapLibraryEntries(t *testing.T) {
+	ctx := context.Background()
+	newRecord := []string{"S/Season 01/a.mp4", "S/Season 01/a.jpg"}
+	seed := func(t *testing.T, entries sql.NullString) (*Store, Lesson) {
+		t.Helper()
+		s := newTestStore(t)
+		seedJob(t, s, 1, sql.NullInt64{})
+		seedFiles(t, s, 1, "/lib/S/Season 01", "/lib/S/Season 01/a.mp4", entries)
+		mustExec(t, s, `UPDATE lessons SET updated_at = '2020-01-01 00:00:00' WHERE railcontent_id = 1`)
+		return s, mustLesson(t, s, 1)
+	}
+	for name, entries := range map[string]sql.NullString{
+		"recorded": EncodeLibraryEntries([]string{"S/Season 01/a.mp4", "S/Season 01/a-poster.jpg"}),
+		"legacy":   {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, before := seed(t, entries)
+			if err := s.SwapLibraryEntries(ctx, before, newRecord); err != nil {
+				t.Fatalf("SwapLibraryEntries: %v", err)
+			}
+			want := before
+			want.LibraryEntries = EncodeLibraryEntries(newRecord)
+			if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, want) {
+				t.Errorf("row:\n got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+	for _, col := range []string{"output_dir", "video_path", "library_entries"} {
+		t.Run(col+" changed", func(t *testing.T) {
+			s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+			mustExec(t, s, `UPDATE lessons SET `+col+` = 'changed' WHERE railcontent_id = 1`)
+			changed := mustLesson(t, s, 1)
+			if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonChanged) {
+				t.Errorf("SwapLibraryEntries = %v, want ErrLessonChanged", err)
+			}
+			if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, changed) {
+				t.Errorf("row touched:\n got %+v\nwant %+v", got, changed)
+			}
+		})
+	}
+	t.Run("a delete holds it", func(t *testing.T) {
+		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+		if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+			t.Fatalf("BeginLessonDelete: %v", err)
+		}
+		held := mustLesson(t, s, 1)
+		if err := s.SwapLibraryEntries(ctx, before, newRecord); !errors.Is(err, ErrLessonDeleting) {
+			t.Errorf("SwapLibraryEntries = %v, want ErrLessonDeleting", err)
+		}
+		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, held) {
+			t.Errorf("row touched:\n got %+v\nwant %+v", got, held)
+		}
+	})
+	t.Run("no record", func(t *testing.T) {
+		s, before := seed(t, EncodeLibraryEntries([]string{"S/Season 01/a.mp4"}))
+		if err := s.SwapLibraryEntries(ctx, before, nil); err == nil {
+			t.Error("SwapLibraryEntries(nil) = nil, want a refusal")
+		}
+		if got := mustLesson(t, s, 1); !reflect.DeepEqual(got, before) {
+			t.Errorf("row touched:\n got %+v\nwant %+v", got, before)
+		}
+	})
+	s := newTestStore(t)
+	if err := s.SwapLibraryEntries(ctx, Lesson{RailcontentID: 404}, newRecord); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("SwapLibraryEntries unknown = %v, want sql.ErrNoRows", err)
+	}
+}
+
 // TestTombstoneEndsTheDelete pins the tombstone: skipped/deleted, every path
 // cleared, and the delete ended.
 func TestTombstoneEndsTheDelete(t *testing.T) {

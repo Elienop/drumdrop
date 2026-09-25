@@ -168,6 +168,22 @@ func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return 
 func (s *cliStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
 	return s.withFiles, nil
 }
+
+// SwapLibraryEntries records the new record on the row withFiles holds for
+// before, when it still records before's files (the store's compare-and-swap).
+func (s *cliStore) SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error {
+	for i, r := range s.withFiles {
+		if r.RailcontentID != before.RailcontentID {
+			continue
+		}
+		if r.OutputDir != before.OutputDir || r.VideoPath != before.VideoPath || r.LibraryEntries != before.LibraryEntries {
+			return database.ErrLessonChanged
+		}
+		s.withFiles[i].LibraryEntries = database.EncodeLibraryEntries(entries)
+		return nil
+	}
+	return sql.ErrNoRows
+}
 func (s *cliStore) setJobStatus(id int64, status string) {
 	j := s.jobs[id]
 	j.Status = status
