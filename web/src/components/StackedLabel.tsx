@@ -17,10 +17,10 @@ import { cn } from "@/lib/utils"
 export function StackedLabel<K extends string>({
   labels,
   active,
-}: {
+}: Readonly<{
   labels: Record<K, React.ReactNode>
   active: K
-}) {
+}>) {
   return (
     <span className="inline-grid gap-[inherit]">
       {(Object.keys(labels) as K[]).map((key) => (

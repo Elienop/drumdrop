@@ -27,12 +27,12 @@ export function InlineError({
   error,
   stale = false,
   className,
-}: {
+}: Readonly<{
   id: string
   error: ShownError | null
   stale?: boolean
   className?: string
-}) {
+}>) {
   return (
     <div id={id} role="alert" className={cn("empty:-mt-4", className)}>
       {error && (

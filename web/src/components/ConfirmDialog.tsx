@@ -102,7 +102,7 @@ export function ConfirmDialog<T>({
   returnFocus,
   children,
   releaseAfterMs = RELEASE_AFTER_MS,
-}: ConfirmDialogProps<T>) {
+}: Readonly<ConfirmDialogProps<T>>) {
   const { pending, error, run, onCloseAutoFocus } = useDialogRequest({ open, returnFocus })
   const [released, setReleased] = React.useState(false)
   const [anchorBottom, setAnchorBottom] = React.useState<number | null>(null)
@@ -218,11 +218,15 @@ export function ConfirmDialog<T>({
         </div>
 
         <InlineError id={errorId} error={error} stale={pending} />
-        <p role="status" className="text-left text-sm text-pretty text-muted-foreground empty:-mt-4">
+        {/* <output> is the native status region (a polite, atomic live
+            region, as role="status" is). It is inline by default, but as an
+            item of this flex column it is blockified: the same box a <p>
+            had. */}
+        <output className="text-left text-sm text-pretty text-muted-foreground empty:-mt-4">
           {pending && released
             ? "This is taking longer than usual. You can close this dialog; the result will appear as a notification."
             : null}
-        </p>
+        </output>
 
         <AlertDialogFooter>
           <AlertDialogCancel disabled={locked}>

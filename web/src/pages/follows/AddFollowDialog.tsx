@@ -75,11 +75,11 @@ export function AddFollowDialog({
   open,
   onOpenChange,
   returnFocus,
-}: {
+}: Readonly<{
   open: boolean
   onOpenChange: (open: boolean) => void
   returnFocus: () => FocusTarget[]
-}) {
+}>) {
   const qc = useQueryClient()
   // The daemon's pause flag, from the top bar's query and read as it reads
   // it. Only while open, so opening the dialog re-reads a stale flag. An
@@ -119,9 +119,14 @@ export function AddFollowDialog({
   // (and the Add button cannot lose its preview and drop focus). During a
   // preview it stays editable; an edit just leaves that preview unshown.
   const adding = pending && step === "add"
+  // While a preview runs, Preview shows it and Add waits. `step` is one of
+  // the two, so a running request is exactly one of `adding` and `previewing`
+  // and each button is disabled while the other one's request runs.
+  const previewing = pending && step === "preview"
 
   const target: Target = kind === "node" ? { kind, id } : { kind, slug, brand }
-  const shown = preview !== null && preview.key === targetKey(target) ? preview : null
+  // No preview has no key, and a target's key is always a string.
+  const shown = preview?.key === targetKey(target) ? preview : null
 
   const runPreview = () => {
     setStep("preview")
@@ -197,6 +202,11 @@ export function AddFollowDialog({
     set(e.target.value)
     dismissError()
   }
+
+  // The failure describes the button of the step that failed. Not while a
+  // request runs: the message is about the last attempt.
+  const describedBy = (of: typeof step) =>
+    error !== null && !pending && step === of ? errorId : undefined
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -307,10 +317,15 @@ export function AddFollowDialog({
             this is a live region, and like InlineError's it is ALWAYS
             rendered, only its content changes (a region inserted together
             with its text is missed by some screen readers). Empty, it costs
-            no space: empty:-mt-4 cancels the flex column's gap-4. */}
-        <div role="status" className="empty:-mt-4">
+            no space: empty:-mt-4 cancels the flex column's gap-4.
+            <output> is the native status region (polite and atomic, as
+            role="status" is). Inline by default, but as an item of this
+            flex column it is blockified: the same box the <div> had. It
+            holds phrasing content only, so the boxes inside are spans; each
+            sets its own display (flex), so a span draws a div's box. */}
+        <output className="empty:-mt-4">
           {shown && (
-            <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
+            <span className="flex flex-col gap-1 rounded-md border bg-muted/40 p-3">
               {/* The slug beside the name is what will be followed, whatever
                   was typed: "Jared Falk" previews as @jared-falk. The brand
                   ends the count line, as the count is of that brand's
@@ -323,21 +338,21 @@ export function AddFollowDialog({
                   other browsers and screen readers, which may read the
                   joined text. Blank text between flex items is not
                   rendered, so nothing moves on screen. */}
-              <div className="flex flex-wrap items-baseline gap-x-2">
+              <span className="flex flex-wrap items-baseline gap-x-2">
                 <span className="font-medium">{shown.data.title}</span>{" "}
                 {shown.data.slug && (
                   <span className="text-sm wrap-anywhere text-muted-foreground">
                     @{shown.data.slug}
                   </span>
                 )}
-              </div>{" "}
+              </span>{" "}
               <span className="text-sm text-muted-foreground">
                 {countOf(shown.data.lesson_count, "lesson", "lessons")}
                 {shown.data.brand && ` on ${brandName(shown.data.brand)}`}
               </span>
-            </div>
+            </span>
           )}
-        </div>
+        </output>
 
         <InlineError id={errorId} error={error} stale={pending} />
 
@@ -356,12 +371,10 @@ export function AddFollowDialog({
               preview is shown. */}
           <PendingButton
             variant={shown ? "outline" : "default"}
-            pending={pending && step === "preview"}
+            pending={previewing}
             pendingLabel="Previewing…"
-            disabled={!canPreview || (pending && step !== "preview")}
-            aria-describedby={
-              error !== null && !pending && step === "preview" ? errorId : undefined
-            }
+            disabled={!canPreview || adding}
+            aria-describedby={describedBy("preview")}
             onClick={runPreview}
           >
             Preview
@@ -369,10 +382,10 @@ export function AddFollowDialog({
           <PendingButton
             ref={addRef}
             variant={shown ? "default" : "outline"}
-            pending={pending && step === "add"}
+            pending={adding}
             pendingLabel="Adding…"
-            disabled={!shown || (pending && step !== "add")}
-            aria-describedby={error !== null && !pending && step === "add" ? errorId : undefined}
+            disabled={!shown || previewing}
+            aria-describedby={describedBy("add")}
             onClick={runAdd}
           >
             Add

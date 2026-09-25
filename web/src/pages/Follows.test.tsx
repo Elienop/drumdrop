@@ -1194,6 +1194,16 @@ it("the preview lands in a status region that is always there, so a screen reade
     expect(status).toHaveTextContent(/^Jared Falk @jared-falk 40 lessons on Drumeo$/),
   )
   expect(within(dialog).getByRole("status")).toBe(status)
+
+  // The native element, not a role: a <div role="status"> passes every
+  // query above too. <output> is inline by default; as an item of the
+  // dialog's flex column it is blockified, the box the <div> had. It holds
+  // phrasing content only, so no <div> inside it.
+  expect(status.tagName).toBe("OUTPUT")
+  expect(status).not.toHaveAttribute("role")
+  expect(status.parentElement).toBe(dialog)
+  expect(dialog).toHaveClass("flex", "flex-col")
+  expect(status.querySelector("div")).toBeNull()
 })
 
 it("Enter previews from either instructor field, where a form with two fields would not submit", async () => {

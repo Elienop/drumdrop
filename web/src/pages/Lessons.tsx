@@ -90,7 +90,13 @@ function rowNote(lesson: LessonDTO): string | null {
     return null
   const note = lesson.error?.trim()
   if (lesson.status === "skipped" && note === TOMBSTONE) return "Files deleted"
-  return note ? note : null
+  return note || null
+}
+
+// listedLessons is the Lessons card's description: which lessons it lists.
+function listedLessons(follow: number | null, followTitle: string | undefined): string {
+  if (follow == null) return "All tracked lessons"
+  return followTitle ? `Lessons of “${followTitle}”` : "Lessons of one follow"
 }
 
 // RowMenu is a row's ⋯ menu, closed by itself when its lesson starts or stops
@@ -107,10 +113,10 @@ function rowNote(lesson: LessonDTO): string | null {
 function RowMenu({
   downloading,
   children,
-}: {
+}: Readonly<{
   downloading: boolean
   children: (contentClassName: string | undefined) => React.ReactNode
-}) {
+}>) {
   // What `downloading` was when the menu opened; null while it is closed.
   const [openedAs, setOpenedAs] = React.useState<boolean | null>(null)
   // Whether the last close was this one, not the user's.
@@ -179,12 +185,10 @@ export function Lessons() {
   // status tabs and follow view return the full set (no paging).
   const lessons = useQuery({
     queryKey: qk.lessons({ follow, status, offset: status ? undefined : offset }),
-    queryFn: () =>
-      follow != null
-        ? api.followLessons(follow, status)
-        : api.listLessons(
-            status ? { status } : { limit: PAGE_SIZE, offset },
-          ),
+    queryFn: () => {
+      if (follow != null) return api.followLessons(follow, status)
+      return api.listLessons(status ? { status } : { limit: PAGE_SIZE, offset })
+    },
   })
 
   // Running jobs let us resolve a downloading lesson's job id for Cancel.
@@ -246,7 +250,8 @@ export function Lessons() {
           queuedNow = s === 202
         }),
       )
-      return outcome === "already-gone" ? outcome : queuedNow ? "queued" : "already-queued"
+      if (outcome === "already-gone") return outcome
+      return queuedNow ? "queued" : "already-queued"
     },
     onSuccess: (outcome, lesson) => {
       const description = lesson.title
@@ -361,6 +366,207 @@ export function Lessons() {
 
   const loadedCount = lessons.data?.length ?? 0
 
+  // The card's body: the query's state until the lessons load, then
+  // their table, or a line saying there are none.
+  let body: React.ReactNode
+  if (lessons.isPending || lessons.isError) {
+    body = (
+      <QueryStatus
+        loading={lessons.isPending}
+        error={lessons.error}
+        onRetry={() => lessons.refetch()}
+        fallbackMessage="Couldn't load the lessons. Check that DrumDrop is running, then Retry."
+      />
+    )
+  } else if (rows.length === 0) {
+    body = <p className="text-sm text-muted-foreground">No lessons</p>
+  } else {
+    body = (
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Title</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className={WIDE_ONLY}>Brand</TableHead>
+            <TableHead className={WIDE_ONLY}>Quality</TableHead>
+            <TableHead>Size</TableHead>
+            <TableHead>Updated</TableHead>
+            <TableHead className="w-0" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((lesson) => {
+            const live = active[lesson.railcontent_id]
+            const note = rowNote(lesson)
+            // While a delete of it runs, no action is offered that would
+            // race it (the server may refuse them anyway).
+            const busy = lesson.deleting
+            // The running job Cancel stops: unknown until the jobs load.
+            const jobId = runningJobByRailcontent.get(lesson.railcontent_id)
+            // Every menu item is keyed by its action. The items are
+            // built from the live row, and React reuses an unkeyed
+            // item in the same place for the next status's item: the
+            // highlighted Download would become Cancel download, still
+            // highlighted, when the download starts (ruling (q)).
+            // RowMenu now closes on that change (ruling (v)); the keys
+            // stay, so no item is ever reused for another action.
+            const copyItem = (
+              <DropdownMenuItem key="copy" onSelect={() => copyPath(lesson)}>
+                Copy path
+              </DropdownMenuItem>
+            )
+            // The menu's first group: only Copy path while a delete runs.
+            let items: React.ReactNode
+            if (busy) {
+              items = copyItem
+            } else if (lesson.status === "downloading") {
+              // Copy path first, Cancel download after (owner's ruling
+              // 2026-09-24, (q)). An open menu no longer changes into
+              // this one: RowMenu closes it when the download starts
+              // (ruling (v)). The order stays, so the first item, where
+              // a reopened menu's highlight lands, is still the harmless
+              // one.
+              items = (
+                <>
+                  {copyItem}
+                  <DropdownMenuItem
+                    key="cancel"
+                    disabled={jobId === undefined}
+                    onSelect={() => {
+                      if (jobId !== undefined) cancel.mutate({ jobId, lesson })
+                    }}
+                  >
+                    Cancel download
+                  </DropdownMenuItem>
+                </>
+              )
+            } else {
+              items = (
+                <>
+                  {lesson.status === "skipped" && (
+                    <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
+                      Un-skip
+                    </DropdownMenuItem>
+                  )}
+                  {/* A downloaded lesson WITH a note is a failed
+                      re-download that kept the earlier files: syncs
+                      leave it alone, so Download is how to try again
+                      (owner's ruling 2026-09-24, (h)). */}
+                  {(lesson.status !== "downloaded" || note) && (
+                    <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
+                      Download
+                    </DropdownMenuItem>
+                  )}
+                  {(lesson.status === "pending" || lesson.status === "failed") && (
+                    <DropdownMenuItem
+                      key="skip"
+                      onSelect={() => openRowDialog(setSkipping, lesson)}
+                    >
+                      Skip
+                    </DropdownMenuItem>
+                  )}
+                  {copyItem}
+                </>
+              )
+            }
+            return (
+              <TableRow key={lesson.railcontent_id}>
+                <TableCell className="font-medium">
+                  {lesson.title}
+                  {note && (
+                    // Clamped; the title attribute carries all of it (a
+                    // skip's reason is whatever was typed). A minimum
+                    // width: titles don't wrap, so the column is as wide
+                    // as the longest one on the page, and with short
+                    // titles only it left a note 244px at 1024px, cut
+                    // after a clause. From xl: 28rem and two lines, where
+                    // every sentence the server writes fits (the
+                    // longest, 147 characters, needs about 27rem). Below
+                    // xl: 22rem (min-w-88) and three lines, so that with
+                    // Brand and Quality hidden (WIDE_ONLY) the table fits
+                    // a 1024px window without scrolling sideways (owner's
+                    // ruling 2026-09-24, (t)). A long title still makes
+                    // it scroll.
+                    <p
+                      title={note}
+                      className="mt-0.5 line-clamp-3 max-w-md min-w-88 text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground xl:line-clamp-2 xl:min-w-md"
+                    >
+                      {note}
+                    </p>
+                  )}
+                  {live && (
+                    <div className="mt-2 max-w-md">
+                      <ProgressRow
+                        title={live.title || lesson.title}
+                        pct={live.pct}
+                        speed={live.speed}
+                        bytes={live.bytes}
+                        totalBytes={live.totalBytes}
+                      />
+                    </div>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={busy ? "deleting" : lesson.status} />
+                </TableCell>
+                <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
+                  {brandName(lesson.brand)}
+                </TableCell>
+                <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
+                  {lesson.quality ?? "—"}
+                </TableCell>
+                <TableCell className="text-muted-foreground tabular-nums">
+                  {formatBytes(lesson.bytes)}
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatRelativeTime(lesson.updated_at)}
+                </TableCell>
+                <TableCell className="text-right">
+                  <RowMenu downloading={lesson.status === "downloading"}>
+                    {(contentClassName) => (
+                      <>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Actions for ${lesson.title}`}
+                            data-row-actions={lesson.railcontent_id}
+                          >
+                            <MoreHorizontal />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className={contentClassName}>
+                          <DropdownMenuGroup>{items}</DropdownMenuGroup>
+                          {/* Whatever the status: a canceled or failed
+                              re-download, or a delete that stopped the job
+                              but kept files, leaves a lesson that still owns
+                              files (BACKLOG D63). */}
+                          {lesson.has_files && !busy && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuGroup>
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={() => openRowDialog(setDeleting, lesson)}
+                                >
+                                  Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuGroup>
+                            </>
+                          )}
+                        </DropdownMenuContent>
+                      </>
+                    )}
+                  </RowMenu>
+                </TableCell>
+              </TableRow>
+            )
+          })}
+        </TableBody>
+      </Table>
+    )
+  }
+
   // No scroll anchoring on this page (owner's ruling 2026-09-24, (w)). The
   // page scrolls inside the app shell's <main> (App.tsx), not the window
   // and not the table's overflow-x wrapper, whose height is its content's.
@@ -432,206 +638,10 @@ export function Lessons() {
       <Card>
         <CardHeader>
           <CardTitle>Lessons</CardTitle>
-          <CardDescription>
-            {follow == null
-              ? "All tracked lessons"
-              : followTitle
-                ? `Lessons of “${followTitle}”`
-                : "Lessons of one follow"}
-          </CardDescription>
+          <CardDescription>{listedLessons(follow, followTitle)}</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {lessons.isPending || lessons.isError ? (
-            <QueryStatus
-              loading={lessons.isPending}
-              error={lessons.error}
-              onRetry={() => lessons.refetch()}
-              fallbackMessage="Couldn't load the lessons. Check that DrumDrop is running, then Retry."
-            />
-          ) : rows.length > 0 ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className={WIDE_ONLY}>Brand</TableHead>
-                  <TableHead className={WIDE_ONLY}>Quality</TableHead>
-                  <TableHead>Size</TableHead>
-                  <TableHead>Updated</TableHead>
-                  <TableHead className="w-0" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((lesson) => {
-                  const live = active[lesson.railcontent_id]
-                  const note = rowNote(lesson)
-                  // While a delete of it runs, no action is offered that would
-                  // race it (the server may refuse them anyway).
-                  const busy = lesson.deleting
-                  // The running job Cancel stops: unknown until the jobs load.
-                  const jobId = runningJobByRailcontent.get(lesson.railcontent_id)
-                  // Every menu item is keyed by its action. The items are
-                  // built from the live row, and React reuses an unkeyed
-                  // item in the same place for the next status's item: the
-                  // highlighted Download would become Cancel download, still
-                  // highlighted, when the download starts (ruling (q)).
-                  // RowMenu now closes on that change (ruling (v)); the keys
-                  // stay, so no item is ever reused for another action.
-                  const copyItem = (
-                    <DropdownMenuItem key="copy" onSelect={() => copyPath(lesson)}>
-                      Copy path
-                    </DropdownMenuItem>
-                  )
-                  return (
-                    <TableRow key={lesson.railcontent_id}>
-                      <TableCell className="font-medium">
-                        {lesson.title}
-                        {note && (
-                          // Clamped; the title attribute carries all of it (a
-                          // skip's reason is whatever was typed). A minimum
-                          // width: titles don't wrap, so the column is as wide
-                          // as the longest one on the page, and with short
-                          // titles only it left a note 244px at 1024px, cut
-                          // after a clause. From xl: 28rem and two lines, where
-                          // every sentence the server writes fits (the
-                          // longest, 147 characters, needs about 27rem). Below
-                          // xl: 22rem (min-w-88) and three lines, so that with
-                          // Brand and Quality hidden (WIDE_ONLY) the table fits
-                          // a 1024px window without scrolling sideways (owner's
-                          // ruling 2026-09-24, (t)). A long title still makes
-                          // it scroll.
-                          <p
-                            title={note}
-                            className="mt-0.5 line-clamp-3 max-w-md min-w-88 text-xs font-normal wrap-break-word whitespace-normal text-muted-foreground xl:line-clamp-2 xl:min-w-md"
-                          >
-                            {note}
-                          </p>
-                        )}
-                        {live && (
-                          <div className="mt-2 max-w-md">
-                            <ProgressRow
-                              title={live.title || lesson.title}
-                              pct={live.pct}
-                              speed={live.speed}
-                              bytes={live.bytes}
-                              totalBytes={live.totalBytes}
-                            />
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={busy ? "deleting" : lesson.status} />
-                      </TableCell>
-                      <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
-                        {brandName(lesson.brand)}
-                      </TableCell>
-                      <TableCell className={cn(WIDE_ONLY, "text-muted-foreground")}>
-                        {lesson.quality ?? "—"}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground tabular-nums">
-                        {formatBytes(lesson.bytes)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatRelativeTime(lesson.updated_at)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <RowMenu downloading={lesson.status === "downloading"}>
-                          {(contentClassName) => (
-                            <>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  aria-label={`Actions for ${lesson.title}`}
-                                  data-row-actions={lesson.railcontent_id}
-                                >
-                                  <MoreHorizontal />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" className={contentClassName}>
-                                <DropdownMenuGroup>
-                                  {busy ? (
-                                    copyItem
-                                  ) : lesson.status === "downloading" ? (
-                                    // Copy path first, Cancel download after
-                                    // (owner's ruling 2026-09-24, (q)). An open menu
-                                    // no longer changes into this one: RowMenu
-                                    // closes it when the download starts (ruling
-                                    // (v)). The order stays, so the first item,
-                                    // where a reopened menu's highlight lands, is
-                                    // still the harmless one.
-                                    <>
-                                      {copyItem}
-                                      <DropdownMenuItem
-                                        key="cancel"
-                                        disabled={jobId === undefined}
-                                        onSelect={() => {
-                                          if (jobId !== undefined) cancel.mutate({ jobId, lesson })
-                                        }}
-                                      >
-                                        Cancel download
-                                      </DropdownMenuItem>
-                                    </>
-                                  ) : (
-                                    <>
-                                      {lesson.status === "skipped" && (
-                                        <DropdownMenuItem key="unskip" onSelect={() => unskip.mutate(lesson)}>
-                                          Un-skip
-                                        </DropdownMenuItem>
-                                      )}
-                                      {/* A downloaded lesson WITH a note is a failed
-                                          re-download that kept the earlier files:
-                                          syncs leave it alone, so Download is how
-                                          to try again (owner's ruling 2026-09-24,
-                                          (h)). */}
-                                      {(lesson.status !== "downloaded" || note) && (
-                                        <DropdownMenuItem key="download" onSelect={() => download.mutate(lesson)}>
-                                          Download
-                                        </DropdownMenuItem>
-                                      )}
-                                      {(lesson.status === "pending" ||
-                                        lesson.status === "failed") && (
-                                        <DropdownMenuItem
-                                          key="skip"
-                                          onSelect={() => openRowDialog(setSkipping, lesson)}
-                                        >
-                                          Skip
-                                        </DropdownMenuItem>
-                                      )}
-                                      {copyItem}
-                                    </>
-                                  )}
-                                </DropdownMenuGroup>
-                                {/* Whatever the status: a canceled or failed
-                                    re-download, or a delete that stopped the job
-                                    but kept files, leaves a lesson that still owns
-                                    files (BACKLOG D63). */}
-                                {lesson.has_files && !busy && (
-                                  <>
-                                    <DropdownMenuSeparator />
-                                    <DropdownMenuGroup>
-                                      <DropdownMenuItem
-                                        variant="destructive"
-                                        onSelect={() => openRowDialog(setDeleting, lesson)}
-                                      >
-                                        Delete
-                                      </DropdownMenuItem>
-                                    </DropdownMenuGroup>
-                                  </>
-                                )}
-                              </DropdownMenuContent>
-                            </>
-                          )}
-                        </RowMenu>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="text-sm text-muted-foreground">No lessons</p>
-          )}
+          {body}
 
           {tab === "all" && follow == null && (
             <div className="flex items-center justify-end gap-3">

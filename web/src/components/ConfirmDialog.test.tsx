@@ -229,6 +229,21 @@ it("the dialog body is a flex column, so an empty message region collapses into 
   expect(within(dialog).getByRole("status")).toHaveClass("empty:-mt-4")
 })
 
+it("the status line is a native <output>, an item of the flex column, so it draws the <p>'s box", async () => {
+  // A <p role="status"> passes every role query in this file too. <output>
+  // is inline by default; only as a flex item is it blockified, so pin the
+  // parent as well as the tag.
+  const user = userEvent.setup()
+  render(<Harness onConfirm={() => Promise.resolve()} />)
+  await user.click(screen.getByRole("button", { name: "Open" }))
+  const dialog = await screen.findByRole("alertdialog")
+  const status = within(dialog).getByRole("status")
+  expect(status.tagName).toBe("OUTPUT")
+  expect(status).not.toHaveAttribute("role")
+  expect(status.parentElement).toBe(dialog)
+  expect(dialog).toHaveClass("flex", "flex-col")
+})
+
 it("the error icon is inline with the message, and the message is left-aligned at every width", async () => {
   const req = deferred()
   const user = userEvent.setup()
