@@ -40,18 +40,27 @@ it("a sync that fails without a server message toasts the outcome and a sentence
   expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
 })
 
-// A 503 means nothing is attached to run a sync, so the button that got it is
-// blocked: aria-disabled, with the reason in a tooltip. jsdom applies no CSS,
-// so how it LOOKS is read from its classes here; the browser pass checks it.
+// The server's own sentences for its 503s on /api/sync (msgNoDaemon and
+// msgNoPlanner, internal/server/messages.go).
+const NO_DAEMON =
+  "This server runs without the download daemon, so there's nothing to pause, resume or sync."
+const NO_PLANNER =
+  "This server runs without the sync planner, so it can't say what a sync would queue."
+
+// DrumDrop's 503 means nothing is attached to run a sync, so the button that
+// got it is blocked: aria-disabled, with the server's reason in a tooltip.
+// jsdom applies no CSS, so how it LOOKS is read from its classes here; the
+// browser pass checks it.
 describe("a sync button blocked by a 503", () => {
-  // Every POST to /api/sync answers 503 and is counted, so a test can show
-  // that pressing a blocked button sends nothing.
+  // Every POST to /api/sync answers DrumDrop's 503 for it and is counted, so
+  // a test can show that pressing a blocked button sends nothing.
   function blockSync() {
     const posts = { count: 0 }
     server.use(
-      http.post(`${ORIGIN}/api/sync`, () => {
+      http.post(`${ORIGIN}/api/sync`, async ({ request }) => {
         posts.count++
-        return HttpResponse.json({ error: "nothing attached" }, { status: 503 })
+        const { dry_run } = (await request.json()) as { dry_run: boolean }
+        return HttpResponse.json({ error: dry_run ? NO_PLANNER : NO_DAEMON }, { status: 503 })
       }),
     )
     return posts
@@ -73,10 +82,10 @@ describe("a sync button blocked by a 503", () => {
 
   // Run sync comes first in the tab order, Dry-run second.
   it.each([
-    ["Run sync", 1, "no daemon attached"],
-    ["Dry-run", 2, "no planner attached"],
+    ["Run sync", 1, NO_DAEMON],
+    ["Dry-run", 2, NO_PLANNER],
   ])(
-    "%s stays in the tab order, is announced as unavailable, and gives the reason on focus",
+    "%s stays in the tab order, is announced as unavailable, and gives the server's reason on focus",
     async (name, tabs, reason) => {
       blockSync()
       const button = await block(name)
@@ -87,6 +96,13 @@ describe("a sync button blocked by a 503", () => {
       expect(button).toHaveAttribute("aria-disabled", "true")
       expect(await screen.findByRole("tooltip")).toHaveTextContent(reason)
       expect(button).toHaveAccessibleDescription(reason)
+      // The icon is decoration: the name is the label alone.
+      expect(button.querySelector(":scope > svg")).toHaveAttribute("aria-hidden", "true")
+      // A sentence wraps at a readable width instead of one wide line.
+      expect(document.querySelector('[data-slot="tooltip-content"]')).toHaveClass(
+        "max-w-md",
+        "break-words",
+      )
     },
   )
 
@@ -95,7 +111,7 @@ describe("a sync button blocked by a 503", () => {
     const button = await block("Run sync")
 
     await userEvent.hover(button)
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("no daemon attached")
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(NO_DAEMON)
   })
 
   it("does nothing when pressed, and Enter or Space leaves the reason showing", async () => {
@@ -107,13 +123,25 @@ describe("a sync button blocked by a 503", () => {
     expect(button).toHaveFocus()
     await screen.findByRole("tooltip")
     await userEvent.keyboard("{Enter}")
-    expect(screen.getByRole("tooltip")).toHaveTextContent("no daemon attached")
+    expect(screen.getByRole("tooltip")).toHaveTextContent(NO_DAEMON)
     await userEvent.keyboard(" ")
-    expect(screen.getByRole("tooltip")).toHaveTextContent("no daemon attached")
+    expect(screen.getByRole("tooltip")).toHaveTextContent(NO_DAEMON)
     await userEvent.click(button)
 
     expect(posts.count).toBe(1)
     expect(button).toHaveAttribute("aria-disabled", "true")
+  })
+
+  // Radix's trigger closes its tooltip on pointer-down, and hovering would
+  // not reopen it until the pointer left the button.
+  it("a mouse press leaves the reason showing", async () => {
+    blockSync()
+    const button = await block("Run sync")
+
+    await userEvent.hover(button)
+    await screen.findByRole("tooltip")
+    await userEvent.click(button)
+    expect(screen.getByRole("tooltip")).toHaveTextContent(NO_DAEMON)
   })
 
   // The disabled look: dimmed, the same size (h-8, size sm), and no hover
@@ -156,6 +184,8 @@ describe("a sync button blocked by a 503", () => {
         "rounded-md",
         "has-focus-visible:ring-[3px]",
         "has-focus-visible:ring-ring/60",
+        // The ring (a box-shadow) fades in like every button's does.
+        "transition-shadow",
       ]),
     )
     const offset = ["has-focus-visible:ring-offset-2", "has-focus-visible:ring-offset-background"]
@@ -165,6 +195,40 @@ describe("a sync button blocked by a 503", () => {
     expect(button.parentElement).not.toHaveAttribute("tabindex")
     expect(button.parentElement).not.toHaveAttribute("role")
   })
+})
+
+// Only DrumDrop's own 503 blocks a button. A reverse proxy answers 503 with
+// no body, or with its own page, while the container restarts: that says
+// nothing about what is attached, and the next press may well work.
+const proxy503s = {
+  "with no body": () => new HttpResponse(null, { status: 503 }),
+  "with a proxy's HTML page": () =>
+    new HttpResponse("<html><body>503 Service Unavailable</body></html>", {
+      status: 503,
+      headers: { "Content-Type": "text/html" },
+    }),
+}
+it.each([
+  ["Run sync", "with no body", "Couldn't start a sync"],
+  ["Run sync", "with a proxy's HTML page", "Couldn't start a sync"],
+  ["Dry-run", "with no body", "Couldn't run the dry run"],
+  ["Dry-run", "with a proxy's HTML page", "Couldn't run the dry run"],
+] as const)("%s: a 503 %s leaves the button live", async (name, kind, outcome) => {
+  server.use(http.post(`${ORIGIN}/api/sync`, proxy503s[kind]))
+  renderWithProviders(
+    <>
+      <Dashboard />
+      <Toaster />
+    </>,
+  )
+
+  await userEvent.click(await screen.findByRole("button", { name }))
+  // The failure is still said, as any other failure is.
+  expect(await screen.findByText(outcome)).toBeInTheDocument()
+  // Re-queried: a blocked button would be a new node.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name })).not.toHaveAttribute("aria-disabled"),
+  )
 })
 
 it.each([

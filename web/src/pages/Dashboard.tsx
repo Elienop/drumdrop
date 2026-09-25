@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useRef } from "react"
 import { Play, Search, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
 import { api, ApiHttpError } from "@/lib/api"
@@ -40,10 +41,13 @@ import { QueryStatus } from "@/components/QueryState"
 const LESSON_ORDER: LessonStatus[] = ["pending", "downloading", "downloaded", "failed", "skipped"]
 const JOB_ORDER: JobStatus[] = ["queued", "running", "done", "failed", "canceled"]
 
-// is503 reports whether a mutation's last error was an HTTP 503 — the signal
-// that the daemon (Run) or planner (Dry-run) is not attached.
-function is503(error: unknown): boolean {
-  return error instanceof ApiHttpError && error.status === 503
+// nothingAttached reports whether a mutation's last error was DrumDrop's own
+// 503, its answer that the daemon (Run) or planner (Dry-run) is not attached.
+// Only the server's answer counts: a reverse proxy's bodyless 503 while the
+// container restarts says nothing about what is attached, and blocking on it
+// would leave a dead button until the page remounts.
+function nothingAttached(error: unknown): boolean {
+  return error instanceof ApiHttpError && error.fromServer && error.status === 503
 }
 
 export function Dashboard() {
@@ -66,7 +70,7 @@ export function Dashboard() {
       invalidate()
     },
     onError: (err) => {
-      if (is503(err)) toast.error("No daemon attached")
+      if (nothingAttached(err)) toast.error("No daemon attached")
       else failureToast("Couldn't start a sync", errorMessage(err))
     },
   })
@@ -78,13 +82,13 @@ export function Dashboard() {
       toast.message(`A sync would queue ${countOf(result.data.would_enqueue ?? 0, "lesson", "lessons")}`)
     },
     onError: (err) => {
-      if (is503(err)) toast.error("No planner attached")
+      if (nothingAttached(err)) toast.error("No planner attached")
       else failureToast("Couldn't run the dry run", errorMessage(err))
     },
   })
 
-  const runBlocked = is503(run.error)
-  const dryRunBlocked = is503(dryRun.error)
+  const runBlocked = nothingAttached(run.error)
+  const dryRunBlocked = nothingAttached(dryRun.error)
 
   return (
     <TooltipProvider>
@@ -98,7 +102,7 @@ export function Dashboard() {
               onClick={() => run.mutate()}
               pending={run.isPending}
               blocked={runBlocked}
-              tooltip="no daemon attached"
+              tooltip={errorMessage(run.error)}
             />
             <SyncButton
               label="Dry-run"
@@ -107,7 +111,7 @@ export function Dashboard() {
               onClick={() => dryRun.mutate()}
               pending={dryRun.isPending}
               blocked={dryRunBlocked}
-              tooltip="no planner attached"
+              tooltip={errorMessage(dryRun.error)}
             />
           </div>
         </div>
@@ -250,8 +254,9 @@ function StatBreakdown({
 // SyncButton runs a sync or a dry run. While its request runs it is a
 // PendingButton, not `disabled`, so keyboard focus stays on it (a disabled
 // button drops it to <body>); the spinner takes its icon's place, as on the
-// TopBar's Pause, so its width does not change. Only a 503 (nothing
-// attached to run it) really disables it.
+// TopBar's Pause, so its width does not change. Only DrumDrop's own 503
+// (nothing attached to run it) really disables it, and `tooltip` is then the
+// server's sentence saying so, as TopBar shows it for the same failure.
 function SyncButton({
   label,
   icon: Icon,
@@ -269,6 +274,7 @@ function SyncButton({
   tooltip: string
   variant?: "default" | "outline"
 }) {
+  const trigger = useRef<HTMLButtonElement>(null)
   if (!blocked) {
     return (
       <PendingButton size="sm" variant={variant} icon={Icon} pending={pending} onClick={onClick}>
@@ -291,6 +297,7 @@ function SyncButton({
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
+            ref={trigger}
             size="sm"
             variant={variant}
             aria-disabled="true"
@@ -298,15 +305,31 @@ function SyncButton({
               "opacity-50 focus-visible:ring-0 focus-visible:ring-offset-0",
               BLOCKED[variant].hover,
             )}
-            // Pressing it does nothing. preventDefault also skips the trigger's
-            // own click handler, so Enter or Space leaves the reason showing.
+            // Pressing it does nothing, and the reason stays showing. Radix
+            // skips the trigger's own handler for an event already prevented,
+            // and both of these would close the tooltip: the click one on
+            // Enter, Space or a click, the pointer-down one on a mouse or pen
+            // press (after which hovering would not reopen it until the
+            // pointer left).
+            onPointerDown={(e) => e.preventDefault()}
             onClick={(e) => e.preventDefault()}
           >
-            <Icon data-icon="inline-start" />
+            <Icon data-icon="inline-start" aria-hidden="true" />
             {label}
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{tooltip}</TooltipContent>
+        {/* Capped like Queue's error tooltip: a sentence would otherwise
+            render as one wide line. The open tooltip also closes on any
+            pointer-down outside it, and the button is outside it, so a press
+            on the button is let through (Radix's own prop for this). */}
+        <TooltipContent
+          className="max-w-md break-words"
+          onPointerDownOutside={(e) => {
+            if (trigger.current?.contains(e.target as Node)) e.preventDefault()
+          }}
+        >
+          {tooltip}
+        </TooltipContent>
       </Tooltip>
     </span>
   )
@@ -314,8 +337,10 @@ function SyncButton({
 
 // The ring every button draws on keyboard focus (ui/button.tsx), drawn by a
 // blocked SyncButton's wrapper instead, which is exactly the button's size.
+// The ring is a box-shadow, and it fades in as the button's does
+// (transition-all there): Tailwind's default duration and easing.
 const BLOCKED_RING =
-  "inline-flex rounded-md has-focus-visible:ring-[3px] has-focus-visible:ring-ring/60"
+  "inline-flex rounded-md transition-shadow has-focus-visible:ring-[3px] has-focus-visible:ring-ring/60"
 
 // Per variant: its hover classes from ui/button.tsx, replaced by cn()
 // (tailwind-merge) with its resting colours, as a disabled button shows;
