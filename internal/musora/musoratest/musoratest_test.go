@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -111,8 +112,8 @@ func TestServeFailsTheTestOnAnUnknownQuery(t *testing.T) {
 	rec := &recordingTB{TB: t}
 	queries := Serve(rec, JaredFalk())
 	const q = "*[_type=='song']{title}"
-	if _, err := musora.Query(q, ""); err == nil {
-		t.Error("Query of an unknown shape succeeded, want an error")
+	if _, err := musora.Query(q, ""); err == nil || !strings.HasPrefix(err.Error(), "sanity 500: unknown query") {
+		t.Errorf("Query of an unknown shape: %v, want musora's error for a 500 \"unknown query\"", err)
 	}
 	errs := rec.errors()
 	if len(errs) != 1 || !strings.Contains(errs[0], "a query of a shape the fake doesn't know: "+q) {
@@ -176,8 +177,11 @@ func TestQueryOf(t *testing.T) {
 	if q, err := queryOf(post); err != nil || q != want {
 		t.Errorf("POST: %q, %v; want %q", q, err, want)
 	}
-	if _, err := queryOf(httptest.NewRequest(http.MethodPost, "/", failingReader{})); err == nil {
-		t.Error("POST with an unreadable body: no error")
+	// The body is valid JSON up to the failure, so only the read error can
+	// refuse it.
+	cut := io.MultiReader(strings.NewReader(`{"query":"*[_type=='instructor']"}`), failingReader{})
+	if _, err := queryOf(httptest.NewRequest(http.MethodPost, "/", cut)); err == nil {
+		t.Error("POST with a body that fails partway: no error")
 	}
 	if _, err := queryOf(httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{"))); err == nil {
 		t.Error("POST with a body that isn't JSON: no error")
