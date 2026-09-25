@@ -43,17 +43,23 @@ services:
       # library copy uses Plex's TV-Shows naming instead of the default
       # Course/NN - Lesson/... folders:
       #   <library>/<Show>/Season 01/<Show> - s01e05 - Lesson Title.mp4
-      #   (sidecars — .nfo, .en.vtt, -poster.jpg — share the episode base, flat in
-      #   the season folder). Show = the course (node follows), the lesson's parent
-      #   course for instructor follows (else the instructor name), or content-<id>.
+      #   (sidecars — .nfo, .jpg, .en.vtt — share the episode base, flat in the
+      #   season folder; a song's versions each get their own .jpg and .nfo). Show =
+      #   the course (node follows), the lesson's parent course for instructor
+      #   follows (else the instructor name), or content-<id>. Each show folder also
+      #   gets tvshow.nfo, poster.jpg and (courses) fanart.jpg, created only when
+      #   missing, never replaced. Episode images named -poster.jpg by older
+      #   versions are renamed once, at the end of the next cycle.
       # In this layout the .nfo is a Kodi/Plex <episodedetails> doc (not <movie>),
       # carrying the episode title/showtitle/season/episode/aired/instructor.
       # On the PLEX side: create a *TV Shows* library pointing at DRUMDROP_LIBRARY_DIR
-      # and switch its agent to one that reads .nfo files (the XBMCnfoTVImporter
-      # plugin is what the working setup uses), then Refresh Metadata. The show will
-      # not match TheTVDB, so episode titles must come from the local <episodedetails>
-      # nfos; Local Media Assets alone was not enough in testing (Plex kept showing
-      # "Episode N"). Empty/unset (or "default") keeps today's layout.
+      # with Scanner "Plex TV Series" and Agent "Plex NFO Series", "Use local
+      # assets" ON and "Prefer local metadata" ON. Plex only CHOOSES local images
+      # present when it first matches a show or episode; a show already in Plex
+      # needs a one-time "Plex Dance" (move its folder out, Scan Library Files,
+      # Empty Trash, Clean Bundles, move it back, scan). An image picked by hand in
+      # Plex is locked. (XBMCnfoTVImporter reads these files too.) See the README's
+      # "Plex TV layout". Empty/unset (or "default") keeps today's layout.
       # - DRUMDROP_LAYOUT=plex-tv
       # Set this to the SAME host path you bind-mount to /downloads above, and the
       # UI's "Copy path" yields a host path (paste-ready in your file manager)

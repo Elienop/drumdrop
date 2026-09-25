@@ -526,15 +526,60 @@ copy** use Plex's TV-Shows naming instead of the default `Course/NN - Lesson/…
 Each course becomes one *show*, each lesson an *episode*:
 
 ```
+<library>/<Show>/
+    tvshow.nfo                                   ← the show: title, plot, genre, instructor
+    poster.jpg                                   ← the show's poster
+    fanart.jpg                                   ← the show's background (courses only)
+    Season 01/
+        <Show> - s01e05 - Day 4 — Workout.mp4
+        <Show> - s01e05 - Day 4 — Workout.en.vtt     ← sidecars share the episode base
+        <Show> - s01e05 - Day 4 — Workout.nfo        ← Kodi/Plex <episodedetails> (title/aired/instructor)
+        <Show> - s01e05 - Day 4 — Workout.jpg        ← the episode's image
+```
+
+A song has one video per version, and Plex reads an episode's image and `.nfo` only under
+a name that is exactly a video's own name with `.jpg` or `.nfo`. So each version gets its
+own copy of both:
+
+```
 <library>/<Show>/Season 01/
-    <Show> - s01e05 - Day 4 — Workout.mp4
-    <Show> - s01e05 - Day 4 — Workout.en.vtt     ← sidecars share the episode base
-    <Show> - s01e05 - Day 4 — Workout.nfo        ← Kodi/Plex <episodedetails> (title/aired/instructor)
-    <Show> - s01e05 - Day 4 — Workout-poster.jpg
+    <Show> - s01e01 - Kryptonite [Drumless].mp4
+    <Show> - s01e01 - Kryptonite [Drumless].jpg
+    <Show> - s01e01 - Kryptonite [Drumless].nfo
+    <Show> - s01e01 - Kryptonite [Original].mp4
+    <Show> - s01e01 - Kryptonite [Original].jpg
+    <Show> - s01e01 - Kryptonite [Original].nfo
 ```
 
 - **Show** — the course for a node follow; the lesson's parent course for an instructor
   follow (falling back to the instructor name for course-less lessons); else `content-<id>`.
+- **Show files**: each show folder gets `tvshow.nfo` (a `<tvshow>` doc: the show's
+  title, a plain-text plot, and when known its premiere date, studio, genres, instructors
+  and Musora id), `poster.jpg` and, for a course, `fanart.jpg`. The poster is the
+  course's square header image when it has one, else the instructor's portrait coach
+  card, else the course's thumbnail; a song show uses the song's square cover. The
+  background is the course's wide thumbnail; a song or instructor show has no wide image
+  and gets none. These files are the show's, not a lesson's: drumdrop only ever
+  **creates a missing one**, never replaces or deletes one, and records none. A file you
+  put there yourself under any name Plex reads for the same slot (`poster`, `folder` or
+  `show` `.jpg`/`.jpeg`/`.png`/`.tbn` for the poster; `fanart`, `art`, `backdrop` or
+  `background` for the background; `tvshow.nfo`) counts as filled and is left alone.
+  `tvshow.nfo` is written last and marks the show done, so a finished show costs no
+  request; to have drumdrop write a show's files again, remove its `tvshow.nfo` and the
+  images to replace. A new show gets them before its first episode is placed; a show
+  already in the library gets them at the end of the next sync or daemon cycle. When
+  Musora or its image server can't be reached, the episode is placed anyway and the show
+  files come a later cycle.
+- **Episode files**: a lesson's image is `<episode>.jpg` and its `.nfo` is
+  `<episode>.nfo`; a song's are one per version, as above. All of them are placed
+  **before** the episode's video, so Plex finds them when it first sees the episode.
+  Files placed by earlier versions are renamed **once**, at the end of the first cycle
+  that finds them: a lesson's `<episode>-poster.jpg` becomes `<episode>.jpg`, and a song's
+  one image and one `.nfo` become one per version. Each new name is created beside the
+  old one, then recorded, and only then is the old file removed, so a crash or an
+  unmounted library never loses a file; a name already taken by another file is left
+  alone, with the old file kept (logged once). A lesson moved before drumdrop recorded
+  its files is recorded by this rename, with exactly what its delete would remove.
 - **Season** is always `01`; the **episode number** is the lesson's position in the course
   (the same `NN` used in the default layout). Files are flat in the season folder; a
   lesson's `resources/`, `play-along/` and `sheet-music/` folders move in as
@@ -615,17 +660,24 @@ Each course becomes one *show*, each lesson an *episode*:
   every other entry. Writing it is non-fatal: a failure logs a warning, the download still
   succeeds, and the episode keeps the download's `<movie>` nfo.
 
-**On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR` and
-switch its agent to one that reads `.nfo` files — the
-[**XBMCnfoTVImporter**](https://github.com/gboudreau/XBMCnfoTVImporter.bundle) plugin is what
-the working setup uses — then *Refresh Metadata*. XBMCnfoTVImporter is a third-party plugin,
-not part of Plex, and its last commit is from 2019: it only appears in the agent list once
-it has been installed into Plex Media Server's `Plug-ins` folder and Plex has been restarted
-(its README has the steps). The show won't match TheTVDB, so the
-episode number, title, and summary have to come from the local `<episodedetails>` nfo (and
-the filenames) — which is exactly what this layout encodes. Enabling **Local Media Assets**
-alone was not enough in testing: Plex kept showing generic "Episode N" until the library
-used the `.nfo` agent.
+**On the Plex side**, create a **TV Shows** library pointing at `DRUMDROP_LIBRARY_DIR`
+with these settings (the setup tested on Plex Media Server 1.43):
+
+- **Scanner**: *Plex TV Series*.
+- **Agent**: *Plex NFO Series*, with **Use local assets** on and **Prefer local metadata**
+  on. The show won't match TheTVDB, so the show and episode titles, dates and plots come
+  from the `tvshow.nfo` and `<episodedetails>` files, and the images from the files above.
+
+Plex **chooses** a local image only if it is there when Plex first matches the show or
+episode. Added later, it is only offered in the image picker. New shows and episodes are
+fine, since drumdrop places their files first. A show that was already in Plex before
+its files were written needs a one-time **"Plex Dance"** to be matched afresh: move the
+show's folder out of the library folder, run *Scan Library Files*, *Empty Trash* and
+*Clean Bundles*, move the folder back, and scan again. An image you pick by hand in Plex
+is locked: Plex keeps it and ignores the local file from then on, until you unlock it.
+
+The third-party [XBMCnfoTVImporter](https://github.com/gboudreau/XBMCnfoTVImporter.bundle)
+agent (last updated 2019) also reads these files, if you already use it.
 
 ### Standalone binary
 

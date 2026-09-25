@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D142 on 2026-09-25 (*moves*; re-check the
+the highest ID on this page: the next new ID is D160 on 2026-09-25 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -1510,6 +1510,34 @@ D53 waits on an owner decision.
   - *Evidence:* `cmdLogin`, `cmdWhoami`, `cmdLogout`, `cmdFollows`, `cmdUnfollow` in
     `cmd/drumdrop/`; found by the fix round of that branch
 
+- **D157 · An empty "Africa" show in the owner's library.**
+  - *What:* the owner's plex-tv library holds a show "Africa" with an nfo and a poster but
+    no video, from June. How it got there has not been investigated: which lesson row (if
+    any) records those files, and whether a download placed them without a video.
+  - *To do:* find the row(s) filed there (`ListLessonsWithFiles`, by `output_dir` or a
+    record entry under `Africa/`), and what their last download placed. Never list or read
+    the owner's share without asking first.
+  - *Evidence:* reported by the owner on 2026-09-25 while testing show artwork
+- **D158 · Two lessons of one course land in two one-lesson shows.**
+  - *What:* "Welcome To 30-Day Jazz!" and "The Swing Pattern" each became a show of one
+    episode, instead of two episodes of one show. A likely cause, not yet checked: each was
+    followed on its own, and a node follow's show is the followed node's title
+    (`plexShow`: `folderTitle(f)` for any follow that is not an instructor's), so a
+    followed lesson is a show named after itself.
+  - *To do:* check the two lessons' follows. If that is the cause, decide whether a
+    followed single lesson should file under its parent course's show instead (an owner
+    call: it moves where new downloads go).
+  - *Evidence:* `plexShow` in `internal/scheduler/worker.go`; reported by the owner on
+    2026-09-25
+- **D159 · A resource is saved without its file extension.**
+  - *What:* a lesson resource named "E-Book PDF" was saved as `E-Book PDF`, with no `.pdf`,
+    so a file manager or Plex can't tell what it is. The name comes from the resource's
+    title when it has one (`Sanitize(firstNonEmpty(r.Name, urlBasename(r.URL)))`), and a
+    title carries no extension; only the URL's basename does.
+  - *To do:* keep the title, and add the URL's extension when the title has none.
+  - *Evidence:* `resourceFetches` in `internal/musora/download.go`; reported by the owner
+    on 2026-09-25
+
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
     (`node:20-alpine`) still build on Node 20. `web/package.json` has no `engines` field.
@@ -1600,6 +1628,37 @@ D53 waits on an owner decision.
 Three choices described in their own entries are also waiting on the owner: D3's yt-dlp
 rebuild, D53's fix for the tokenless loopback mode (options A, B or C), and whether D81's
 lease holder token goes into the unreleased migration 004 (before this branch merges).
+
+- **D154 · A show's own files stay after its last lesson is deleted.**
+  - *Context:* ruling #78 (3) makes `tvshow.nfo`, `poster.jpg` and `fanart.jpg` write-once
+    and unrecorded, like the season folder: drumdrop creates a missing one and never
+    removes one. So deleting a show's last lesson leaves the show folder with those three
+    files (and the empty season folder) behind, and Plex keeps listing an empty show.
+  - *The question:* whether a delete that removes a show's last recorded lesson should also
+    remove the show files drumdrop wrote (it can't tell them from an owner's own files at
+    the same names without recording them), or leave them.
+  - *Evidence:* the top comment of `internal/scheduler/showfiles.go` ("never replaces or
+    removes one"); `EnsureShowFiles` writes no record
+- **D155 · Show art is never refreshed when Musora changes it.**
+  - *Context:* a show's files are written once; `tvshow.nfo` marks the show done, and from
+    then on the show costs no request (ruling #78 (3)). A new course header, coach card or
+    description on Musora never reaches the show folder. The only way today is by hand:
+    remove `tvshow.nfo` and the images to replace, and the next cycle writes them again.
+  - *The question:* whether to refresh them (on a schedule, or from an action in the UI),
+    given that a refresh must not replace a file the owner put there.
+  - *Evidence:* `EnsureShowFiles` and `showFilesFor` in `internal/scheduler/showfiles.go`
+- **D156 · A re-download replaces a hand-placed `<episode>.jpg`.**
+  - *Context:* in plex-tv the episode image is `<episode>.jpg`, the name Plex documents
+    for an episode's image, so an owner may put one there by hand. A re-download places its
+    image at that name and, like every other name it places, replaces an entry there that
+    no lesson records (owner ruling #66: a leftover drumdrop no longer tracks), logging
+    "replaced … which no lesson recorded". The one-time rename does not: it leaves a name
+    already taken alone. Legacy name matching never claims `<episode>.jpg`, so a delete
+    never removes an unrecorded one.
+  - *The question:* whether `<episode>.jpg` (and a song version's `.jpg` and `.nfo`) should
+    be protected from that replacement, unlike the other episode names.
+  - *Evidence:* `clearNames` in `internal/scheduler/place.go` ·
+    `TestPlexTVMoveReplacesAnEntryNoLessonClaims`
 
 - **D132 · A long title makes the Lessons table scroll sideways, and then every ⋯ is out
   of view.**
@@ -2057,6 +2116,29 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   D93, D106.
 
 ## Recently shipped
+
+- **D153 · Plex shows and episodes get artwork Plex reads.** Branch `feat/plex-show-artwork`
+  (owner rulings #78, 1–5).
+  - *Was:* in plex-tv, drumdrop wrote nothing at show level, and named each episode's image
+    `<episode>-poster.jpg`, which Plex does not read. A song's one `<episode>.nfo` and image
+    matched neither version video, so Plex showed a song with no date and no cover.
+  - *Now:* each show folder gets `tvshow.nfo`, `poster.jpg` and (courses) `fanart.jpg`,
+    created only when missing, never replaced, never recorded; a new show gets them before
+    its first video. Each episode's image is `<episode>.jpg`, and a song has one `.jpg` and
+    one `.nfo` per version video; all are placed before the video. Files placed by earlier
+    versions are renamed once, at the end of a cycle, by copy, record, then removal, so a
+    crash or an unmounted library never loses a file; a lesson moved before the record
+    existed is recorded by it (D65's exception). The README's *Plex TV layout* has the Plex
+    setup that works (*Plex TV Series* scanner, *Plex NFO Series* agent, local assets and
+    local metadata on) and the one-time "Plex Dance" for shows already in Plex.
+  - *Residuals:* a show's own files stay after its last lesson is deleted (D154) and are
+    never refreshed (D155); a hand-placed `<episode>.jpg` is replaced by a re-download
+    (D156). A `tvshow.nfo` the owner wrote by hand marks the show done, so drumdrop adds no
+    poster or background to it. A song retitled from "X [Y]" to "X" at the same episode
+    number keeps its old title's per-version files, recorded (a later delete removes them).
+    A song's subtitles keep one unsuffixed name, which may match neither version in Plex.
+  - *Evidence:* `internal/scheduler/showfiles.go`, `internal/scheduler/episodefiles.go`,
+    `episodeNames` in `internal/scheduler/plexmove.go`, `library.VersionEntry`
 
 - **D18 · Test coverage reaches SonarQube.** Branch `fix/sonar-gate-and-coverage`.
   - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of
