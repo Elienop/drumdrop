@@ -322,6 +322,7 @@ func TestWriterID(t *testing.T) {
 		want string
 	}{
 		{"3f2a9c1b7e4d", 1, "3f2a9c1b7e4d.1"},
+		{"drumdrop-sync", 1, "drumdrop-sync.1"},
 		{"nas.local", 42, "naslocal.42"},
 		{"../a\\/b\n\x00é", 7, "ab.7"},
 		{strings.Repeat("h", 40), 1, strings.Repeat("h", maxWriterHost) + ".1"},

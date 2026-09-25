@@ -401,26 +401,49 @@ func TestALessonNowASongKeepsItsOwnVideosFiles(t *testing.T) {
 // TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles pins the edge of the
 // rule above: the plain video's image and nfo stay only while that video is
 // there. A record naming a "<base>.mp4" that is gone from the season folder
-// keeps nothing for it: "<base>.nfo" and "<base>.jpg" are retired as
-// replaced by the versions' own, as for any song re-download (ruling 5c).
+// (or is a folder there, which is no video) keeps nothing for it:
+// "<base>.nfo" and "<base>.jpg" are retired as replaced by the versions'
+// own, as for any song re-download (ruling 5c).
 func TestALessonNowASongWhoseOwnVideoIsGoneRetiresItsFiles(t *testing.T) {
 	const base = sameTitleBase
-	w, store, _, season := songWorker(t, true)
-	seedSeason(t, season, base+".nfo", base+".jpg")
-	prev := recordedRow(100, season, base+".mp4", base+".nfo", base+".jpg")
-	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
-	prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
-	store.lessons[100] = prev
-	store.withFiles = []database.Lesson{prev}
+	for name, seed := range map[string][]string{
+		"gone":     {base + ".nfo", base + ".jpg"},
+		"a folder": {base + ".nfo", base + ".jpg", base + ".mp4/"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w, store, _, season := songWorker(t, true)
+			seedSeason(t, season, seed...)
+			prev := recordedRow(100, season, base+".mp4", base+".nfo", base+".jpg")
+			prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+			prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
+			store.lessons[100] = prev
+			store.withFiles = []database.Lesson{prev}
 
-	if _, err := w.RunOnce(context.Background(), 0); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertExist(t, false, paths(season, base+".nfo", base+".jpg")...)
+			videos := versionNames(base, ".mp4", "Drumless", "Original")
+			nfos := versionNames(base, ".nfo", "Drumless", "Original")
+			images := versionNames(base, ".jpg", "Drumless", "Original")
+			for _, p := range paths(season, images...) {
+				if got := readFile(p); got != "new image" {
+					t.Errorf("%s = %q, want the song's image", filepath.Base(p), got)
+				}
+			}
+			for _, n := range append(append(append([]string(nil), videos...), nfos...), images...) {
+				rec := onlyRecord(t, store)
+				if !slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
+					t.Errorf("record %v does not name %s", rec.entries, n)
+				}
+			}
+			for _, n := range []string{base + ".nfo", base + ".jpg"} {
+				if rec := onlyRecord(t, store); slices.Contains(rec.entries, filepath.ToSlash(filepath.Join("Beginner Course", "Season 01", n))) {
+					t.Errorf("record %v still names %s", rec.entries, n)
+				}
+			}
+		})
 	}
-	assertExist(t, false, paths(season, base+".mp4", base+".nfo", base+".jpg")...)
-	videos := versionNames(base, ".mp4", "Drumless", "Original")
-	nfos := versionNames(base, ".nfo", "Drumless", "Original")
-	images := versionNames(base, ".jpg", "Drumless", "Original")
-	assertRecordIs(t, store, season, append(append(append(append([]string(nil), videos...), nfos...), images...), base+" resources")...)
 }
 
 // resourcesAndImageRedownload is resourcesRedownload that brings the image
