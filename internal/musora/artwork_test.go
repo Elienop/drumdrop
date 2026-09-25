@@ -160,7 +160,8 @@ func TestFetchJPEG(t *testing.T) {
 		ua = r.Header.Get("User-Agent")
 		switch r.URL.Path {
 		case "/max.jpg", "/big.jpg":
-			body := make([]byte, maxImageBytes+map[bool]int{true: 1}[r.URL.Path == "/big.jpg"])
+			// 16 MiB, the cap, by value: far above any image of Musora's.
+			body := make([]byte, 16<<20+map[bool]int{true: 1}[r.URL.Path == "/big.jpg"])
 			copy(body, jpegBytes)
 			_, _ = w.Write(body)
 		case "/ok.jpg":
@@ -186,8 +187,8 @@ func TestFetchJPEG(t *testing.T) {
 	if err != nil || string(got) != string(jpegBytes) {
 		t.Errorf("ok: %q, %v; want the JPEG bytes", got, err)
 	}
-	if got, err := FetchJPEG(ctx, srv.URL+"/max.jpg"); err != nil || len(got) != maxImageBytes {
-		t.Errorf("an image of exactly %d bytes: %d bytes, %v; want it whole", maxImageBytes, len(got), err)
+	if got, err := FetchJPEG(ctx, srv.URL+"/max.jpg"); err != nil || len(got) != 16<<20 {
+		t.Errorf("an image of exactly 16 MiB: %d bytes, %v; want it whole", len(got), err)
 	}
 	if ua != browserUA {
 		t.Errorf("User-Agent = %q, want %q", ua, browserUA)
