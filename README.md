@@ -276,6 +276,11 @@ docker run -d --name drumdrop -p 3737:8080 \
 The image is fully env-configured via the `DRUMDROP_*` vars in the [Environment](#environment)
 table; `PUID`/`PGID`/`TZ` set the runtime user/timezone. The published port maps `3737:8080`.
 
+**Upgrading.** Back up `/config` first, then `docker compose pull && docker compose up -d`. A
+new version may update the database once, when it first starts. To go back to an older
+version afterwards, restore that backup: an older version still starts, but it doesn't keep
+what the new one added up to date.
+
 #### Plex library (single-parent bind mount)
 
 Set `DRUMDROP_LIBRARY_DIR` to **move** every finished lesson folder into a separate
