@@ -239,14 +239,13 @@ func (w *Worker) setShowOffline() {
 	w.showDown = true
 }
 
-// takeShowOffline reports whether the show-file step was stopped this cycle,
-// and starts the next cycle afresh.
-func (w *Worker) takeShowOffline() bool {
+// startShowCycle starts a cycle's show files afresh: Worker.RunOnce calls it
+// first, so a stop set in a cycle whose closing step never ran (paused, a
+// worker error, an interrupted sync) does not reach into the next one.
+func (w *Worker) startShowCycle() {
 	w.showMu.Lock()
 	defer w.showMu.Unlock()
-	down := w.showDown
 	w.showDown = false
-	return down
 }
 
 // unknownShow reports whether the show folder name was found, in this
@@ -269,9 +268,11 @@ func (w *Worker) unknownShow(name string, mark bool) bool {
 // named after, by plexShow's own branches: the lesson's parent course for an
 // instructor follow (or, for a lesson in no course, the followed
 // instructor), the followed node for any other follow, and for a lesson with
-// no follow its parent course, or the lesson itself. nil when there is none
-// (the nfo then names the show and nothing more). lesson may be nil for a
-// node follow; the node is then asked for even if it is the lesson.
+// no follow its parent course, or the lesson itself. nil when no document is
+// expected at all (the nfo then names the show and nothing more: a follow
+// with no id, a followed instructor the lesson does not name);
+// errNoShowDoc when one is expected but Musora gives none now. lesson may be
+// nil for a node follow; the node is then asked for even if it is the lesson.
 func (w *Worker) showDoc(f database.Follow, lesson *musora.Lesson) (*musora.Lesson, error) {
 	switch {
 	case hasFollow(f) && f.Kind == "instructor":
@@ -294,14 +295,24 @@ func (w *Worker) showDoc(f database.Follow, lesson *musora.Lesson) (*musora.Less
 	return lesson, nil
 }
 
-// resolveShowDoc asks Musora for the document id (nil for no id).
+// errNoShowDoc is a show whose document is expected but can not be had now:
+// Musora answered nothing for its id, or the id could not be read (a shape
+// change the lenient decoder read as 0). Such a show gets no files at all,
+// never a title-only tvshow.nfo, which would mark it done for good.
+var errNoShowDoc = errors.New("Musora gave no document for the show")
+
+// resolveShowDoc asks Musora for the document id; errNoShowDoc when there is
+// no id or no document.
 func (w *Worker) resolveShowDoc(id int) (*musora.Lesson, error) {
 	if id <= 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: its id could not be read", errNoShowDoc)
 	}
 	doc, err := w.Resolver.Resolve(id, w.PermIDs)
 	if err != nil {
 		return nil, fmt.Errorf("asking Musora for the show's course %d: %w", id, err)
+	}
+	if doc == nil {
+		return nil, fmt.Errorf("%w: nothing for %d", errNoShowDoc, id)
 	}
 	return doc, nil
 }
@@ -429,7 +440,7 @@ func (w *Worker) EnsureShowFiles(ctx context.Context) {
 	if w.Cfg.Layout != LayoutPlexTV || w.Cfg.LibraryDir == "" || w.Images == nil {
 		return
 	}
-	if w.takeShowOffline() {
+	if w.showOffline() {
 		fmt.Fprintln(w.log(), "  ⚠ show files: skipped this cycle, Musora could not be reached")
 		return
 	}
@@ -487,6 +498,11 @@ func (w *Worker) ensureShow(ctx context.Context, lib *os.Root, name string, rows
 	}
 	if ctx.Err() != nil {
 		return nil // stopping: the next cycle picks the show up again
+	}
+	if errors.Is(err, errNoShowDoc) {
+		w.unknownShow(name, true)
+		fmt.Fprintf(w.log(), "  ⚠ show files %q: none written: %v; not asked again until drumdrop restarts\n", name, err)
+		return nil
 	}
 	if err != nil {
 		if err = offline(err); !errors.Is(err, errShowOffline) {

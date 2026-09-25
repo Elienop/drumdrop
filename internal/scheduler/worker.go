@@ -244,6 +244,7 @@ func (w *Worker) backoff(i int) time.Duration {
 // whole queue. Cancellation returns nil (not an error): the in-flight job, if
 // any, has already finished before the next claim.
 func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err error) {
+	w.startShowCycle()
 	for {
 		if err := ctx.Err(); err != nil {
 			return processed, nil

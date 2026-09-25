@@ -668,9 +668,89 @@ func TestPlacementOutOfReachStopsTheShowFilesForTheCycle(t *testing.T) {
 	assertExist(t, true, filepath.Join(lib, "Second Course", "Season 01", "Second Course - s01e01 - Lesson B.mp4"))
 	assertExist(t, false, filepath.Join(lib, "Beginner Course", "tvshow.nfo"), filepath.Join(lib, "Second Course", "tvshow.nfo"))
 
+	// The next cycle (its drain, with nothing queued, then its step).
 	img.errs = nil
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
 	w.EnsureShowFiles(context.Background())
 	assertExist(t, true, filepath.Join(lib, "Second Course", "poster.jpg"), filepath.Join(lib, "Second Course", "tvshow.nfo"))
+}
+
+// TestAStoppedShowStepDoesNotReachTheNextCycle pins that the "out of reach"
+// stop lasts one cycle even when that cycle's closing step never runs (the
+// daemon paused, the worker failed, a sync was interrupted): the next
+// cycle's first placement into a new show still writes the show's files
+// before the episode, as Plex picks local art only when it first matches a
+// show.
+func TestAStoppedShowStepDoesNotReachTheNextCycle(t *testing.T) {
+	w, _, _, _, img, lib, _ := artWorker(t)
+	w.setShowOffline() // the last cycle's, whose closing step never ran
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	show := filepath.Join(lib, "Beginner Course")
+	assertExist(t, true, filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), filepath.Join(show, "tvshow.nfo"))
+	if len(img.fetched()) != 2 {
+		t.Errorf("fetched %v, want the poster and the background", img.fetched())
+	}
+}
+
+// TestAShowMusoraGivesNothingForGetsNoFiles pins that a show whose document
+// is expected but not had (Musora answers nothing for its course, or its id
+// could not be read) gets no files at all, from the placement or from the
+// cycle's step: never a title-only tvshow.nfo, which would mark it done for
+// good. The step does not ask about it again in this process; after a
+// restart, with Musora answering, it gets every file.
+func TestAShowMusoraGivesNothingForGetsNoFiles(t *testing.T) {
+	t.Run("placement", func(t *testing.T) {
+		w, _, _, res, img, lib, _ := artWorker(t)
+		delete(res.docs, 4242)
+		if _, err := w.RunOnce(context.Background(), 0); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if got := showFileNames(t, filepath.Join(lib, "Beginner Course")); len(got) != 0 {
+			t.Errorf("show folder holds %v, want nothing", got)
+		}
+		if len(img.fetched()) != 0 {
+			t.Errorf("fetched %v, want nothing", img.fetched())
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		setup func(res *countingResolver, store *fakeWorkerStore)
+	}{
+		{"no document", func(res *countingResolver, _ *fakeWorkerStore) { delete(res.docs, 77) }},
+		{"id not read", func(res *countingResolver, _ *fakeWorkerStore) { res.docs[200].ParentContentData[0].ID = 0 }},
+	} {
+		t.Run("step, "+tc.name, func(t *testing.T) {
+			w, store, res, _, lib := backfillWorker(t)
+			season := filepath.Join(lib, "Groove Course", "Season 01")
+			seedSeason(t, season)
+			store.withFiles = []database.Lesson{inFollow(legacyRow(200, "Groove", 1, season, "Groove Course - s01e01 - Groove.mp4"), instructorFollow().ID)}
+			l := lesson(200, "Groove")
+			l.ParentContentData = []musora.ParentContent{{ID: 77, Title: "Groove Course"}}
+			res.docs[200], res.docs[77] = l, courseDoc(77, "Groove Course")
+			tc.setup(res, store)
+			w.EnsureShowFiles(context.Background())
+			w.EnsureShowFiles(context.Background())
+			if got := showFileNames(t, filepath.Dir(season)); len(got) != 0 {
+				t.Errorf("show folder holds %v, want nothing", got)
+			}
+			if n := len(res.asked()); n > 2 {
+				t.Errorf("asked %v over two cycles, want the show looked at once", res.asked())
+			}
+			// A restart, with Musora answering again.
+			res.docs[77] = courseDoc(77, "Groove Course")
+			res.docs[200].ParentContentData[0].ID = 77
+			next, _, _, _, _ := backfillWorker(t)
+			next.Store, next.Resolver, next.Images, next.Cfg.LibraryDir = store, res, w.Images, lib
+			next.EnsureShowFiles(context.Background())
+			if got := showFileNames(t, filepath.Dir(season)); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
+				t.Errorf("after a restart the show folder holds %v, want all three", got)
+			}
+		})
+	}
 }
 
 // TestShowDocFollowsPlexShow proves the show's files come from the document
