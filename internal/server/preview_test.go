@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -132,6 +134,7 @@ func TestPreviewInstructorUnknown(t *testing.T) {
 }
 
 func TestSessionGetConnected(t *testing.T) {
+	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir()) // never read the real session.cookie
 	stubAuth(t, http.StatusOK)
 	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
 
@@ -152,6 +155,7 @@ func TestSessionGetConnected(t *testing.T) {
 }
 
 func TestSessionGetDisconnected(t *testing.T) {
+	t.Setenv("DRUMDROP_CONFIG_DIR", t.TempDir()) // never read the real session.cookie
 	stubAuth(t, http.StatusUnauthorized)
 	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
 
@@ -173,7 +177,10 @@ func TestSessionGetDisconnected(t *testing.T) {
 
 func TestSessionLoginSuccess(t *testing.T) {
 	stubAuth(t, http.StatusOK)
-	t.Setenv("HOME", t.TempDir()) // SaveCreds/SaveCookie write under config dir
+	// A login writes session.cookie and credentials.enc: into a throwaway
+	// folder, never the real one, whether or not DRUMDROP_CONFIG_DIR is set.
+	dir := t.TempDir()
+	t.Setenv("DRUMDROP_CONFIG_DIR", dir)
 	srv := NewServer(newTestStore(t), Deps{}, nil, Config{}, "test")
 
 	body := `{"email":"a@b.com","password":"pw"}`
@@ -183,5 +190,10 @@ func TestSessionLoginSuccess(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	for _, name := range []string{"session.cookie", "credentials.enc"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s not saved in the test's config folder: %v", name, err)
+		}
 	}
 }
