@@ -15,9 +15,12 @@ release-snapshot:; goreleaser release --snapshot --clean --skip=publish
 
 # The reports SonarQube reads (sonar-project.properties names each one; `sonar-scan` runs
 # this target before it uploads): the Go cover profile and `go test -json` stream, then
-# the web lcov and test-execution report. A failing test fails the target, so a scan never
-# uploads stale numbers. -json sends the test output to the report, so on a failure the
-# failed events are printed here.
+# the web lcov. A failing test fails the target, but it clears no report: when the Go tests
+# fail, the web step never runs, and the last run's web/coverage/lcov.info stays on disk.
+# Only sonar-scan aborting on the failure keeps it out of SonarQube; its own hint,
+# SONAR_SKIP_COVERAGE=1, skips this target and uploads whatever is on disk, that stale lcov
+# included. -json sends the test output to the report, so on a failure the failed events
+# are printed here.
 coverage:
 	go test -count=1 -json -coverprofile=coverage.out ./... > go-test-report.json || \
 	  { grep '"Action":"fail"' go-test-report.json >&2; \

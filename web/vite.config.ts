@@ -26,24 +26,6 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     css: false,
     passWithNoTests: true,
-    // Every run also writes SonarQube's Generic Test Execution XML (the test
-    // count, pass/fail and duration). Setting `reporters` replaces vitest's
-    // defaults, so the first entries re-create them as vitest 2.1 picks them:
-    // `default`, plus `github-actions` in CI for PR annotations.
-    reporters: [
-      "default",
-      ...(process.env.GITHUB_ACTIONS === "true" ? ["github-actions"] : []),
-      [
-        "vitest-sonar-reporter",
-        {
-          outputFile: "coverage/sonar-report.xml",
-          silent: true,
-          // The reporter hands over cwd-relative paths; make them repo-root
-          // relative whatever the cwd.
-          onWritePath: (p: string) => path.relative(repoRoot, path.resolve(p)),
-        },
-      ],
-    ],
     // `vitest run --coverage` (`make coverage` at the repo root) writes
     // coverage/lcov.info for SonarQube. Every application file counts, tested
     // or not; vitest's default excludes drop the test files themselves.
