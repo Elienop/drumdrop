@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -61,43 +62,50 @@ Examples:
   drumdrop daemon --once          # one plan+drain cycle then exit (cron-friendly)
 `
 
+// main is the only line no test runs: os.Exit would end the test binary.
 func main() {
-	args := os.Args[1:]
-	if len(args) == 0 {
-		fmt.Print(usage)
-		os.Exit(1)
-	}
-	switch args[0] {
-	case "-h", "--help":
-		fmt.Print(usage)
-		return
-	case "login":
-		exit(cmdLogin())
-	case "whoami":
-		exit(cmdWhoami())
-	case "logout":
-		exit(cmdLogout())
-	case "follow":
-		exit(cmdFollow(args[1:]))
-	case "unfollow":
-		exit(cmdUnfollow(args[1:]))
-	case "follows":
-		exit(cmdFollows())
-	case "sync":
-		exit(cmdSync(args[1:]))
-	case "daemon":
-		exit(cmdDaemon(args[1:]))
-	case "serve":
-		exit(cmdServe(args[1:]))
-	default:
-		exit(cmdDownload(args))
-	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// exit prints err (if any) to stderr and exits non-zero, otherwise returns.
-func exit(err error) {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "✖ ", err)
-		os.Exit(1)
+// run dispatches args (the command line without the program name) to its
+// command and returns the exit code: 0 for --help or a command that succeeded,
+// 1 for no arguments (after printing the usage) or a command that failed
+// (after printing its error). The commands write their own output to
+// os.Stdout; stdout and stderr receive only the usage and the error line.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stdout, usage)
+		return 1
 	}
+	var err error
+	switch args[0] {
+	case "-h", "--help":
+		fmt.Fprint(stdout, usage)
+		return 0
+	case "login":
+		err = cmdLogin()
+	case "whoami":
+		err = cmdWhoami()
+	case "logout":
+		err = cmdLogout()
+	case "follow":
+		err = cmdFollow(args[1:])
+	case "unfollow":
+		err = cmdUnfollow(args[1:])
+	case "follows":
+		err = cmdFollows()
+	case "sync":
+		err = cmdSync(args[1:])
+	case "daemon":
+		err = cmdDaemon(args[1:])
+	case "serve":
+		err = cmdServe(args[1:])
+	default:
+		err = cmdDownload(args)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "✖ ", err)
+		return 1
+	}
+	return 0
 }
