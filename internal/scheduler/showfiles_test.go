@@ -499,7 +499,9 @@ func TestEnsureShowFilesWritesOnlyIntoARealShowFolder(t *testing.T) {
 		w, store, res, _, lib := backfillWorker(t)
 		other := filepath.Join(lib, "Other")
 		seedSeason(t, filepath.Join(other, "Season 01"))
-		if err := os.Symlink(other, filepath.Join(lib, "Beginner Course")); err != nil {
+		// A relative link that stays inside the library: an os.Root refuses
+		// one that leads out of it anyway, so only this one needs the guard.
+		if err := os.Symlink("Other", filepath.Join(lib, "Beginner Course")); err != nil {
 			t.Skip("no symlinks here:", err)
 		}
 		store.withFiles = []database.Lesson{inFollow(recordedRow(100, filepath.Join(lib, "Beginner Course", "Season 01"), "x.mp4"), nodeFollow().ID)}
@@ -727,8 +729,9 @@ func TestEnsureShowFilesAsksOnceAboutAShowItCanNotName(t *testing.T) {
 }
 
 // TestNoShowFilesInTheDefaultLayout proves the default layout is unchanged:
-// no show files, from a placement or from the cycle's step, and its image
-// keeps its "-poster.jpg" name.
+// no show files, from a placement or from the cycle's step (not even for a
+// show folder an earlier plex-tv setting filled), and its image keeps its
+// "-poster.jpg" name.
 func TestNoShowFilesInTheDefaultLayout(t *testing.T) {
 	w, s, dl, f, _ := realWorker(t, "")
 	withPoster(dl)
@@ -749,6 +752,18 @@ func TestNoShowFilesInTheDefaultLayout(t *testing.T) {
 	assertExist(t, true, filepath.Join(course, "05 - Lesson A", "05 - Lesson A-poster.jpg"))
 	if len(img.fetched()) != 0 {
 		t.Errorf("fetched %v in the default layout", img.fetched())
+	}
+
+	// A show folder a plex-tv setting filed episodes in before.
+	bw, store, res, bimg, lib := backfillWorker(t)
+	bw.Cfg.Layout = ""
+	season := filepath.Join(lib, "Beginner Course", "Season 01")
+	seedSeason(t, season)
+	store.withFiles = []database.Lesson{inFollow(recordedRow(100, season, "x.mp4"), nodeFollow().ID)}
+	res.docs[4242] = courseDoc(4242, "Beginner Course")
+	bw.EnsureShowFiles(ctx)
+	if got := showFileNames(t, filepath.Dir(season)); len(got) != 0 || len(res.asked()) != 0 || len(bimg.fetched()) != 0 {
+		t.Errorf("the default layout wrote %v (asked %v, fetched %v)", got, res.asked(), bimg.fetched())
 	}
 }
 

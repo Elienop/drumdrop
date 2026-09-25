@@ -577,7 +577,7 @@ func showFolderOf(libraryDir string, row database.Lesson) string {
 	case recorded && len(entries) > 0:
 		first, _, _ := strings.Cut(entries[0], "/")
 		return validShowName(first)
-	case !row.OutputDir.Valid || !library.IsSeasonDir(row.OutputDir.String) || !library.Inside(libraryDir, row.OutputDir.String):
+	case !row.OutputDir.Valid || !library.IsSeasonDir(row.OutputDir.String):
 		return ""
 	}
 	rel, err := filepath.Rel(filepath.Clean(libraryDir), filepath.Clean(row.OutputDir.String))
