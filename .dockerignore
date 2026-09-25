@@ -3,6 +3,8 @@
 **/node_modules
 web/dist
 dist
+# the locally built binary (`go build ./cmd/drumdrop` at the root); the image builds its own
+drumdrop
 downloads
 docs
 **/*.db
