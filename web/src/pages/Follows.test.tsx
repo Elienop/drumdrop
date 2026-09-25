@@ -751,6 +751,52 @@ it("a preview that lands after the kind was switched is not shown and does not e
   expect(within(dialog).getByRole("button", { name: /^add$/i })).toBeDisabled()
 })
 
+it("each step's button is disabled while the other step's request runs, and only then", async () => {
+  let previews = 0
+  let answerPreview: () => void = () => {}
+  let answerAdd: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+    http.get(`${ORIGIN}/api/preview`, async (info) => {
+      // The first preview answers at once; the second waits.
+      previews += 1
+      if (previews > 1) await new Promise<void>((resolve) => (answerPreview = resolve))
+      return previewOf(info)
+    }),
+    http.post(`${ORIGIN}/api/follows`, async () => {
+      await new Promise<void>((resolve) => (answerAdd = resolve))
+      return HttpResponse.json(follows[0], { status: 201 })
+    }),
+  )
+  const user = renderAdd()
+  await user.click(await screen.findByRole("button", { name: /add follow/i }))
+  const dialog = await screen.findByRole("dialog")
+  await user.type(within(dialog).getByLabelText(/url or id/i), "12345")
+  await user.click(within(dialog).getByRole("button", { name: /^preview$/i }))
+  expect(await within(dialog).findByText("Node 12345")).toBeInTheDocument()
+  const preview = within(dialog).getByRole("button", { name: /^preview$/i })
+  const add = within(dialog).getByRole("button", { name: /^add$/i })
+  expect(preview).toBeEnabled()
+  expect(add).toBeEnabled()
+
+  // A second preview of the same input: the shown preview stays, and Add
+  // waits for the new one.
+  await user.click(preview)
+  await within(dialog).findByRole("button", { name: /previewing/i })
+  expect(within(dialog).getByText("Node 12345")).toBeInTheDocument()
+  expect(add).toBeDisabled()
+  expect(preview).toBeEnabled()
+  await act(async () => answerPreview())
+  await waitFor(() => expect(add).toBeEnabled())
+
+  // While Add runs, Preview is disabled.
+  await user.click(add)
+  await within(dialog).findByRole("button", { name: /adding/i })
+  expect(preview).toBeDisabled()
+  expect(add).toBeEnabled()
+  await act(async () => answerAdd())
+})
+
 // --- Remove: already removed elsewhere -----------------------------------------
 
 it("a 404 on remove (removed elsewhere first) closes the dialog as done", async () => {

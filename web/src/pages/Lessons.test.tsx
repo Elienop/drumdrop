@@ -1350,6 +1350,38 @@ it("filtered by a follow, the badge and the card name the follow, not its id", a
   expect(screen.queryByText(/#3/)).not.toBeInTheDocument()
 })
 
+it("the card says which lessons it lists: all of them, or one follow's even before its name is known", async () => {
+  server.use(http.get(`${ORIGIN}/api/lessons`, () => HttpResponse.json(lessons)))
+  const all = renderWithProviders(<Lessons />)
+  expect(await screen.findByText("All tracked lessons")).toBeInTheDocument()
+  all.unmount()
+
+  server.use(
+    http.get(`${ORIGIN}/api/follows/3/lessons`, () => HttpResponse.json([lessons[0]])),
+    http.get(`${ORIGIN}/api/follows`, () => HttpResponse.json([])),
+  )
+  renderWithProviders(<Lessons />, { route: "/lessons?follow=3" })
+  expect(await screen.findByText("Lessons of one follow")).toBeInTheDocument()
+  expect(await screen.findByText("Single Stroke Roll")).toBeInTheDocument()
+})
+
+it("an empty list says so, and a loading one does not", async () => {
+  let answer: () => void = () => {}
+  server.use(
+    http.get(`${ORIGIN}/api/lessons`, async () => {
+      await new Promise<void>((resolve) => (answer = resolve))
+      return HttpResponse.json([])
+    }),
+  )
+  renderWithProviders(<Lessons />)
+  expect(await screen.findByText("Loading…")).toBeInTheDocument()
+  expect(screen.queryByText("No lessons")).not.toBeInTheDocument()
+  await act(async () => answer())
+  expect(await screen.findByText("No lessons")).toBeInTheDocument()
+  expect(screen.queryByText("Loading…")).not.toBeInTheDocument()
+  expect(screen.queryByRole("table")).not.toBeInTheDocument()
+})
+
 it("a long follow name truncates inside the filter badge, with the full name in its title", async () => {
   const title = "The Complete Guide to Every Rudiment You Will Ever Need, Volume Two"
   server.use(
