@@ -72,6 +72,34 @@ func BuildEpisodeNFO(l *Lesson, show string, season, episode int) string {
 	return b.String()
 }
 
+// BuildShowNFO renders the tvshow.nfo of a plex-tv show: a Kodi <tvshow>
+// document, which Plex's "Plex NFO Series" agent and XBMCnfoTVImporter both
+// read. title is the show's name as the show folder was named from it
+// (unsanitized), and doc the Musora document the show is named after (nil
+// when there is none: the nfo then holds only the title). It reuses the
+// episode nfo's field helpers: <plot> (plain text), <premiered>, <studio>,
+// <genre>, <actor> and <uniqueid type="musora" default="true">, each when
+// known. <runtime> and the difficulty <tag> describe one lesson, not a show,
+// so they are left out.
+func BuildShowNFO(title string, doc *Lesson) string {
+	var b strings.Builder
+	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<tvshow>\n")
+	fmt.Fprintf(&b, "  <title>%s</title>\n", esc(title))
+	if doc != nil {
+		writePlot(&b, doc)
+		if d := dateOnly(doc.PublishedOn); d != "" {
+			fmt.Fprintf(&b, "  <premiered>%s</premiered>\n", d)
+		}
+		if doc.Brand != "" {
+			fmt.Fprintf(&b, "  <studio>%s</studio>\n", esc(doc.Brand))
+		}
+		writeGenresActors(&b, doc)
+		writeUniqueID(&b, doc)
+	}
+	b.WriteString("</tvshow>\n")
+	return b.String()
+}
+
 // writePlot writes the <plot> tag from the lesson description (HTML tags stripped,
 // entities decoded, then single-escaped), if any survives the cleanup.
 func writePlot(b *strings.Builder, l *Lesson) {

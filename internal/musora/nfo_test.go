@@ -10,9 +10,7 @@ func TestBuildNFO(t *testing.T) {
 		ID: 409918, Title: "Course Kick-Off", Description: "<p>Welcome &amp; enjoy</p>",
 		DifficultyString: "Intermediate", Brand: "drumeo", PublishedOn: "2024-06-11T15:00:00.000000Z",
 		LengthInSeconds: 90, Instructors: []Instructor{{Name: "El Estepario Siberiano"}},
-		ParentContentData: []struct {
-			Title string `json:"title"`
-		}{{Title: "30-Day Independence"}},
+		ParentContentData: []ParentContent{{Title: "30-Day Independence"}},
 	}
 	xml := BuildNFO(l)
 	for _, want := range []string{
@@ -38,9 +36,7 @@ func TestBuildEpisodeNFO(t *testing.T) {
 		ID: 409918, Title: "Course Kick-Off", Description: "<p>Welcome &amp; enjoy</p>",
 		DifficultyString: "Intermediate", Brand: "drumeo", PublishedOn: "2024-06-11T15:00:00.000000Z",
 		LengthInSeconds: 90, Instructors: []Instructor{{Name: "El Estepario Siberiano"}},
-		ParentContentData: []struct {
-			Title string `json:"title"`
-		}{{Title: "30-Day Independence"}},
+		ParentContentData: []ParentContent{{Title: "30-Day Independence"}},
 	}
 	xml := BuildEpisodeNFO(l, "30-Day Independence", 1, 5)
 	for _, want := range []string{
@@ -76,5 +72,42 @@ func TestBuildEpisodeNFONoShowTitle(t *testing.T) {
 	}
 	if !strings.Contains(xml, "<episodedetails>") || !strings.Contains(xml, "<season>1</season>") || !strings.Contains(xml, "<episode>3</episode>") {
 		t.Fatalf("episode NFO missing core tags\n%s", xml)
+	}
+}
+
+// TestBuildShowNFO pins the tvshow.nfo of a plex-tv show: a <tvshow> document
+// titled with the show's name (as its folder was named from it), with the
+// plot as plain text, and every other field when known; nothing of one
+// lesson's (runtime, difficulty) and no markup from Musora's HTML.
+func TestBuildShowNFO(t *testing.T) {
+	doc := &Lesson{
+		ID: 455014, Title: "Kick, Snare, Hat (Musora's title)", Description: "<p>Groove &amp; feel with <b>Ash</b>.</p>",
+		DifficultyString: "Beginner", Brand: "drumeo", PublishedOn: "2026-04-13T18:00:00.000Z", LengthInSeconds: 600,
+		Instructors: []Instructor{{Name: "Ash Soan"}},
+		Genre: []struct {
+			Name string `json:"name"`
+		}{{Name: "Pop & Rock"}},
+	}
+	want := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<tvshow>
+  <title>Kick, Snare &amp; Hat</title>
+  <plot>Groove &amp; feel with Ash.</plot>
+  <premiered>2026-04-13</premiered>
+  <studio>drumeo</studio>
+  <genre>Pop &amp; Rock</genre>
+  <actor><name>Ash Soan</name><role>Instructor</role></actor>
+  <uniqueid type="musora" default="true">455014</uniqueid>
+</tvshow>
+`
+	if got := BuildShowNFO("Kick, Snare & Hat", doc); got != want {
+		t.Errorf("BuildShowNFO =\n%s\nwant\n%s", got, want)
+	}
+	titleOnly := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<tvshow>
+  <title>content-7</title>
+</tvshow>
+`
+	if got := BuildShowNFO("content-7", nil); got != titleOnly {
+		t.Errorf("BuildShowNFO with no document =\n%s\nwant\n%s", got, titleOnly)
 	}
 }

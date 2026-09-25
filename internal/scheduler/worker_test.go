@@ -933,9 +933,7 @@ func TestWorkerNullFollowFallsBackToParentTitle(t *testing.T) {
 	store := newFakeWorkerStore(job)
 
 	les := lesson(100, "Orphan Lesson")
-	les.ParentContentData = []struct {
-		Title string `json:"title"`
-	}{{Title: "Some Course"}}
+	les.ParentContentData = []musora.ParentContent{{Title: "Some Course"}}
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
 	dl := newFakeDownloader()
 
@@ -979,9 +977,7 @@ func TestWorkerMissingFollowFallsBackToDefaults(t *testing.T) {
 	store := newFakeWorkerStore(job) // no follow 42: GetFollow answers sql.ErrNoRows
 
 	les := lesson(100, "Resilient")
-	les.ParentContentData = []struct {
-		Title string `json:"title"`
-	}{{Title: "Recovered Course"}}
+	les.ParentContentData = []musora.ParentContent{{Title: "Recovered Course"}}
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
 	dl := newFakeDownloader()
 
@@ -1479,9 +1475,7 @@ func TestWorkerInstructorFollowGroupsByParentCourse(t *testing.T) {
 	store.lessons[100] = database.Lesson{RailcontentID: 100, Position: sql.NullInt64{Int64: 3, Valid: true}}
 
 	les := lesson(100, "Paradiddle Power")
-	les.ParentContentData = []struct {
-		Title string `json:"title"`
-	}{{Title: "Hand Technique"}}
+	les.ParentContentData = []musora.ParentContent{{Title: "Hand Technique"}}
 	res := fakeResolver{lessons: map[int]*musora.Lesson{100: les}}
 	dl := newFakeDownloader()
 	dl.writeMP4 = []byte("video-bytes")
@@ -1900,9 +1894,7 @@ func TestWorkerPlexTvLayoutNoLibraryKeepsInDownloads(t *testing.T) {
 // no follow -> parent title else content-<id>.
 func TestPlexShow(t *testing.T) {
 	withParent := func(l *musora.Lesson, title string) *musora.Lesson {
-		l.ParentContentData = []struct {
-			Title string `json:"title"`
-		}{{Title: title}}
+		l.ParentContentData = []musora.ParentContent{{Title: title}}
 		return l
 	}
 

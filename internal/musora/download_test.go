@@ -587,6 +587,18 @@ func TestAuxFetchesListsEachArtifactInOrder(t *testing.T) {
 	}
 }
 
+// TestAuxFetchesAsksForTheImageAsJPEG proves the lesson's image, a file named
+// .jpg, is asked for as JPEG when Musora's CDN can convert it (a thumbnail
+// stored as PNG would otherwise be saved as PNG bytes under a .jpg name).
+func TestAuxFetchesAsksForTheImageAsJPEG(t *testing.T) {
+	thumb := "https://cdn.sanity.io/images/4032r8py/production_v2/abc-1920x1080.png"
+	got := auxFetches(&Lesson{Thumbnail: thumb}, "L", "01 - L")
+	want := auxFetch{artifact: "poster", url: thumb + "?fm=jpg", dest: filepath.Join("L", "01 - L-poster.jpg")}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("auxFetches = %+v, want [%+v]", got, want)
+	}
+}
+
 // writeFakeYtDlp installs a POSIX fake yt-dlp on PATH that creates the output
 // file from its "-o" template (replacing %(ext)s with mp4), so a song download
 // can be exercised without the real binary. It returns immediately on Windows
