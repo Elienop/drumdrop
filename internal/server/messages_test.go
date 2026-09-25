@@ -109,25 +109,34 @@ func TestMessagesFollowTheCopyRules(t *testing.T) {
 	if len(msgs) < 40 {
 		t.Fatalf("found %d messages, want every msg constant", len(msgs))
 	}
-	uncontracted := []string{"could not", "can not", "cannot", "did not", "does not", "do not", "is not", "was not", "were not", "has not", "will not"}
 	for name, m := range msgs {
-		if n := utf8.RuneCountInString(m); n > maxMessageLen {
-			t.Errorf("%s is %d characters, want at most %d: %q", name, n, maxMessageLen, m)
+		checkCopyRules(t, name, m)
+	}
+}
+
+// uncontracted are the spellings the copy rules want contracted.
+var uncontracted = []string{"could not", "can not", "cannot", "did not", "does not", "do not", "is not", "was not", "were not", "has not", "will not"}
+
+// checkCopyRules checks message m, the constant name, against every rule of
+// TestMessagesFollowTheCopyRules.
+func checkCopyRules(t *testing.T, name, m string) {
+	t.Helper()
+	if n := utf8.RuneCountInString(m); n > maxMessageLen {
+		t.Errorf("%s is %d characters, want at most %d: %q", name, n, maxMessageLen, m)
+	}
+	for _, u := range uncontracted {
+		if strings.Contains(strings.ToLower(m), u) {
+			t.Errorf("%s says %q, want the contraction: %q", name, u, m)
 		}
-		for _, u := range uncontracted {
-			if strings.Contains(strings.ToLower(m), u) {
-				t.Errorf("%s says %q, want the contraction: %q", name, u, m)
-			}
-		}
-		if strings.Contains(m, "another window") {
-			t.Errorf("%s says \"another window\", want \"elsewhere\": %q", name, m)
-		}
-		if strings.Contains(m, "server log") && !strings.Contains(m, "Check the server log, fix the problem, then ") {
-			t.Errorf("%s points at the log in another wording: %q", name, m)
-		}
-		if !strings.HasSuffix(m, ".") || strings.Contains(m, "%") {
-			t.Errorf("%s is not a finished sentence: %q", name, m)
-		}
+	}
+	if strings.Contains(m, "another window") {
+		t.Errorf("%s says \"another window\", want \"elsewhere\": %q", name, m)
+	}
+	if strings.Contains(m, "server log") && !strings.Contains(m, "Check the server log, fix the problem, then ") {
+		t.Errorf("%s points at the log in another wording: %q", name, m)
+	}
+	if !strings.HasSuffix(m, ".") || strings.Contains(m, "%") {
+		t.Errorf("%s is not a finished sentence: %q", name, m)
 	}
 }
 

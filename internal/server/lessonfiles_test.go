@@ -193,30 +193,46 @@ func TestRemoveLessonFilesCollisionsInEveryDirection(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for i, title := range fiveTitles {
 			t.Run(map[bool]string{false: "record", true: "legacy"}[legacy]+"/"+title, func(t *testing.T) {
-				downloads, library := t.TempDir(), t.TempDir()
-				season := filepath.Join(library, "Show", "Season 01")
-				var rows []database.Lesson
-				for j, tt := range fiveTitles {
-					seedEntries(t, season, fiveLookAlikes[tt]...)
-					if legacy {
-						rows = append(rows, legacyLesson(j+1, tt, 5, season, fiveLookAlikes[tt][0]))
-					} else {
-						rows = append(rows, recordedLesson(j+1, season, fiveLookAlikes[tt]...))
-					}
-				}
-				if _, err := removeFiles(downloads, library, rows[i], rows); err != nil {
-					t.Fatalf("removeLessonFiles(%s): %v", title, err)
-				}
-				assertGone(t, season, fiveLookAlikes[title]...)
-				for _, other := range fiveTitles {
-					if other != title {
-						assertPresent(t, season, fiveLookAlikes[other]...)
-					}
-				}
-				assertPresent(t, library, "Show/Season 01/")
+				checkLookAlikeDelete(t, i, title, legacy)
 			})
 		}
 	}
+}
+
+// checkLookAlikeDelete files the four look-alikes in one season folder (with
+// records, or as legacy rows) and deletes fiveTitles[i], title: only its own
+// entries go.
+func checkLookAlikeDelete(t *testing.T, i int, title string, legacy bool) {
+	t.Helper()
+	downloads, library := t.TempDir(), t.TempDir()
+	season := filepath.Join(library, "Show", "Season 01")
+	rows := seedLookAlikes(t, season, legacy)
+	if _, err := removeFiles(downloads, library, rows[i], rows); err != nil {
+		t.Fatalf("removeLessonFiles(%s): %v", title, err)
+	}
+	assertGone(t, season, fiveLookAlikes[title]...)
+	for _, other := range fiveTitles {
+		if other != title {
+			assertPresent(t, season, fiveLookAlikes[other]...)
+		}
+	}
+	assertPresent(t, library, "Show/Season 01/")
+}
+
+// seedLookAlikes makes every look-alike's entries in season and returns their
+// rows, lesson j+1 for fiveTitles[j]: recorded, or legacy rows.
+func seedLookAlikes(t *testing.T, season string, legacy bool) []database.Lesson {
+	t.Helper()
+	var rows []database.Lesson
+	for j, tt := range fiveTitles {
+		seedEntries(t, season, fiveLookAlikes[tt]...)
+		if legacy {
+			rows = append(rows, legacyLesson(j+1, tt, 5, season, fiveLookAlikes[tt][0]))
+		} else {
+			rows = append(rows, recordedLesson(j+1, season, fiveLookAlikes[tt]...))
+		}
+	}
+	return rows
 }
 
 // TestRemoveLessonFilesByRecordAfterATitleChange proves a recorded lesson

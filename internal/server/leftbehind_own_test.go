@@ -48,49 +48,62 @@ var ownMoves = []ownMove{
 func TestDeleteLessonAsksForItsOwnFilesInTheOldFolder(t *testing.T) {
 	for _, m := range ownMoves {
 		for _, recorded := range []bool{true, false} {
-			t.Run(m.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
-				captureLog(t)
-				store := newTestStore(t)
-				root := t.TempDir()
-				oldSeason := filepath.Join(root, "old", "Beginner Course", "Season 01")
-				lib := filepath.Join(root, "new")
-				newSeason := filepath.Join(lib, "Beginner Course", "Season 01")
-				f := addFollow(t, store, 4242)
-				seedSeasonLesson(t, store, f, 1, oldSeason, newSeason, recorded)
-				for _, n := range leftBehindNames {
-					if !slices.Contains(m.moved, n) {
-						if err := os.Remove(filepath.Join(newSeason, n)); err != nil {
-							t.Fatal(err)
-						}
-					}
-				}
-				seedEntries(t, oldSeason, m.old...)
-				if m.sibling {
-					seedEntries(t, oldSeason, siblingName)
-				}
-				before := mustLesson(t, store, 1)
-				srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: filepath.Join(root, "dl"), LibraryDir: lib}, "test")
-
-				rec := serveDelete(t, srv, "/api/lessons/1")
-				if m.leftBehind {
-					wantError(t, rec, http.StatusConflict, msgLessonLeftBehind)
-					assertOnDisk(t, true, oldSeason, m.old...)
-					assertOnDisk(t, true, newSeason, m.moved...)
-					assertUnchanged(t, store, before)
-					return
-				}
-				if rec.Code != http.StatusOK {
-					t.Fatalf("DELETE = %d %s, want 200", rec.Code, rec.Body.String())
-				}
-				assertOnDisk(t, false, newSeason, leftBehindNames...)
-				if m.sibling {
-					assertOnDisk(t, true, oldSeason, siblingName)
-				}
-				if l := mustLesson(t, store, 1); l.Status != database.StatusSkipped || l.HasFiles() {
-					t.Errorf("lesson = %q, has files %v; want tombstoned", l.Status, l.HasFiles())
-				}
-			})
+			t.Run(m.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) { checkOwnMoveDelete(t, m, recorded) })
 		}
+	}
+}
+
+// checkOwnMoveDelete runs one TestDeleteLessonAsksForItsOwnFilesInTheOldFolder
+// case: lesson 1's files placed as m says, then DELETE /api/lessons/1.
+func checkOwnMoveDelete(t *testing.T, m ownMove, recorded bool) {
+	t.Helper()
+	captureLog(t)
+	store := newTestStore(t)
+	root := t.TempDir()
+	oldSeason := filepath.Join(root, "old", "Beginner Course", "Season 01")
+	lib := filepath.Join(root, "new")
+	newSeason := filepath.Join(lib, "Beginner Course", "Season 01")
+	f := addFollow(t, store, 4242)
+	seedSeasonLesson(t, store, f, 1, oldSeason, newSeason, recorded)
+	m.place(t, oldSeason, newSeason)
+	before := mustLesson(t, store, 1)
+	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: filepath.Join(root, "dl"), LibraryDir: lib}, "test")
+
+	rec := serveDelete(t, srv, "/api/lessons/1")
+	if m.leftBehind {
+		wantError(t, rec, http.StatusConflict, msgLessonLeftBehind)
+		assertOnDisk(t, true, oldSeason, m.old...)
+		assertOnDisk(t, true, newSeason, m.moved...)
+		assertUnchanged(t, store, before)
+		return
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	assertOnDisk(t, false, newSeason, leftBehindNames...)
+	if m.sibling {
+		assertOnDisk(t, true, oldSeason, siblingName)
+	}
+	if l := mustLesson(t, store, 1); l.Status != database.StatusSkipped || l.HasFiles() {
+		t.Errorf("lesson = %q, has files %v; want tombstoned", l.Status, l.HasFiles())
+	}
+}
+
+// place turns a lesson whose files are all in newSeason into m: it removes
+// from newSeason every file m did not move, and makes m's old names (and the
+// sibling's episode, when m has one) in oldSeason.
+func (m ownMove) place(t *testing.T, oldSeason, newSeason string) {
+	t.Helper()
+	for _, n := range leftBehindNames {
+		if !slices.Contains(m.moved, n) {
+			if err := os.Remove(filepath.Join(newSeason, n)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	seedEntries(t, oldSeason, m.old...)
+	if m.sibling {
+		seedEntries(t, oldSeason, siblingName)
 	}
 }
 
@@ -171,33 +184,15 @@ func TestRefusedDeletesStopNothing(t *testing.T) {
 	}
 	f := addFollow(t, store, 4242)
 	seedSeasonLesson(t, store, f, 1, oldSeason, oldSeason, true)
-	enqueue := func(rcID int) int64 {
-		t.Helper()
-		if rcID != 1 {
-			if err := store.UpsertLesson(ctx, rcID, "Lesson "+strconv.Itoa(rcID), sql.NullInt64{}, "drumeo", sql.NullInt64{Int64: int64(rcID), Valid: true}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		id, _, err := store.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, rcID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return id
-	}
-	firstDownload := enqueue(2)
+	firstDownload := enqueueInFollow(t, store, f, 2)
 	claimJob(t, store, firstDownload)
-	queued := enqueue(3)
+	queued := enqueueInFollow(t, store, f, 3)
 	var killed []int64
 	deps := Deps{CancelRunning: func(id int64) bool { killed = append(killed, id); return true }}
 	srv := NewServer(store, deps, nil, Config{DownloadsDir: filepath.Join(root, "dl"), LibraryDir: lib}, "test")
 
 	wantError(t, serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true"), http.StatusConflict, msgFollowLeftBehind)
-	if len(killed) != 0 {
-		t.Errorf("killed %v, want no download stopped", killed)
-	}
-	if n := abandonedRows(t, path); n != 0 {
-		t.Errorf("%d stop intents recorded, want none", n)
-	}
+	assertStoppedNothing(t, killed, path)
 	if j, err := store.GetJob(ctx, queued); err != nil || j.Status != database.JobQueued {
 		t.Errorf("queued job = %+v (err %v), want still queued", j, err)
 	}
@@ -213,16 +208,41 @@ func TestRefusedDeletesStopNothing(t *testing.T) {
 		t.Errorf("lesson 2 = %q, want downloaded", l.Status)
 	}
 
-	redownload := enqueue(1)
+	redownload := enqueueInFollow(t, store, f, 1)
 	claimJob(t, store, redownload)
 	wantError(t, serveDelete(t, srv, "/api/lessons/1"), http.StatusConflict, msgLessonLeftBehind)
+	assertStoppedNothing(t, killed, path)
+	if j, err := store.GetJob(ctx, redownload); err != nil || j.Status != database.JobRunning {
+		t.Errorf("the lesson's re-download = %+v (err %v), want still running", j, err)
+	}
+}
+
+// enqueueInFollow queues a job for lesson rcID of follow f, first adding the
+// lesson (except lesson 1, which the caller seeded), and returns its id.
+func enqueueInFollow(t *testing.T, store *database.Store, f int64, rcID int) int64 {
+	t.Helper()
+	ctx := t.Context()
+	if rcID != 1 {
+		if err := store.UpsertLesson(ctx, rcID, "Lesson "+strconv.Itoa(rcID), sql.NullInt64{}, "drumeo", sql.NullInt64{Int64: int64(rcID), Valid: true}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, _, err := store.EnqueueJob(ctx, sql.NullInt64{Int64: f, Valid: true}, rcID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// assertStoppedNothing fails if a download was killed (killed, what
+// CancelRunning was asked to stop) or a stop intent recorded in the database
+// at path.
+func assertStoppedNothing(t *testing.T, killed []int64, path string) {
+	t.Helper()
 	if len(killed) != 0 {
 		t.Errorf("killed %v, want no download stopped", killed)
 	}
 	if n := abandonedRows(t, path); n != 0 {
 		t.Errorf("%d stop intents recorded, want none", n)
-	}
-	if j, err := store.GetJob(ctx, redownload); err != nil || j.Status != database.JobRunning {
-		t.Errorf("the lesson's re-download = %+v (err %v), want still running", j, err)
 	}
 }

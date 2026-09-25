@@ -116,27 +116,40 @@ func TestOnlyTheAuthMiddlewareAnswers401(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", f, err)
 		}
-		for _, d := range file.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.SelectorExpr:
-					if n.Sel.Name == "StatusUnauthorized" {
-						found = append(found, f+":"+fn.Name.Name)
-					}
-				case *ast.BasicLit:
-					if n.Kind == token.INT && n.Value == "401" {
-						found = append(found, f+":"+fn.Name.Name)
-					}
-				}
-				return true
-			})
-		}
+		found = append(found, funcsNaming401(f, file)...)
 	}
 	if len(found) != 1 || found[0] != "auth.go:withMiddleware" {
 		t.Errorf("401 is named in %v, want only auth.go:withMiddleware", found)
 	}
+}
+
+// funcsNaming401 returns "<name>:<function>" for every place a function
+// declared in file (read from the file name) names 401, once per place.
+func funcsNaming401(name string, file *ast.File) []string {
+	var found []string
+	for _, d := range file.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if names401(n) {
+				found = append(found, name+":"+fn.Name.Name)
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// names401 reports whether n spells the status 401: http.StatusUnauthorized
+// (any selector of that name), or the number.
+func names401(n ast.Node) bool {
+	switch n := n.(type) {
+	case *ast.SelectorExpr:
+		return n.Sel.Name == "StatusUnauthorized"
+	case *ast.BasicLit:
+		return n.Kind == token.INT && n.Value == "401"
+	}
+	return false
 }

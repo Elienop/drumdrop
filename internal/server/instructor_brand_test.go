@@ -17,35 +17,43 @@ import (
 // for them, and that the add stores the same name and brand. Before, both
 // took the first document: jared-falk on drumeo previewed zero lessons.
 func TestPreviewAndAddUseTheBrandsInstructor(t *testing.T) {
-	for _, c := range []struct {
-		input, brand         string
-		wantBrand, wantTitle string
-		wantCount            int
-	}{
+	for _, c := range []brandInstructorCase{
 		{"Jared Falk", "", "drumeo", "Jared Falk", 2},
 		{"jared-falk", "drumeo", "drumeo", "Jared Falk", 2},
 		{"https://app.musora.com/singeo/coaches/jared-falk/314120", "", "singeo", "Jared Falk (Singeo)", 2},
 		{"https://app.musora.com/drumeo/coaches/jared-falk/31880", "", "drumeo", "Jared Falk", 2},
 	} {
-		t.Run(c.input+" "+c.brand, func(t *testing.T) {
-			musoratest.Serve(t, musoratest.JaredFalk())
-			preview, add, follows := previewThenAdd(t, c.input, c.brand)
+		t.Run(c.input+" "+c.brand, func(t *testing.T) { checkBrandsInstructor(t, c) })
+	}
+}
 
-			var p previewResponse
-			if preview.Code != http.StatusOK || json.Unmarshal(preview.Body.Bytes(), &p) != nil {
-				t.Fatalf("preview = %d %s, want 200", preview.Code, preview.Body.String())
-			}
-			want := previewResponse{Title: c.wantTitle, LessonCount: c.wantCount, Kind: "instructor", Slug: "jared-falk", Brand: c.wantBrand}
-			if p.RootID != nil || p.Title != want.Title || p.LessonCount != want.LessonCount || p.Kind != want.Kind || p.Slug != want.Slug || p.Brand != want.Brand {
-				t.Errorf("preview = %s, want %+v", preview.Body.String(), want)
-			}
-			if add.Code != http.StatusCreated {
-				t.Fatalf("add = %d %s, want 201", add.Code, add.Body.String())
-			}
-			if len(follows) != 1 || follows[0].Title != c.wantTitle || follows[0].Brand != c.wantBrand {
-				t.Fatalf("stored follows = %+v, want one titled %q in %s", follows, c.wantTitle, c.wantBrand)
-			}
-		})
+// brandInstructorCase is one case of TestPreviewAndAddUseTheBrandsInstructor.
+type brandInstructorCase struct {
+	input, brand         string
+	wantBrand, wantTitle string
+	wantCount            int
+}
+
+// checkBrandsInstructor previews then adds c's input against the two-brand
+// instructor, and checks both answers and the stored follow.
+func checkBrandsInstructor(t *testing.T, c brandInstructorCase) {
+	t.Helper()
+	musoratest.Serve(t, musoratest.JaredFalk())
+	preview, add, follows := previewThenAdd(t, c.input, c.brand)
+
+	var p previewResponse
+	if preview.Code != http.StatusOK || json.Unmarshal(preview.Body.Bytes(), &p) != nil {
+		t.Fatalf("preview = %d %s, want 200", preview.Code, preview.Body.String())
+	}
+	want := previewResponse{Title: c.wantTitle, LessonCount: c.wantCount, Kind: "instructor", Slug: "jared-falk", Brand: c.wantBrand}
+	if p.RootID != nil || p.Title != want.Title || p.LessonCount != want.LessonCount || p.Kind != want.Kind || p.Slug != want.Slug || p.Brand != want.Brand {
+		t.Errorf("preview = %s, want %+v", preview.Body.String(), want)
+	}
+	if add.Code != http.StatusCreated {
+		t.Fatalf("add = %d %s, want 201", add.Code, add.Body.String())
+	}
+	if len(follows) != 1 || follows[0].Title != c.wantTitle || follows[0].Brand != c.wantBrand {
+		t.Fatalf("stored follows = %+v, want one titled %q in %s", follows, c.wantTitle, c.wantBrand)
 	}
 }
 

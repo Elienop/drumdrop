@@ -63,10 +63,7 @@ func previewThenAdd(t *testing.T, input, brand string) (preview, add *httptest.R
 // shows is accepted back (round-5 code Low 4, UI M1): "@jared-falk", and a
 // brand as the tables write it ("Pianote"), padded, or in capitals.
 func TestInstructorInputIsNormalisedAlike(t *testing.T) {
-	for _, c := range []struct {
-		input, brand    string
-		slug, wantBrand string
-	}{
+	for _, c := range []inputCase{
 		{"Jared Falk", "", "jared-falk", "drumeo"},
 		{"Jared-Falk", "", "jared-falk", "drumeo"},
 		{"  jared-falk\n", "pianote", "jared-falk", "pianote"},
@@ -78,33 +75,52 @@ func TestInstructorInputIsNormalisedAlike(t *testing.T) {
 		{"jared-falk", " pianote", "jared-falk", "pianote"},
 		{"Jared Falk", "DRUMEO", "jared-falk", "drumeo"},
 	} {
-		t.Run(c.input+" "+c.brand, func(t *testing.T) {
-			queries := recordSanity(t)
-			preview, add, follows := previewThenAdd(t, c.input, c.brand)
+		t.Run(c.input+" "+c.brand, func(t *testing.T) { checkInputNormalised(t, c) })
+	}
+}
 
-			var p previewResponse
-			if preview.Code != http.StatusOK || json.Unmarshal(preview.Body.Bytes(), &p) != nil {
-				t.Fatalf("preview = %d %s, want 200", preview.Code, preview.Body.String())
-			}
-			if p.Slug != c.slug || p.Kind != "instructor" || p.Title != "Jared Falk" {
-				t.Errorf("preview = %+v, want slug %q, kind instructor, title Jared Falk", p, c.slug)
-			}
-			var f FollowDTO
-			if add.Code != http.StatusCreated || json.Unmarshal(add.Body.Bytes(), &f) != nil {
-				t.Fatalf("add = %d %s, want 201", add.Code, add.Body.String())
-			}
-			if f.Slug == nil || *f.Slug != p.Slug || f.Brand != c.wantBrand {
-				t.Errorf("add answered slug %v, brand %q; want the preview's %q, brand %q", f.Slug, f.Brand, p.Slug, c.wantBrand)
-			}
-			if len(follows) != 1 || follows[0].Slug.String != c.slug || follows[0].Brand != c.wantBrand {
-				t.Fatalf("stored follows = %+v, want one of %q in %q", follows, c.slug, c.wantBrand)
-			}
-			for _, q := range queries() {
-				if !strings.Contains(q, "slug.current=='"+c.slug+"'") {
-					t.Errorf("Musora was asked about another slug: %s", q)
-				}
-			}
-		})
+// inputCase is one case of TestInstructorInputIsNormalisedAlike: what is
+// typed, and the slug and brand it normalises to.
+type inputCase struct {
+	input, brand    string
+	slug, wantBrand string
+}
+
+// checkInputNormalised previews then adds c's input, and checks both answers,
+// the stored follow and every query Musora was sent.
+func checkInputNormalised(t *testing.T, c inputCase) {
+	t.Helper()
+	queries := recordSanity(t)
+	preview, add, follows := previewThenAdd(t, c.input, c.brand)
+
+	var p previewResponse
+	if preview.Code != http.StatusOK || json.Unmarshal(preview.Body.Bytes(), &p) != nil {
+		t.Fatalf("preview = %d %s, want 200", preview.Code, preview.Body.String())
+	}
+	if p.Slug != c.slug || p.Kind != "instructor" || p.Title != "Jared Falk" {
+		t.Errorf("preview = %+v, want slug %q, kind instructor, title Jared Falk", p, c.slug)
+	}
+	var f FollowDTO
+	if add.Code != http.StatusCreated || json.Unmarshal(add.Body.Bytes(), &f) != nil {
+		t.Fatalf("add = %d %s, want 201", add.Code, add.Body.String())
+	}
+	if f.Slug == nil || *f.Slug != p.Slug || f.Brand != c.wantBrand {
+		t.Errorf("add answered slug %v, brand %q; want the preview's %q, brand %q", f.Slug, f.Brand, p.Slug, c.wantBrand)
+	}
+	if len(follows) != 1 || follows[0].Slug.String != c.slug || follows[0].Brand != c.wantBrand {
+		t.Fatalf("stored follows = %+v, want one of %q in %q", follows, c.slug, c.wantBrand)
+	}
+	assertAskedOnlyAbout(t, queries(), c.slug)
+}
+
+// assertAskedOnlyAbout fails for every query sent to Musora that isn't about
+// slug.
+func assertAskedOnlyAbout(t *testing.T, queries []string, slug string) {
+	t.Helper()
+	for _, q := range queries {
+		if !strings.Contains(q, "slug.current=='"+slug+"'") {
+			t.Errorf("Musora was asked about another slug: %s", q)
+		}
 	}
 }
 

@@ -112,35 +112,40 @@ func (m libraryMove) setUp(t *testing.T, root string) (lib, recorded, files stri
 func TestDeleteLessonRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 	for _, m := range libraryMoves {
 		for _, recorded := range []bool{true, false} {
-			t.Run(m.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
-				log := captureLog(t)
-				store := newTestStore(t)
-				root := t.TempDir()
-				lib, recordedSeason, files := m.setUp(t, root)
-				f := addFollow(t, store, 4242)
-				seedSeasonLesson(t, store, f, 1, recordedSeason, files, recorded)
-				before := mustLesson(t, store, 1)
-				srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: filepath.Join(root, "dl"), LibraryDir: lib}, "test")
-
-				rec := serveDelete(t, srv, "/api/lessons/1")
-				if !m.leftBehind {
-					if rec.Code != http.StatusOK {
-						t.Fatalf("DELETE = %d %s, want 200", rec.Code, rec.Body.String())
-					}
-					assertOnDisk(t, false, files, leftBehindNames...)
-					if l := mustLesson(t, store, 1); l.Status != database.StatusSkipped || l.HasFiles() {
-						t.Errorf("lesson = %q, has files %v; want tombstoned", l.Status, l.HasFiles())
-					}
-					return
-				}
-				wantError(t, rec, http.StatusConflict, msgLessonLeftBehind)
-				assertOnDisk(t, true, files, leftBehindNames...)
-				assertUnchanged(t, store, before)
-				if !strings.Contains(log.String(), recordedSeason) {
-					t.Errorf("log %q does not name the folder the files stayed in", log.String())
-				}
-			})
+			t.Run(m.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) { checkLessonDeleteAfterMove(t, m, recorded) })
 		}
+	}
+}
+
+// checkLessonDeleteAfterMove runs one
+// TestDeleteLessonRefusesFilesLeftBehindByALibraryMove case.
+func checkLessonDeleteAfterMove(t *testing.T, m libraryMove, recorded bool) {
+	t.Helper()
+	log := captureLog(t)
+	store := newTestStore(t)
+	root := t.TempDir()
+	lib, recordedSeason, files := m.setUp(t, root)
+	f := addFollow(t, store, 4242)
+	seedSeasonLesson(t, store, f, 1, recordedSeason, files, recorded)
+	before := mustLesson(t, store, 1)
+	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: filepath.Join(root, "dl"), LibraryDir: lib}, "test")
+
+	rec := serveDelete(t, srv, "/api/lessons/1")
+	if !m.leftBehind {
+		if rec.Code != http.StatusOK {
+			t.Fatalf("DELETE = %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		assertOnDisk(t, false, files, leftBehindNames...)
+		if l := mustLesson(t, store, 1); l.Status != database.StatusSkipped || l.HasFiles() {
+			t.Errorf("lesson = %q, has files %v; want tombstoned", l.Status, l.HasFiles())
+		}
+		return
+	}
+	wantError(t, rec, http.StatusConflict, msgLessonLeftBehind)
+	assertOnDisk(t, true, files, leftBehindNames...)
+	assertUnchanged(t, store, before)
+	if !strings.Contains(log.String(), recordedSeason) {
+		t.Errorf("log %q does not name the folder the files stayed in", log.String())
 	}
 }
 
@@ -153,52 +158,57 @@ func TestDeleteLessonRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 // deleted. With nothing moved, the follow and the files go as before.
 func TestDeleteFollowRefusesFilesLeftBehindByALibraryMove(t *testing.T) {
 	for _, m := range []libraryMove{libraryMoves[0], libraryMoves[1]} {
-		t.Run(m.name, func(t *testing.T) {
-			captureLog(t)
-			store := newTestStore(t)
-			root := t.TempDir()
-			lib, recordedSeason, files := m.setUp(t, root)
-			downloads := filepath.Join(root, "dl")
-			f := addFollow(t, store, 4242)
-			// Lesson 3, left behind, sorts after lesson 2 (BeginFollowDelete
-			// and ListLessonsByFollow order by railcontent_id). Here the
-			// refusal comes up front, before BeginFollowDelete, so the
-			// removal loop never runs and this test can't tell a check made
-			// lesson by lesson inside it from one made before it:
-			// TestDeleteFollowChecksAgainBeforeTheFirstRemoval pins that.
-			seedSeasonLesson(t, store, f, 3, recordedSeason, files, true)
-			// Lesson 2 of the same follow, kept in downloads in its own folder:
-			// nothing about it is left behind.
-			own := filepath.Join(downloads, "F", "06 - Lesson B")
-			if err := store.UpsertLesson(t.Context(), 2, "Lesson B", sql.NullInt64{}, "drumeo", sql.NullInt64{Int64: 6, Valid: true}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
-				t.Fatal(err)
-			}
-			seedEntries(t, own, "06 - Lesson B.mp4")
-			finishWithNewJob(t, store, f, 2, database.DownloadRecord{Quality: "1080", OutputDir: own, VideoPath: filepath.Join(own, "06 - Lesson B.mp4"), Bytes: 5})
-			before1, before2 := mustLesson(t, store, 3), mustLesson(t, store, 2)
-			srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: lib}, "test")
-
-			rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true")
-			follows, err := store.ListFollows(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !m.leftBehind {
-				if rec.Code != http.StatusNoContent || len(follows) != 0 {
-					t.Fatalf("DELETE = %d %s, %d follows; want 204 and the follow gone", rec.Code, rec.Body.String(), len(follows))
-				}
-				assertOnDisk(t, false, files, leftBehindNames...)
-				assertOnDisk(t, false, own, "06 - Lesson B.mp4")
-				return
-			}
-			wantError(t, rec, http.StatusConflict, msgFollowLeftBehind)
-			if len(follows) != 1 {
-				t.Errorf("%d follows, want the follow kept", len(follows))
-			}
-			assertOnDisk(t, true, files, leftBehindNames...)
-			assertOnDisk(t, true, own, "06 - Lesson B.mp4")
-			assertUnchanged(t, store, before1)
-			assertUnchanged(t, store, before2)
-		})
+		t.Run(m.name, func(t *testing.T) { checkFollowDeleteAfterMove(t, m) })
 	}
+}
+
+// checkFollowDeleteAfterMove runs one
+// TestDeleteFollowRefusesFilesLeftBehindByALibraryMove case.
+func checkFollowDeleteAfterMove(t *testing.T, m libraryMove) {
+	t.Helper()
+	captureLog(t)
+	store := newTestStore(t)
+	root := t.TempDir()
+	lib, recordedSeason, files := m.setUp(t, root)
+	downloads := filepath.Join(root, "dl")
+	f := addFollow(t, store, 4242)
+	// Lesson 3, left behind, sorts after lesson 2 (BeginFollowDelete
+	// and ListLessonsByFollow order by railcontent_id). Here the
+	// refusal comes up front, before BeginFollowDelete, so the
+	// removal loop never runs and this test can't tell a check made
+	// lesson by lesson inside it from one made before it:
+	// TestDeleteFollowChecksAgainBeforeTheFirstRemoval pins that.
+	seedSeasonLesson(t, store, f, 3, recordedSeason, files, true)
+	// Lesson 2 of the same follow, kept in downloads in its own folder:
+	// nothing about it is left behind.
+	own := filepath.Join(downloads, "F", "06 - Lesson B")
+	if err := store.UpsertLesson(t.Context(), 2, "Lesson B", sql.NullInt64{}, "drumeo", sql.NullInt64{Int64: 6, Valid: true}, sql.NullInt64{Int64: f, Valid: true}); err != nil {
+		t.Fatal(err)
+	}
+	seedEntries(t, own, "06 - Lesson B.mp4")
+	finishWithNewJob(t, store, f, 2, database.DownloadRecord{Quality: "1080", OutputDir: own, VideoPath: filepath.Join(own, "06 - Lesson B.mp4"), Bytes: 5})
+	before1, before2 := mustLesson(t, store, 3), mustLesson(t, store, 2)
+	srv := NewServer(store, Deps{}, nil, Config{DownloadsDir: downloads, LibraryDir: lib}, "test")
+
+	rec := serveDelete(t, srv, "/api/follows/"+strconv.FormatInt(f, 10)+"?files=true")
+	follows, err := store.ListFollows(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.leftBehind {
+		if rec.Code != http.StatusNoContent || len(follows) != 0 {
+			t.Fatalf("DELETE = %d %s, %d follows; want 204 and the follow gone", rec.Code, rec.Body.String(), len(follows))
+		}
+		assertOnDisk(t, false, files, leftBehindNames...)
+		assertOnDisk(t, false, own, "06 - Lesson B.mp4")
+		return
+	}
+	wantError(t, rec, http.StatusConflict, msgFollowLeftBehind)
+	if len(follows) != 1 {
+		t.Errorf("%d follows, want the follow kept", len(follows))
+	}
+	assertOnDisk(t, true, files, leftBehindNames...)
+	assertOnDisk(t, true, own, "06 - Lesson B.mp4")
+	assertUnchanged(t, store, before1)
+	assertUnchanged(t, store, before2)
 }
