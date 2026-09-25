@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { http, HttpResponse } from "msw"
 import { ORIGIN, renderWithProviders, server } from "@/test/msw"
@@ -105,6 +105,21 @@ describe("a sync button blocked by a 503", () => {
       )
     },
   )
+
+  // The toast says it too, and stays: on touch or with a screen reader it is
+  // where the reason is read, since the tooltip needs a hover or focus.
+  it.each([
+    ["Run sync", "Couldn't start a sync", NO_DAEMON],
+    ["Dry-run", "Couldn't run the dry run", NO_PLANNER],
+  ])("%s toasts the outcome and the server's reason, until closed", async (name, outcome, reason) => {
+    blockSync()
+    render(<Toaster />)
+    await block(name)
+
+    const toast = (await screen.findByText(outcome)).closest<HTMLElement>("[data-sonner-toast]")
+    expect(toast).toHaveTextContent(reason)
+    expect(within(toast!).getByRole("button", { name: "Close toast" })).toBeInTheDocument()
+  })
 
   it("gives the reason on hover", async () => {
     blockSync()

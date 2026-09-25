@@ -69,10 +69,10 @@ export function Dashboard() {
       toast.success("Sync triggered")
       invalidate()
     },
-    onError: (err) => {
-      if (nothingAttached(err)) toast.error("No daemon attached")
-      else failureToast("Couldn't start a sync", errorMessage(err))
-    },
+    // Blocked or not, the outcome and the server's sentence, which stays until
+    // closed: on touch or with a screen reader the toast is where a blocked
+    // button's reason is read (its tooltip needs a hover or keyboard focus).
+    onError: (err) => failureToast("Couldn't start a sync", errorMessage(err)),
   })
 
   // Dry-run: asks the planner how many lessons a sync would queue.
@@ -81,10 +81,7 @@ export function Dashboard() {
     onSuccess: (result) => {
       toast.message(`A sync would queue ${countOf(result.data.would_enqueue ?? 0, "lesson", "lessons")}`)
     },
-    onError: (err) => {
-      if (nothingAttached(err)) toast.error("No planner attached")
-      else failureToast("Couldn't run the dry run", errorMessage(err))
-    },
+    onError: (err) => failureToast("Couldn't run the dry run", errorMessage(err)),
   })
 
   const runBlocked = nothingAttached(run.error)

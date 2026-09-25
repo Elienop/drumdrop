@@ -1401,11 +1401,13 @@ D53 waits on an owner decision.
     comment "The pressed node was replaced, so focus starts from the page." in
     `web/src/pages/Dashboard.test.tsx` (it encodes jsdom, which restarts from the top)
 
-- **D143 · A blocked sync button says why only in a tooltip, and stays blocked.**
+- **D143 · A blocked sync button says why only after a press, and stays blocked.**
   - *What:* when Run sync or Dry-run is blocked (the server has no daemon or planner
     attached):
-    - its reason is in a tooltip only. Escape hides it, touch never opens it, and a screen
-      reader hears it only while the tooltip is open (Radix sets `aria-describedby` only then);
+    - its reason shows in the press's toast, which stays until closed (since
+      `fix/sonar-gate-and-coverage`, on the owner's choice: *"Use the server's sentence"*),
+      and afterwards only in a tooltip. Escape hides that, touch never opens it, and a screen
+      reader hears it only while it is open (Radix sets `aria-describedby` only then);
     - the user learns about the block only by pressing the button;
     - the block lasts until the page remounts, even if the server restarts with a daemon.
 
