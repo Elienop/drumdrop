@@ -27,17 +27,15 @@ if (typeof Element !== "undefined") {
 // An open Radix popper (a Tooltip's arrow, a Checkbox inside a form) measures
 // itself with ResizeObserver, which jsdom does not have. jsdom lays nothing
 // out, so there is never a size change to report.
-if (globalThis.ResizeObserver === undefined) {
-  globalThis.ResizeObserver = class implements ResizeObserver {
-    observe(): void {
-      // Nothing to watch without layout.
-    }
-    unobserve(): void {
-      // Nothing is watched.
-    }
-    disconnect(): void {
-      // Nothing is watched.
-    }
+globalThis.ResizeObserver ??= class implements ResizeObserver {
+  observe(): void {
+    // Nothing to watch without layout.
+  }
+  unobserve(): void {
+    // Nothing is watched.
+  }
+  disconnect(): void {
+    // Nothing is watched.
   }
 }
 
