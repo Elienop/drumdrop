@@ -807,11 +807,13 @@ func TestDaemonCycleEndsWithTheShowFileStep(t *testing.T) {
 		if err := d.RunOnce(context.Background()); err != nil {
 			t.Fatalf("RunOnce: %v", err)
 		}
+		// Both closing steps read the lesson rows: the one-time rename of the
+		// episode files, then the show-file step, each after the drain.
 		ops := store.snapshotOps()
-		last := len(ops) - 1
-		stepRan := last >= 0 && ops[last] == "with-files" && slices.Contains(ops[:last], "drain-empty")
-		if stepRan == paused {
-			t.Errorf("paused=%v: ops %v, want the show-file step last %v", paused, ops, map[bool]string{false: "", true: "skipped"}[paused])
+		drained := slices.Index(ops, "drain-empty")
+		stepsRan := drained >= 0 && reflect.DeepEqual(ops[drained+1:], []string{"with-files", "with-files"})
+		if stepsRan == paused {
+			t.Errorf("paused=%v: ops %v, want the rename and show-file steps last %v", paused, ops, map[bool]string{false: "", true: "skipped"}[paused])
 		}
 	}
 }

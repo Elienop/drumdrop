@@ -345,7 +345,9 @@ func runSync(ctx context.Context, planner *scheduler.Planner, worker *scheduler.
 		fmt.Fprintf(w, "\nSync interrupted — queued %d, processed %d\n", planned, processed)
 		return errors.New("sync interrupted: a download in progress was stopped; it starts over the next time daemon or serve starts")
 	}
-	// As a daemon cycle does: the plex-tv shows' missing own files.
+	// As a daemon cycle does: the plex-tv episode files' one-time rename, and
+	// the shows' missing own files.
+	worker.RenameEpisodeFiles(ctx)
 	worker.EnsureShowFiles(ctx)
 	fmt.Fprintf(w, "\nSync complete — queued %d, downloaded %d\n", planned, processed)
 	return nil

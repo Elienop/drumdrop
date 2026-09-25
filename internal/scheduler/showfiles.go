@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -159,7 +161,7 @@ func createOnly(dir *os.Root, name string, data []byte) (created bool, err error
 	if _, err := dir.Lstat(name); err == nil {
 		return false, nil
 	}
-	tmp := "." + name + musora.TempSuffix
+	tmp := createTempName(name)
 	if err := dir.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("write %q: a leftover is in the way: %w", path, err)
 	}
@@ -187,6 +189,18 @@ func createOnly(dir *os.Root, name string, data []byte) (created bool, err error
 	}
 	_ = dir.Remove(tmp)
 	return false, wrapWrite(path, err)
+}
+
+// createTempName is the hidden name createOnly writes name's data under
+// first: ".<name>.drumdrop-part", or, when that would not fit in
+// maxNameBytes (an episode's file under a long title), a short one keyed on
+// name, so a run that died there leaves a name the next one removes.
+func createTempName(name string) string {
+	if tmp := "." + name + musora.TempSuffix; len(tmp) <= maxNameBytes {
+		return tmp
+	}
+	sum := sha256.Sum256([]byte(name))
+	return ".drumdrop-" + hex.EncodeToString(sum[:8]) + musora.TempSuffix
 }
 
 // wrapWrite is err as a failed write of path, or nil.

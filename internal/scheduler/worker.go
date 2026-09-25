@@ -61,10 +61,13 @@ type Worker struct {
 	// showMu guards showDown, set when Musora could not be reached for a
 	// show's files this cycle (the show-file step then waits for the next),
 	// and showUnknown, the show folders none of whose lessons leads to a show
-	// of that name (not asked about again in this process).
+	// of that name (not asked about again in this process); and renamed, the
+	// lessons the one-time rename of episode files has nothing left to do for
+	// (episodefiles.go; not looked at again in this process).
 	showMu      sync.Mutex
 	showDown    bool
 	showUnknown map[string]bool
+	renamed     map[int]bool
 
 	// mu guards running. running maps an in-flight job id to the CancelFunc of
 	// the per-job context passed into the Downloader, so CancelRunning can kill an
