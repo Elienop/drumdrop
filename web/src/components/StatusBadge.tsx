@@ -35,7 +35,9 @@ const tone: Record<string, string> = {
 // Shown instead of a status while that work runs (LessonDTO.deleting).
 const label: Record<string, string> = { deleting: "deleting…" }
 
-export function StatusBadge({ status }: { status: LessonStatus | JobStatus | "deleting" }) {
+export function StatusBadge({
+  status,
+}: Readonly<{ status: LessonStatus | JobStatus | "deleting" }>) {
   return (
     <Badge variant="outline" className={cn("font-medium", tone[status])}>
       {label[status] ?? status}
