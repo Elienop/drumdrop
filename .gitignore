@@ -9,6 +9,9 @@ docs/superpowers/
 
 # Go
 /drumdrop
+# `go build` run inside cmd/drumdrop. Anchored: a bare `drumdrop` would also ignore
+# the cmd/drumdrop source folder.
+/cmd/drumdrop/drumdrop
 /dist/
 *.test
 

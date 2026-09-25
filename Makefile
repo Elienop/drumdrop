@@ -10,7 +10,9 @@ lint:     ; gofmt -l . | tee /dev/stderr | (! read) && go vet ./...
 run:      ; go run ./cmd/drumdrop
 hooks:    ; git config core.hooksPath scripts/hooks && echo "✓ git hooks enabled (scripts/hooks): commit-msg + pre-push"
 docker:          ; docker buildx build --platform linux/amd64 -t drumdrop:local .
-docker-run:      ; docker run --rm -p 3737:8080 -e DRUMDROP_API_TOKEN=devtoken -v drumdrop-config:/config -v $(PWD)/downloads:/downloads drumdrop:local
+# devtoken is public (it is in this file), so docker-run publishes on loopback only: nothing
+# else on the network can reach the API with it.
+docker-run:      ; docker run --rm -p 127.0.0.1:3737:8080 -e DRUMDROP_API_TOKEN=devtoken -v drumdrop-config:/config -v $(PWD)/downloads:/downloads drumdrop:local
 release-snapshot:; goreleaser release --snapshot --clean --skip=publish
 
 # The reports SonarQube reads (sonar-project.properties names each one; `sonar-scan` runs
