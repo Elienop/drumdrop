@@ -2187,7 +2187,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       security S6). G1 stays as a second line (code Info 5). Still open: D137, D138,
       D139.
     - Round 5k's corrected lines (from the round-5j reviews; `9a220bf`, `e9204c7`,
-      `b6b0382`, `d083db6`, `0ecc1a8` and the docs commit after them). The delete dialogs
+      `b6b0382`, `d083db6`, `0ecc1a8`, `01721cf`, `f50d64a` and the docs commit after
+      them). The delete dialogs
       offer switching back only "if the new one is still empty": "if you moved nothing"
       was true after a copy kept in both folders, and switching back then left the new
       copy recorded by nothing (security S1, UI 1 and 3). The note and the job sentence
