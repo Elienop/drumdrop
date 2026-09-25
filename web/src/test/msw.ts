@@ -35,8 +35,8 @@ export const server = setupServer(
 // opens — jsdom has none. It emits nothing by itself, so the live-downloads
 // view starts empty. The SSEProvider opens it only once a token is stored; a
 // test that stores one can then push a server event with sendEvent.
-// The most recently opened stream: sendEvent's target.
-let lastEventSource: MockEventSource | null = null
+// Every stream opened so far, newest last: sendEvent's target is the last.
+const openedStreams: MockEventSource[] = []
 
 class MockEventSource {
   url: string
@@ -46,7 +46,7 @@ class MockEventSource {
   closed = false
   constructor(url: string) {
     this.url = url
-    lastEventSource = this
+    openedStreams.push(this)
   }
   addEventListener() {}
   close() {
@@ -59,7 +59,7 @@ class MockEventSource {
 // stream is open, so a test that forgot to store a token fails loudly instead
 // of sending into nothing.
 export function sendEvent(event: Partial<ProgressEvent> & Pick<ProgressEvent, "kind">) {
-  const es = lastEventSource
+  const es = openedStreams.at(-1)
   if (!es || es.closed) throw new Error("sendEvent: no open event stream (store a token first)")
   const full: ProgressEvent = {
     railcontent_id: 0,
