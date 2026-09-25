@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createElement, type ReactElement } from "react"
+import { afterAll, afterEach, beforeAll } from "vitest"
 import { render } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter } from "react-router-dom"
@@ -31,6 +32,14 @@ export const server = setupServer(
   http.get(`${ORIGIN}/api/session`, () => HttpResponse.json({ connected: false })),
 )
 
+// setup.ts imports this module before every test file, so these run around
+// each one: a request no handler matches fails the test, and a test's
+// server.use(...) overrides end with it. (A test file's own import of this
+// module gets the same instance, so they are registered once.)
+beforeAll(() => server.listen({ onUnhandledRequest: "error" }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+
 // MockEventSource stands in for the browser EventSource that the SSEProvider
 // opens — jsdom has none. It emits nothing by itself, so the live-downloads
 // view starts empty. The SSEProvider opens it only once a token is stored; a
@@ -48,7 +57,10 @@ class MockEventSource {
     this.url = url
     openedStreams.push(this)
   }
-  addEventListener() {}
+  addEventListener() {
+    // A named event (the SSEProvider's "ready") is never sent: tests deliver
+    // frames through onmessage (sendEvent), so a listener is never called.
+  }
   close() {
     this.closed = true
   }
@@ -81,9 +93,7 @@ export function sendEvent(event: Partial<ProgressEvent> & Pick<ProgressEvent, "k
   es.onmessage?.({ data: JSON.stringify(full) } as MessageEvent)
 }
 
-if (typeof globalThis.EventSource === "undefined") {
-  globalThis.EventSource = MockEventSource as unknown as typeof EventSource
-}
+globalThis.EventSource ??= MockEventSource as unknown as typeof EventSource
 
 // renderWithProviders wraps the UI in the providers the pages rely on:
 // QueryClientProvider (fresh, retry-off so error states settle deterministically),

@@ -1,80 +1,8 @@
+// vitest's setup file: it runs before every test file. Only imports, in this
+// order: vitest leaves setup files out of coverage, so anything that runs
+// lives in a module imported here, where coverage sees it run.
 import "@testing-library/jest-dom/vitest"
-import { afterAll, afterEach, beforeAll } from "vitest"
-import { server } from "./msw"
-
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }))
-afterEach(() => server.resetHandlers())
-afterAll(() => server.close())
-
-// Radix Select (and other Radix popper components) call PointerEvent capture
-// and scrollIntoView APIs that jsdom does not implement; stub them so the
-// components can mount and open in tests.
-if (typeof Element !== "undefined") {
-  if (!Element.prototype.hasPointerCapture) {
-    Element.prototype.hasPointerCapture = () => false
-  }
-  if (!Element.prototype.setPointerCapture) {
-    Element.prototype.setPointerCapture = () => {}
-  }
-  if (!Element.prototype.releasePointerCapture) {
-    Element.prototype.releasePointerCapture = () => {}
-  }
-  if (!Element.prototype.scrollIntoView) {
-    Element.prototype.scrollIntoView = () => {}
-  }
-}
-
-// An open Radix popper (a Tooltip's arrow, a Checkbox inside a form) measures
-// itself with ResizeObserver, which jsdom does not have. jsdom lays nothing
-// out, so there is never a size change to report.
-globalThis.ResizeObserver ??= class implements ResizeObserver {
-  observe(): void {
-    // Nothing to watch without layout.
-  }
-  unobserve(): void {
-    // Nothing is watched.
-  }
-  disconnect(): void {
-    // Nothing is watched.
-  }
-}
-
-// Node 26 exposes an experimental global `localStorage` that is `undefined`
-// (no `--localstorage-file`), shadowing jsdom's implementation. Install a
-// minimal in-memory Storage so `localStorage`/`window.localStorage` work.
-if (typeof globalThis.localStorage === "undefined" || globalThis.localStorage === null) {
-  class MemoryStorage implements Storage {
-    private store = new Map<string, string>()
-    get length(): number {
-      return this.store.size
-    }
-    clear(): void {
-      this.store.clear()
-    }
-    getItem(key: string): string | null {
-      return this.store.has(key) ? this.store.get(key)! : null
-    }
-    key(index: number): string | null {
-      return Array.from(this.store.keys())[index] ?? null
-    }
-    removeItem(key: string): void {
-      this.store.delete(key)
-    }
-    setItem(key: string, value: string): void {
-      this.store.set(key, String(value))
-    }
-  }
-  const storage = new MemoryStorage()
-  Object.defineProperty(globalThis, "localStorage", {
-    value: storage,
-    configurable: true,
-    writable: true,
-  })
-  if (typeof window !== "undefined") {
-    Object.defineProperty(window, "localStorage", {
-      value: storage,
-      configurable: true,
-      writable: true,
-    })
-  }
-}
+// Browser APIs jsdom lacks, stubbed before any component module loads.
+import "./jsdom-shims"
+// The shared MSW server, started and stopped around each test file.
+import "./msw"
