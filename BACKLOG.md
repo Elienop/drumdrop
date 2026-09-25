@@ -542,7 +542,11 @@ D53 waits on an owner decision.
       true after a copy). Switched back anyway, a Delete removes the old copy and leaves
       the new one recorded by nothing (probe P2), and a lesson drumdrop placed in the new
       folder since the change is refused in turn (P5). README says to delete the old
-      copy, which finishes the move;
+      copy, which finishes the move. The condition names only the old and the new
+      folder, so it is exact for one change of the setting: after two (A→B→C), with
+      files moved, copied or placed in B and C still empty, the sentence is true, and
+      switching back to A leaves B's files recorded by nothing (code round 5k, Info 2;
+      reasoned, not probed). Whether README says so is the owner's call;
     - a hung stat on an old folder that *differs* from today's has no bound (security
       round 5i, S4; restated by code round 5j Low 2 and security S3). Since round 5j the
       first stat runs in `refuseUpFront` (`internal/server/lessons.go:227`,
@@ -1768,8 +1772,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   plex-tv record, a regular file or a folder, or else its folder; anything that can't be
   read counts as missing). The owner picked *"Check the disk at the end"* accepting the
   cost as this entry then put it: every sync retries until the drive is back. **That was
-  wrong** (round-5d security review, F1; corrected in round 5e, and the owner has not
-  seen the correction yet). What happens while the library drive is not mounted:
+  wrong** (round-5d security review, F1; corrected in round 5e; the owner was told
+  in the round-5e report and kept (o), vault decisions #72 (o)). What happens while the library drive is not mounted:
   - a failed re-download marks the lesson failed, and the next sync downloads it again;
   - the placement creates a missing library folder (`os.MkdirAll` in
     `openLibraryParent`), or writes into the empty folder the drive is mounted on, so the
@@ -2209,7 +2213,10 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       Windows code (code Info 6), the identity a remembered root needs (security S2),
       the placement-time option and the backstop's sentence (UI 7); D58 and D128's line
       numbers are re-derived (code Low 3); D138 and D139 say where they stand (UI 5, 6);
-      D140 and D141 are new (UI 8, 9).
+      D140 and D141 are new (UI 8, 9). After the round-5k code seat: an unsettled
+      legacy episode name counts a file under every candidate name, pinned where
+      `LeftBehind` and `Claimants` read it (`anyBaseClaims`; mutants trying only the
+      first or only the last name had survived since before round 5k; code 5k Low 1).
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -2225,7 +2232,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · round 5i: `go test -count=1 -run 'LeftBehind|TheMoveLooksForElsewhere|KeptInLibraryDecidesByWhatTheRowRecords|KeepsALegacyEpisodeItCanNotName|RefusedPlacementOfASeasonFolderRow|DoesNotTakeAFileForTheLessonsFolder|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     and `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'gone in the same commit|takes itself out of scroll anchoring'`
     · round 5j: `go test -count=1 -run 'LeftBehind|OwnFiles|OwnFileAlone|CantRead|StopNothing|ChecksAgain|WhileARecordIsDamaged|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
-    · round 5k: `go test -count=1 -v -run 'ReadsAPathThroughAFileAsGone|CountsTheVideoOnlyInTheOldFolder|LeftBehind|MessagesFollowTheCopyRules' ./internal/library/ ./internal/server/ ./internal/scheduler/ | grep -c -- '--- PASS'`
+    · round 5k: `go test -count=1 -v -run 'ReadsAPathThroughAFileAsGone|CountsTheVideoOnlyInTheOldFolder|LeftBehind|MessagesFollowTheCopyRules|TriesEveryNameOfAnUnsettledLegacyEpisode' ./internal/library/ ./internal/server/ ./internal/scheduler/ | grep -c -- '--- PASS'`
     and `~/go/bin/gocognit ./internal/library/ | grep -E 'ownFilesIn|legacyOwnFileIn|legacyClaims'`
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
