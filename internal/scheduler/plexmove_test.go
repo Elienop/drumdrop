@@ -132,50 +132,75 @@ func TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		for i, mover := range fiveTitles {
 			t.Run(fmt.Sprintf("%s/legacy=%v", mover, legacy), func(t *testing.T) {
-				tmp := t.TempDir()
-				lib := filepath.Join(tmp, "lib")
-				season := filepath.Join(lib, "Show", "Season 01")
-				var others []database.Lesson
-				for j, title := range fiveTitles {
-					seedSeason(t, season, fiveLookAlikes[title]...)
-					if j == i {
-						continue
-					}
-					if legacy {
-						others = append(others, legacyRow(j+1, title, 5, season, "Show - s01e05 - "+title+".mp4"))
-					} else {
-						others = append(others, recordedRow(j+1, season, fiveLookAlikes[title]...))
-					}
-				}
-				self := recordedRow(i+1, season, fiveLookAlikes[mover]...)
-				if legacy {
-					self = legacyRow(i+1, mover, 5, season, "Show - s01e05 - "+mover+".mp4")
-				}
-				lessonDir := scratchLesson(t, tmp, 5, mover, []string{".mp4", ".nfo"})
-
-				res, err := testMovePlexTV(t, lib, plexEpisode{"Show", 1, 5, mover}, lessonDir, plexLibrary{self: self}, others...)
-				if err != nil || res.seasonDir != season {
-					t.Fatalf("move = (%+v, %v)", res, err)
-				}
-				for _, title := range fiveTitles {
-					if title != mover {
-						assertExist(t, true, paths(season, fiveLookAlikes[title]...)...)
-					}
-				}
-				for _, p := range paths(season, fiveLookAlikes[mover]...) {
-					if strings.HasSuffix(p, ".mp4") || strings.HasSuffix(p, ".nfo") {
-						if got, _ := os.ReadFile(p); !strings.HasPrefix(string(got), "new") {
-							t.Errorf("%s = %q, want the new download", p, got)
-						}
-						continue
-					}
-					assertExist(t, true, p) // at the episode base, not brought back: kept
-				}
-				if want := paths(season, fiveLookAlikes[mover]...); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
-					t.Errorf("owned %v, want %v", owned(res), want)
-				}
+				checkMoveAtOneEpisodeNumberLeavesTheOthersAlone(t, i, mover, legacy)
 			})
 		}
+	}
+}
+
+// checkMoveAtOneEpisodeNumberLeavesTheOthersAlone is
+// TestPlexTVMoveAtOneEpisodeNumberLeavesTheOthersAlone for the re-download of
+// fiveTitles[i] (mover), every lesson's entries recorded, or all legacy.
+func checkMoveAtOneEpisodeNumberLeavesTheOthersAlone(t *testing.T, i int, mover string, legacy bool) {
+	t.Helper()
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "lib")
+	season := filepath.Join(lib, "Show", "Season 01")
+	others := seedFiveLookAlikes(t, season, i, legacy)
+	self := recordedRow(i+1, season, fiveLookAlikes[mover]...)
+	if legacy {
+		self = legacyRow(i+1, mover, 5, season, "Show - s01e05 - "+mover+".mp4")
+	}
+	lessonDir := scratchLesson(t, tmp, 5, mover, []string{".mp4", ".nfo"})
+
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Show", 1, 5, mover}, lessonDir, plexLibrary{self: self}, others...)
+	if err != nil || res.seasonDir != season {
+		t.Fatalf("move = (%+v, %v)", res, err)
+	}
+	for _, title := range fiveTitles {
+		if title != mover {
+			assertExist(t, true, paths(season, fiveLookAlikes[title]...)...)
+		}
+	}
+	assertMoverReplacedOnlyWhatItBroughtBack(t, season, mover)
+	if want := paths(season, fiveLookAlikes[mover]...); !reflect.DeepEqual(sorted(owned(res)), sorted(want)) {
+		t.Errorf("owned %v, want %v", owned(res), want)
+	}
+}
+
+// seedFiveLookAlikes writes every fiveLookAlikes lesson's entries into
+// season and returns the rows of all but fiveTitles[mover]: each recording
+// its entries, or each a legacy row (legacy).
+func seedFiveLookAlikes(t *testing.T, season string, mover int, legacy bool) []database.Lesson {
+	t.Helper()
+	var others []database.Lesson
+	for j, title := range fiveTitles {
+		seedSeason(t, season, fiveLookAlikes[title]...)
+		if j == mover {
+			continue
+		}
+		if legacy {
+			others = append(others, legacyRow(j+1, title, 5, season, "Show - s01e05 - "+title+".mp4"))
+		} else {
+			others = append(others, recordedRow(j+1, season, fiveLookAlikes[title]...))
+		}
+	}
+	return others
+}
+
+// assertMoverReplacedOnlyWhatItBroughtBack fails unless the mover's video
+// and nfo in season are the new download's, and every other entry of it at
+// the episode base (not brought back) is still there.
+func assertMoverReplacedOnlyWhatItBroughtBack(t *testing.T, season, mover string) {
+	t.Helper()
+	for _, p := range paths(season, fiveLookAlikes[mover]...) {
+		if strings.HasSuffix(p, ".mp4") || strings.HasSuffix(p, ".nfo") {
+			if got, _ := os.ReadFile(p); !strings.HasPrefix(string(got), "new") {
+				t.Errorf("%s = %q, want the new download", p, got)
+			}
+			continue
+		}
+		assertExist(t, true, p) // at the episode base, not brought back: kept
 	}
 }
 
@@ -262,34 +287,42 @@ func TestPlexTVMoveRefusesAnEntryAnotherLessonOwns(t *testing.T) {
 	}
 	for name, otherOf := range cases {
 		t.Run(name, func(t *testing.T) {
-			tmp := t.TempDir()
-			lib := filepath.Join(tmp, "lib")
-			lessonDir, episodeBase, season := seedSongScratch(t, tmp)
-			theirs := []string{episodeBase + ".nfo", episodeBase + " [Original].mp4"}
-			mine := []string{"Songs - s01e05 - Mine Before.mp4"}
-			seedSeason(t, season, theirs...)
-			seedSeason(t, season, mine...)
-			before := readDirNames(t, season)
-
-			res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir,
-				plexLibrary{self: recordedRow(1, season, mine...)}, []database.Lesson{otherOf(season)}...)
-			if err == nil || !strings.Contains(err.Error(), "refusing to move") || !strings.Contains(err.Error(), "claimed by lesson [2]") {
-				t.Fatalf("err = %v, want a refusal naming lesson 2", err)
-			}
-			if res.seasonDir != "" || len(res.placed) != 0 || !reflect.DeepEqual(res.kept, paths(season, mine...)) {
-				t.Errorf("result %+v, want nothing placed and the previous entry still owned", res)
-			}
-			if got := readDirNames(t, season); !reflect.DeepEqual(got, before) {
-				t.Errorf("season folder changed by a refused move: %v, want %v", got, before)
-			}
-			for _, p := range paths(season, theirs...) {
-				if got, _ := os.ReadFile(p); string(got) != filepath.Base(p) {
-					t.Errorf("%s overwritten: %q", p, got)
-				}
-			}
-			assertScratchWhole(t, lessonDir)
+			checkMoveRefusesAnEntryAnotherLessonOwns(t, otherOf)
 		})
 	}
+}
+
+// checkMoveRefusesAnEntryAnotherLessonOwns is one case of
+// TestPlexTVMoveRefusesAnEntryAnotherLessonOwns: otherOf is lesson 2's row,
+// which claims one of the move's names in the season folder.
+func checkMoveRefusesAnEntryAnotherLessonOwns(t *testing.T, otherOf func(season string) database.Lesson) {
+	t.Helper()
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "lib")
+	lessonDir, episodeBase, season := seedSongScratch(t, tmp)
+	theirs := []string{episodeBase + ".nfo", episodeBase + " [Original].mp4"}
+	mine := []string{"Songs - s01e05 - Mine Before.mp4"}
+	seedSeason(t, season, theirs...)
+	seedSeason(t, season, mine...)
+	before := readDirNames(t, season)
+
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir,
+		plexLibrary{self: recordedRow(1, season, mine...)}, []database.Lesson{otherOf(season)}...)
+	if err == nil || !strings.Contains(err.Error(), "refusing to move") || !strings.Contains(err.Error(), "claimed by lesson [2]") {
+		t.Fatalf("err = %v, want a refusal naming lesson 2", err)
+	}
+	if res.seasonDir != "" || len(res.placed) != 0 || !reflect.DeepEqual(res.kept, paths(season, mine...)) {
+		t.Errorf("result %+v, want nothing placed and the previous entry still owned", res)
+	}
+	if got := readDirNames(t, season); !reflect.DeepEqual(got, before) {
+		t.Errorf("season folder changed by a refused move: %v, want %v", got, before)
+	}
+	for _, p := range paths(season, theirs...) {
+		if got, _ := os.ReadFile(p); string(got) != filepath.Base(p) {
+			t.Errorf("%s overwritten: %q", p, got)
+		}
+	}
+	assertScratchWhole(t, lessonDir)
 }
 
 // TestPlexTVMoveReplacesAnEntryNoLessonClaims proves an entry at one of the

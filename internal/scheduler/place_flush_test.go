@@ -58,34 +58,39 @@ func TestPlacementFlushesWhatItRenamed(t *testing.T) {
 				name = "layout=" + layout + "/merge"
 			}
 			t.Run(name, func(t *testing.T) {
-				tmp := t.TempDir()
-				dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-				scratch := filepath.Join(dl, "Course", "05 - Five")
-				writeTree(t, scratch, map[string]string{"05 - Five.mp4": "new mp4", "resources/a.pdf": "new a"})
-				dest, sub := filepath.Join(lib, "Course", "05 - Five"), "resources"
-				if layout == LayoutPlexTV {
-					dest, sub = filepath.Join(lib, "Show", "Season 01"), "Show - s01e05 - Five resources"
-				}
-				if merge {
-					writeTree(t, filepath.Join(dest, sub), map[string]string{"b.pdf": "old b"})
-				}
-
-				flushed, placedIn, err := placeRecordingFlushes(t, layout, dl, lib, scratch, "")
-				if err != nil || placedIn != dest {
-					t.Fatalf("placement = %q, %v; want %q", placedIn, err, dest)
-				}
-				want := []string{dest, scratch}
-				if merge {
-					want = append(want, filepath.Join(dest, sub), filepath.Join(scratch, "resources"))
-				} else if layout == "" {
-					want = append(want, filepath.Dir(dest)) // the lesson folder it made
-				}
-				for _, w := range want {
-					if !slices.Contains(flushed, w) {
-						t.Errorf("%q was never flushed (flushed: %q)", w, flushed)
-					}
-				}
+				checkPlacementFlushesWhatItRenamed(t, layout, merge)
 			})
+		}
+	}
+}
+
+// checkPlacementFlushesWhatItRenamed is TestPlacementFlushesWhatItRenamed in
+// layout, into a new lesson folder or merging into an earlier subfolder
+// (merge).
+func checkPlacementFlushesWhatItRenamed(t *testing.T, layout string, merge bool) {
+	t.Helper()
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	scratch := filepath.Join(dl, "Course", "05 - Five")
+	writeTree(t, scratch, map[string]string{"05 - Five.mp4": "new mp4", "resources/a.pdf": "new a"})
+	dest, sub := fiveDest(lib, layout)
+	if merge {
+		writeTree(t, filepath.Join(dest, sub), map[string]string{"b.pdf": "old b"})
+	}
+
+	flushed, placedIn, err := placeRecordingFlushes(t, layout, dl, lib, scratch, "")
+	if err != nil || placedIn != dest {
+		t.Fatalf("placement = %q, %v; want %q", placedIn, err, dest)
+	}
+	want := []string{dest, scratch}
+	if merge {
+		want = append(want, filepath.Join(dest, sub), filepath.Join(scratch, "resources"))
+	} else if layout == "" {
+		want = append(want, filepath.Dir(dest)) // the lesson folder it made
+	}
+	for _, w := range want {
+		if !slices.Contains(flushed, w) {
+			t.Errorf("%q was never flushed (flushed: %q)", w, flushed)
 		}
 	}
 }

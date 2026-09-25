@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,49 +188,50 @@ func forEachMergeSetup(t *testing.T, run func(t *testing.T, w *Worker, store *fa
 // my-notes.txt), replaces exactly the two files at the paths it placed, and
 // logs each of those with ↻, in every setup and layout, recorded or not.
 func TestWorkerReDownloadMergesTheSubfolders(t *testing.T) {
-	forEachMergeSetup(t, func(t *testing.T, w *Worker, store *fakeWorkerStore, recorded bool) {
-		var log bytes.Buffer
-		w.Log = &log
-		f := seedMerge(t, w, store, recorded)
+	forEachMergeSetup(t, checkReDownloadMergesTheSubfolders)
+}
 
-		if _, err := w.RunOnce(context.Background(), 0); err != nil {
-			t.Fatalf("RunOnce: %v", err)
-		}
-		if rec := onlyRecord(t, store); rec.outputDir != f.dir {
-			t.Errorf("recorded %q, want %q", rec.outputDir, f.dir)
-		}
-		assertTree(t, f.sub, map[string]string{
-			"a.pdf":        "new a",
-			"b.pdf":        "old b",
-			"my-notes.txt": "mine",
-			"deep/x.pdf":   "new x",
-			"deep/old.pdf": "old deep",
-		})
-		if got, _ := os.ReadFile(filepath.Join(f.dir, "notes.txt")); string(got) != "owner notes" {
-			t.Errorf("notes.txt = %q, want the owner's file kept", got)
-		}
-		if got, _ := os.ReadFile(f.top); string(got) != "new mp4" {
-			t.Errorf("%s = %q, want the new video", f.top, got)
-		}
-		whose := "which no lesson recorded"
-		if recorded {
-			whose = "the lesson's earlier download"
-		}
-		for _, p := range []string{f.top, filepath.Join(f.sub, "a.pdf"), filepath.Join(f.sub, "deep", "x.pdf")} {
-			if want := fmt.Sprintf("↻ 100 replaced %q (%s)", p, whose); !strings.Contains(log.String(), want) {
-				t.Errorf("log %q does not say %s", log.String(), want)
-			}
-		}
-		if strings.Contains(log.String(), fmt.Sprintf("replaced %q", f.sub)) {
-			t.Errorf("log %q says the whole subfolder was replaced", log.String())
-		}
-		for _, root := range []string{w.Cfg.DownloadsDir, w.Cfg.LibraryDir} {
-			if root != "" {
-				assertExist(t, false, filepath.Join(root, privateRootName, replacedFolderName(1)))
-			}
-		}
-		assertExist(t, false, w.privateDir(1))
+// checkReDownloadMergesTheSubfolders is TestWorkerReDownloadMergesTheSubfolders
+// in one of forEachMergeSetup's setups.
+func checkReDownloadMergesTheSubfolders(t *testing.T, w *Worker, store *fakeWorkerStore, recorded bool) {
+	t.Helper()
+	var log bytes.Buffer
+	w.Log = &log
+	f := seedMerge(t, w, store, recorded)
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if rec := onlyRecord(t, store); rec.outputDir != f.dir {
+		t.Errorf("recorded %q, want %q", rec.outputDir, f.dir)
+	}
+	assertTree(t, f.sub, map[string]string{
+		"a.pdf":        "new a",
+		"b.pdf":        "old b",
+		"my-notes.txt": "mine",
+		"deep/x.pdf":   "new x",
+		"deep/old.pdf": "old deep",
 	})
+	if got, _ := os.ReadFile(filepath.Join(f.dir, "notes.txt")); string(got) != "owner notes" {
+		t.Errorf("notes.txt = %q, want the owner's file kept", got)
+	}
+	if got, _ := os.ReadFile(f.top); string(got) != "new mp4" {
+		t.Errorf("%s = %q, want the new video", f.top, got)
+	}
+	whose := "which no lesson recorded"
+	if recorded {
+		whose = "the lesson's earlier download"
+	}
+	for _, p := range []string{f.top, filepath.Join(f.sub, "a.pdf"), filepath.Join(f.sub, "deep", "x.pdf")} {
+		if want := fmt.Sprintf("↻ 100 replaced %q (%s)", p, whose); !strings.Contains(log.String(), want) {
+			t.Errorf("log %q does not say %s", log.String(), want)
+		}
+	}
+	if strings.Contains(log.String(), fmt.Sprintf("replaced %q", f.sub)) {
+		t.Errorf("log %q says the whole subfolder was replaced", log.String())
+	}
+	assertNoReplacedArea(t, w)
+	assertExist(t, false, w.privateDir(1))
 }
 
 // TestWorkerStopDuringAMergePutsTheSubfolderBack (owner ruling 2026-09-24,
@@ -243,48 +246,77 @@ func TestWorkerStopDuringAMergePutsTheSubfolderBack(t *testing.T) {
 	for _, stop := range []string{"skip", "delete"} {
 		t.Run(stop, func(t *testing.T) {
 			forEachMergeSetup(t, func(t *testing.T, w *Worker, store *fakeWorkerStore, recorded bool) {
-				w.Cfg.MaxAttempts = 1
-				f := seedMerge(t, w, store, recorded)
-				store.skipped, store.gone = map[int64]bool{}, map[int64]bool{}
-				store.onConfirm = func() {
-					if stop == "skip" {
-						store.skipped[1] = true
-					} else {
-						store.gone[1] = true
-					}
-				}
-
-				if _, err := w.RunOnce(context.Background(), 0); err != nil {
-					t.Fatalf("RunOnce: %v", err)
-				}
-				if len(store.markDownloaded) != 0 {
-					t.Errorf("%s: recorded %+v, want nothing", stop, store.markDownloaded)
-				}
-				want := map[string]string{}
-				for rel, body := range earlierResources {
-					want[rel] = body
-				}
-				if stop == "delete" && recorded {
-					delete(want, "a.pdf")
-					delete(want, "deep/x.pdf")
-					assertExist(t, false, f.top)
-				} else if got, _ := os.ReadFile(f.top); string(got) != "old mp4" {
-					t.Errorf("%s: %s = %q, want the earlier video back", stop, f.top, got)
-				}
-				assertTree(t, f.sub, want)
-				for _, root := range []string{w.Cfg.DownloadsDir, w.Cfg.LibraryDir} {
-					if root == "" {
-						continue
-					}
-					for _, c := range []string{"new mp4", "new nfo", "new a", "new x"} {
-						if p := findContent(t, root, c); p != "" {
-							t.Errorf("%s: the download's %q is left at %q", stop, c, p)
-						}
-					}
-					assertExist(t, false, filepath.Join(root, privateRootName, replacedFolderName(1)))
-				}
+				checkStopDuringAMergePutsTheSubfolderBack(t, w, store, recorded, stop)
 			})
 		})
+	}
+}
+
+// checkStopDuringAMergePutsTheSubfolderBack is
+// TestWorkerStopDuringAMergePutsTheSubfolderBack for stop ("skip" or
+// "delete") in one of forEachMergeSetup's setups.
+func checkStopDuringAMergePutsTheSubfolderBack(t *testing.T, w *Worker, store *fakeWorkerStore, recorded bool, stop string) {
+	t.Helper()
+	w.Cfg.MaxAttempts = 1
+	f := seedMerge(t, w, store, recorded)
+	stopAtConfirm(store, stop)
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(store.markDownloaded) != 0 {
+		t.Errorf("%s: recorded %+v, want nothing", stop, store.markDownloaded)
+	}
+	want := maps.Clone(earlierResources)
+	if stop == "delete" && recorded {
+		delete(want, "a.pdf")
+		delete(want, "deep/x.pdf")
+		assertExist(t, false, f.top)
+	} else if got, _ := os.ReadFile(f.top); string(got) != "old mp4" {
+		t.Errorf("%s: %s = %q, want the earlier video back", stop, f.top, got)
+	}
+	assertTree(t, f.sub, want)
+	assertNoneLeft(t, w, stop, "new mp4", "new nfo", "new a", "new x")
+}
+
+// stopAtConfirm makes the job stop once its download is confirmed, while it
+// is being placed, as stop says: a Skip ("skip"), a delete that removes the
+// lesson's files ("delete") or keeps them ("keep"), a record that fails
+// ("unrecorded"), or one refused because another process requeued the job
+// ("requeued"): it runs again, and this placement must not stand.
+func stopAtConfirm(store *fakeWorkerStore, stop string) {
+	store.skipped, store.gone, store.kept = map[int64]bool{}, map[int64]bool{}, map[int64]bool{}
+	store.onConfirm = func() {
+		switch stop {
+		case "skip":
+			store.skipped[1] = true
+		case "keep":
+			store.kept[1] = true
+		case "delete":
+			store.gone[1] = true
+		case "unrecorded":
+			store.finishErr = errors.New("disk I/O error")
+		case "requeued":
+			store.finishErr = fmt.Errorf("job 1 is queued: %w", database.ErrDownloadCanceled)
+		}
+	}
+}
+
+// assertNoneLeft fails if a file holding one of contents (what the download
+// wrote) is left under the downloads folder or the library, or a
+// replaced-<id> folder is; what prefixes each failure.
+func assertNoneLeft(t *testing.T, w *Worker, what string, contents ...string) {
+	t.Helper()
+	for _, root := range []string{w.Cfg.DownloadsDir, w.Cfg.LibraryDir} {
+		if root == "" {
+			continue
+		}
+		for _, c := range contents {
+			if p := findContent(t, root, c); p != "" {
+				t.Errorf("%s: the download's %q is left at %q", what, c, p)
+			}
+		}
+		assertExist(t, false, filepath.Join(root, privateRootName, replacedFolderName(1)))
 	}
 }
 
@@ -297,42 +329,39 @@ func TestWorkerStopDuringAMergePutsTheSubfolderBack(t *testing.T) {
 func TestPlacementThatFailsAfterAMergeTakesItBack(t *testing.T) {
 	for _, layout := range []string{"", LayoutPlexTV} {
 		t.Run("layout="+layout, func(t *testing.T) {
-			tmp := t.TempDir()
-			dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-			scratch := filepath.Join(dl, "Course", "05 - Five")
-			download := map[string]string{"05 - Five.mp4": "new mp4", "05 - Five.nfo": "new nfo", "resources/a.pdf": "new a", "resources/deep/x.pdf": "new x"}
-			writeTree(t, scratch, download)
-			var sub string
-			if layout == LayoutPlexTV {
-				sub = filepath.Join(lib, "Show", "Season 01", "Show - s01e05 - Five resources")
-			} else {
-				sub = filepath.Join(lib, "Course", "05 - Five", "resources")
-			}
-			writeTree(t, sub, earlierResources)
-			stubRename(t, func(oldpath, newpath string) error {
-				if filepath.Ext(newpath) == ".nfo" {
-					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
-				}
-				return renameNoReplace(oldpath, newpath)
-			})
-
-			var err error
-			if layout == LayoutPlexTV {
-				var res plexMoveResult
-				res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
-					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
-				if res.seasonDir != "" {
-					t.Errorf("move placed the lesson in %q, want a failure", res.seasonDir)
-				}
-			} else {
-				_, err = testPlace(t, dl, lib, scratch, database.Lesson{})
-			}
-			if err == nil {
-				t.Fatal("the placement succeeded, want the refused rename's failure")
-			}
-			assertTree(t, sub, earlierResources)
-			assertTree(t, scratch, download)
-			assertExist(t, false, filepath.Join(lib, privateRootName, replacedFolderName(7)), filepath.Join(lib, privateRootName, replacedFolderName(0)))
+			checkPlacementThatFailsAfterAMergeTakesItBack(t, layout)
 		})
 	}
+}
+
+// checkPlacementThatFailsAfterAMergeTakesItBack is
+// TestPlacementThatFailsAfterAMergeTakesItBack in layout.
+func checkPlacementThatFailsAfterAMergeTakesItBack(t *testing.T, layout string) {
+	t.Helper()
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	scratch := filepath.Join(dl, "Course", "05 - Five")
+	download := map[string]string{"05 - Five.mp4": "new mp4", "05 - Five.nfo": "new nfo", "resources/a.pdf": "new a", "resources/deep/x.pdf": "new x"}
+	writeTree(t, scratch, download)
+	dest, subName := fiveDest(lib, layout)
+	sub := filepath.Join(dest, subName)
+	writeTree(t, sub, earlierResources)
+	stubRename(t, func(oldpath, newpath string) error {
+		if filepath.Ext(newpath) == ".nfo" {
+			return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: fs.ErrPermission}
+		}
+		return renameNoReplace(oldpath, newpath)
+	})
+
+	moved, err := placeFiveIn(t, layout, dl, lib, scratch,
+		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}}, database.Lesson{})
+	if moved != "" {
+		t.Errorf("move placed the lesson in %q, want a failure", moved)
+	}
+	if err == nil {
+		t.Fatal("the placement succeeded, want the refused rename's failure")
+	}
+	assertTree(t, sub, earlierResources)
+	assertTree(t, scratch, download)
+	assertExist(t, false, filepath.Join(lib, privateRootName, replacedFolderName(7)), filepath.Join(lib, privateRootName, replacedFolderName(0)))
 }

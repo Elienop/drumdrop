@@ -185,6 +185,32 @@ func testMovePlexTVFrom(t *testing.T, downloads, libraryDir string, ep plexEpiso
 	return res, err
 }
 
+// showFive is the plex-tv episode the placement fixtures below file a lesson
+// "05 - Five" as.
+var showFive = plexEpisode{"Show", 1, 5, "Five"}
+
+// placeFiveIn places the downloaded lesson scratch (read through dl) into lib
+// in layout, as the worker does: the plex-tv move of showFive with pl, or the
+// default layout's placement as self (testPlace). It returns the folder the
+// lesson was placed in, "" when it was not.
+func placeFiveIn(t *testing.T, layout, dl, lib, scratch string, pl plexLibrary, self database.Lesson) (string, error) {
+	t.Helper()
+	if layout == LayoutPlexTV {
+		res, err := testMovePlexTVFrom(t, dl, lib, showFive, scratch, pl)
+		return res.seasonDir, err
+	}
+	return testPlace(t, dl, lib, scratch, self)
+}
+
+// fiveDest is where the lesson "05 - Five" of Course is placed in lib in
+// layout, and the name its resources folder is placed under there.
+func fiveDest(lib, layout string) (dest, sub string) {
+	if layout == LayoutPlexTV {
+		return filepath.Join(lib, "Show", "Season 01"), "Show - s01e05 - Five resources"
+	}
+	return filepath.Join(lib, "Course", "05 - Five"), "resources"
+}
+
 // testPlace runs the default-layout placement as the worker does, as lesson
 // 1 (or self when given), into root at lessonDir's path relative to
 // downloads, with the claims of others (none when empty). A placement is

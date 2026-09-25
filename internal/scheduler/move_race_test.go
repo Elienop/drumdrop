@@ -155,35 +155,35 @@ func TestMovesKeepAnEntryPlantedAtTheDestination(t *testing.T) {
 		}
 		for _, layout := range []string{"", LayoutPlexTV} {
 			t.Run(fmt.Sprintf("copy=%v/layout=%s", viaCopy, layout), func(t *testing.T) {
-				tmp := t.TempDir()
-				dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-				scratch := filepath.Join(dl, "Course", "05 - Five")
-				seedSeason(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
-				planted := plantBeforeFirstRename(t, viaCopy)
-				var moved string
-				var err error
-				if layout == LayoutPlexTV {
-					var res plexMoveResult
-					res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
-						plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
-					moved = res.seasonDir
-				} else {
-					moved, err = testPlace(t, dl, lib, scratch, database.Lesson{})
-				}
-				if *planted == "" {
-					t.Fatal("the move never renamed")
-				}
-				if err == nil || moved != "" {
-					t.Errorf("move = %q, %v; want a refusal with the lesson left in downloads", moved, err)
-				}
-				assertContent(t, *planted, "racer.txt")
-				if got := readDirNames(t, *planted); len(got) != 1 {
-					t.Errorf("the planted entry holds %v, want only racer.txt", got)
-				}
-				assertContent(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+				checkMoveKeepsAnEntryPlantedAtTheDestination(t, viaCopy, layout)
 			})
 		}
 	}
+}
+
+// checkMoveKeepsAnEntryPlantedAtTheDestination is
+// TestMovesKeepAnEntryPlantedAtTheDestination for a move in layout, by
+// rename or by copy (viaCopy).
+func checkMoveKeepsAnEntryPlantedAtTheDestination(t *testing.T, viaCopy bool, layout string) {
+	t.Helper()
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	scratch := filepath.Join(dl, "Course", "05 - Five")
+	seedSeason(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
+	planted := plantBeforeFirstRename(t, viaCopy)
+	moved, err := placeFiveIn(t, layout, dl, lib, scratch,
+		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}}, database.Lesson{})
+	if *planted == "" {
+		t.Fatal("the move never renamed")
+	}
+	if err == nil || moved != "" {
+		t.Errorf("move = %q, %v; want a refusal with the lesson left in downloads", moved, err)
+	}
+	assertContent(t, *planted, "racer.txt")
+	if got := readDirNames(t, *planted); len(got) != 1 {
+		t.Errorf("the planted entry holds %v, want only racer.txt", got)
+	}
+	assertContent(t, scratch, "05 - Five.mp4", "05 - Five.nfo")
 }
 
 // TestCopyNeverWritesThroughAPlantedSymlink (security L4, M07) proves the

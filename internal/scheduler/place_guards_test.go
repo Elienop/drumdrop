@@ -60,52 +60,70 @@ func TestPlacementReleasesItsFolders(t *testing.T) {
 	for _, layout := range []string{"", LayoutPlexTV} {
 		for _, commit := range []bool{true, false} {
 			t.Run(map[bool]string{true: "commit", false: "undo"}[commit]+"/layout="+layout, func(t *testing.T) {
-				tmp := t.TempDir()
-				dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
-				scratch := filepath.Join(dl, "Course", "05 - Five")
-				writeTree(t, scratch, map[string]string{"05 - Five.mp4": "new mp4", "resources/a.pdf": "new a", "resources/deep/x.pdf": "new x"})
-				dest, sub := filepath.Join(lib, "Course", "05 - Five"), "resources"
-				if layout == LayoutPlexTV {
-					dest, sub = filepath.Join(lib, "Show", "Season 01"), "Show - s01e05 - Five resources"
-				}
-				// Earlier files at the placed names, so both a set-aside and a
-				// merge at two depths happen.
-				writeTree(t, filepath.Join(dest, sub), map[string]string{"a.pdf": "old a", "deep/x.pdf": "old x", "b.pdf": "old b"})
-
-				src, err := openScratch(dl, scratch)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer src.close()
-				before := openFDs(t)
-				var pl *placement
-				if layout == LayoutPlexTV {
-					var res plexMoveResult
-					res, err = moveToLibraryPlexTV(lib, "Show", 1, 5, "Five", src, plexLibrary{self: database.Lesson{RailcontentID: 1}, claims: noClaims(t, lib), roots: []string{lib, dl}})
-					pl = res.pending
-				} else {
-					pl, err = placeLessonFolder(lib, filepath.Join("Course", "05 - Five"), src, database.Lesson{RailcontentID: 1}, noClaims(t, lib), []string{lib, dl}, 7)
-				}
-				if err != nil || pl == nil {
-					t.Fatalf("placement = %v, %v", pl, err)
-				}
-				if len(pl.merged) == 0 {
-					t.Fatal("nothing was merged: the fixture does not exercise the held levels")
-				}
-				if held := openFDs(t); held <= before {
-					t.Fatalf("descriptors %d while placed, %d before: the count sees nothing held", held, before)
-				}
-				if commit {
-					if _, err := pl.commit(); err != nil {
-						t.Fatalf("commit: %v", err)
-					}
-				} else if _, err := pl.undo(false); err != nil {
-					t.Fatalf("undo: %v", err)
-				}
-				if after := openFDs(t); after != before {
-					t.Errorf("descriptors %d after, %d before: %d still held", after, before, after-before)
-				}
+				checkPlacementReleasesItsFolders(t, layout, commit)
 			})
 		}
+	}
+}
+
+// checkPlacementReleasesItsFolders is TestPlacementReleasesItsFolders in
+// layout, for a placement committed (commit) or undone.
+func checkPlacementReleasesItsFolders(t *testing.T, layout string, commit bool) {
+	t.Helper()
+	tmp := t.TempDir()
+	dl, lib := filepath.Join(tmp, "dl"), filepath.Join(tmp, "lib")
+	scratch := filepath.Join(dl, "Course", "05 - Five")
+	writeTree(t, scratch, map[string]string{"05 - Five.mp4": "new mp4", "resources/a.pdf": "new a", "resources/deep/x.pdf": "new x"})
+	dest, sub := fiveDest(lib, layout)
+	// Earlier files at the placed names, so both a set-aside and a
+	// merge at two depths happen.
+	writeTree(t, filepath.Join(dest, sub), map[string]string{"a.pdf": "old a", "deep/x.pdf": "old x", "b.pdf": "old b"})
+
+	src, err := openScratch(dl, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.close()
+	before := openFDs(t)
+	pl, err := pendingFiveFrom(t, layout, dl, lib, src)
+	if err != nil || pl == nil {
+		t.Fatalf("placement = %v, %v", pl, err)
+	}
+	if len(pl.merged) == 0 {
+		t.Fatal("nothing was merged: the fixture does not exercise the held levels")
+	}
+	if held := openFDs(t); held <= before {
+		t.Fatalf("descriptors %d while placed, %d before: the count sees nothing held", held, before)
+	}
+	commitOrUndo(t, pl, commit)
+	if after := openFDs(t); after != before {
+		t.Errorf("descriptors %d after, %d before: %d still held", after, before, after-before)
+	}
+}
+
+// pendingFiveFrom places the downloaded lesson src (read through dl) into lib
+// in layout, as lesson 1 with no other lesson's claims, and returns the
+// placement uncommitted.
+func pendingFiveFrom(t *testing.T, layout, dl, lib string, src *scratchDir) (*placement, error) {
+	t.Helper()
+	if layout == LayoutPlexTV {
+		res, err := moveToLibraryPlexTV(lib, "Show", 1, 5, "Five", src, plexLibrary{self: database.Lesson{RailcontentID: 1}, claims: noClaims(t, lib), roots: []string{lib, dl}})
+		return res.pending, err
+	}
+	return placeLessonFolder(lib, filepath.Join("Course", "05 - Five"), src, database.Lesson{RailcontentID: 1}, noClaims(t, lib), []string{lib, dl}, 7)
+}
+
+// commitOrUndo commits the placement pl (commit), or undoes it, and fails the
+// test if that fails.
+func commitOrUndo(t *testing.T, pl *placement, commit bool) {
+	t.Helper()
+	if commit {
+		if _, err := pl.commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return
+	}
+	if _, err := pl.undo(false); err != nil {
+		t.Fatalf("undo: %v", err)
 	}
 }
