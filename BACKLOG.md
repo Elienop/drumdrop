@@ -1487,6 +1487,19 @@ D53 waits on an owner decision.
   - *Evidence:* `grep -n 'failed to fetch' internal/musora/download.go`; found by the security
     seat of `fix/sonar-gate-and-coverage` (it predates the branch)
 
+- **D152 · Commands without flags ignore `-h`, and `logout --help` logs out.**
+  - *What:* `login`, `whoami`, `logout` and `follows` never parse their arguments, and
+    `unfollow` reads only its first. So `drumdrop logout --help` removes the saved session
+    and credentials, `drumdrop login -h` asks for an email, and `drumdrop whoami -h` fails
+    when logged out. Commands with flags answer `-h` with their usage and exit 0 (fixed on
+    `fix/sonar-gate-and-coverage`).
+  - *Fix:* Go's flag package already does this: an empty `flag.NewFlagSet("drumdrop logout",
+    flag.ContinueOnError)` parsed before each such command prints its usage for `-h` and
+    rejects an unknown flag. That last part changes behaviour (today any extra argument is
+    ignored), so it waits for the owner.
+  - *Evidence:* `cmdLogin`, `cmdWhoami`, `cmdLogout`, `cmdFollows`, `cmdUnfollow` in
+    `cmd/drumdrop/`; found by the fix round of that branch
+
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
     (`node:20-alpine`) still build on Node 20. `web/package.json` has no `engines` field.
@@ -2084,7 +2097,11 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     the browser: a focused button, input or checkbox and a checked checkbox draw the ring
     colour; StatusBadge's border takes its tone (emerald at 30% for done); the Lessons filter
     badge's border is transparent. Tab strips lose the grey frame every inactive tab had, so
-    only the active tab is framed (Lessons, Queue, Add follow). `aria-invalid:border-destructive`
+    only the active tab is framed (Lessons, Queue, Add follow). A focused tab then kept a grey
+    border inside its amber outline: Radix Tabs activate on focus, and the active tab's
+    `dark:data-[state=active]:border-input` beat the focus border. `tabs.tsx` now takes
+    `dark:focus-visible:border-ring` as important, because Tailwind emits the plain class
+    before the active one (the plain class is what fixed the outline button). `aria-invalid:border-destructive`
     now paints on inputs, selects and checkboxes; an outline button in the dark theme still
     loses it to `dark:border-input` (same specificity, later in the CSS), the collision the
     focus border had. No page sets `aria-invalid`, so nothing shows it today.
