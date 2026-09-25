@@ -227,62 +227,89 @@ func guardedWrites(ctx context.Context) map[string]func(s *Store, jobID int64, i
 // delete can never bring the row back; and that it carries what the delete
 // wanted: ErrLessonDeleted only when the delete removes the lesson's files.
 func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
+	for name, write := range guardedWrites(context.Background()) {
+		t.Run(name+"/lesson delete", func(t *testing.T) { checkAbandonedAfterLessonDelete(t, name, write) })
+		t.Run(name+"/follow removed with its files", func(t *testing.T) { checkAbandonedAfterFollowDelete(t, name, write) })
+		t.Run(name+"/follow removed keeping its files", func(t *testing.T) { checkAbandonedAfterKeepFilesRemoval(t, name, write) })
+		t.Run(name+"/row deleted, intent unknown", func(t *testing.T) { checkAbandonedWithoutALessonRow(t, name, write) })
+	}
+}
+
+// guardedWrite is one of guardedWrites' writes: about job jobID, for lesson
+// id.
+type guardedWrite = func(s *Store, jobID int64, id int) error
+
+// checkAbandonedAfterLessonDelete: once a lesson delete removed the job and
+// tombstoned the lesson, write is abandoned as a delete and leaves the
+// tombstone as it was.
+func checkAbandonedAfterLessonDelete(t *testing.T, name string, write guardedWrite) {
+	t.Helper()
 	ctx := context.Background()
-	for name, write := range guardedWrites(ctx) {
-		t.Run(name+"/lesson delete", func(t *testing.T) {
-			s := newTestStore(t)
-			jobID := claimed(t, s, 5, sql.NullInt64{})
-			if _, _, err := s.BeginLessonDelete(ctx, 5); err != nil {
-				t.Fatalf("BeginLessonDelete: %v", err)
-			}
-			if err := s.TombstoneLesson(ctx, mustLesson(t, s, 5)); err != nil {
-				t.Fatalf("TombstoneLesson: %v", err)
-			}
-			err := write(s, jobID, 5)
-			if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
-			}
-			l := mustLesson(t, s, 5)
-			if l.Status != StatusSkipped || l.Error.String != "deleted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
-				t.Errorf("tombstone overwritten by %s: %+v", name, l)
-			}
-		})
-		t.Run(name+"/follow removed with its files", func(t *testing.T) {
-			s := newTestStore(t)
-			f := seedFollow(t, s, 50)
-			fid := sql.NullInt64{Int64: f, Valid: true}
-			jobID := claimed(t, s, 5, fid)
-			if _, _, err := s.BeginFollowDelete(ctx, f); err != nil {
-				t.Fatalf("BeginFollowDelete: %v", err)
-			}
-			if _, err := s.RemoveFilelessFollowCascade(ctx, f); err != nil {
-				t.Fatalf("RemoveFilelessFollowCascade: %v", err)
-			}
-			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
-			}
-		})
-		t.Run(name+"/follow removed keeping its files", func(t *testing.T) {
-			s := newTestStore(t)
-			f := seedFollow(t, s, 50)
-			jobID := claimed(t, s, 5, sql.NullInt64{Int64: f, Valid: true})
-			if _, err := s.RemoveFollowCascade(ctx, f); err != nil {
-				t.Fatalf("RemoveFollowCascade: %v", err)
-			}
-			if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s after a keep-files removal = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
-			}
-		})
-		t.Run(name+"/row deleted, intent unknown", func(t *testing.T) {
-			s := newTestStore(t)
-			jobID := claimed(t, s, 6, sql.NullInt64{})
-			if _, err := s.rawDB().Exec(`DELETE FROM lessons WHERE railcontent_id = 6`); err != nil {
-				t.Fatalf("delete row: %v", err)
-			}
-			if err := write(s, jobID, 6); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
-				t.Fatalf("%s with no lesson row = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
-			}
-		})
+	s := newTestStore(t)
+	jobID := claimed(t, s, 5, sql.NullInt64{})
+	if _, _, err := s.BeginLessonDelete(ctx, 5); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
+	}
+	if err := s.TombstoneLesson(ctx, mustLesson(t, s, 5)); err != nil {
+		t.Fatalf("TombstoneLesson: %v", err)
+	}
+	err := write(s, jobID, 5)
+	if !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("%s after the delete = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
+	}
+	l := mustLesson(t, s, 5)
+	if l.Status != StatusSkipped || l.Error.String != "deleted" || l.OutputDir.Valid || l.LibraryEntries.Valid {
+		t.Errorf("tombstone overwritten by %s: %+v", name, l)
+	}
+}
+
+// checkAbandonedAfterFollowDelete: once a follow was removed with its files,
+// write is abandoned as a delete.
+func checkAbandonedAfterFollowDelete(t *testing.T, name string, write guardedWrite) {
+	t.Helper()
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := seedFollow(t, s, 50)
+	fid := sql.NullInt64{Int64: f, Valid: true}
+	jobID := claimed(t, s, 5, fid)
+	if _, _, err := s.BeginFollowDelete(ctx, f); err != nil {
+		t.Fatalf("BeginFollowDelete: %v", err)
+	}
+	if _, err := s.RemoveFilelessFollowCascade(ctx, f); err != nil {
+		t.Fatalf("RemoveFilelessFollowCascade: %v", err)
+	}
+	if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || !errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("%s after the follow and its files went = %v, want ErrDownloadAbandoned with ErrLessonDeleted", name, err)
+	}
+}
+
+// checkAbandonedAfterKeepFilesRemoval: once a follow was removed keeping its
+// files, write is abandoned, but not as a delete.
+func checkAbandonedAfterKeepFilesRemoval(t *testing.T, name string, write guardedWrite) {
+	t.Helper()
+	ctx := context.Background()
+	s := newTestStore(t)
+	f := seedFollow(t, s, 50)
+	jobID := claimed(t, s, 5, sql.NullInt64{Int64: f, Valid: true})
+	if _, err := s.RemoveFollowCascade(ctx, f); err != nil {
+		t.Fatalf("RemoveFollowCascade: %v", err)
+	}
+	if err := write(s, jobID, 5); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("%s after a keep-files removal = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
+	}
+}
+
+// checkAbandonedWithoutALessonRow: with the lesson row gone and no intent
+// recorded, write is abandoned, but not as a delete.
+func checkAbandonedWithoutALessonRow(t *testing.T, name string, write guardedWrite) {
+	t.Helper()
+	s := newTestStore(t)
+	jobID := claimed(t, s, 6, sql.NullInt64{})
+	if _, err := s.rawDB().Exec(`DELETE FROM lessons WHERE railcontent_id = 6`); err != nil {
+		t.Fatalf("delete row: %v", err)
+	}
+	if err := write(s, jobID, 6); !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("%s with no lesson row = %v, want ErrDownloadAbandoned without ErrLessonDeleted", name, err)
 	}
 }
 
@@ -294,31 +321,36 @@ func TestWorkerWritesAreAbandonedOnceTheJobIsGone(t *testing.T) {
 // job, so no file is left untracked; the other terminal writes keep the job
 // canceled.
 func TestGuardedWritesHonourACancel(t *testing.T) {
-	ctx := context.Background()
-	for name, write := range guardedWrites(ctx) {
-		t.Run(name, func(t *testing.T) {
-			s := newTestStore(t)
-			jobID := claimed(t, s, 1, sql.NullInt64{})
-			if err := s.CancelJob(ctx, jobID); err != nil {
-				t.Fatalf("CancelJob: %v", err)
-			}
-			err := write(s, jobID, 1)
-			l, j := mustLesson(t, s, 1), mustJob(t, s, jobID)
-			switch name {
-			case "StartDownload", "ConfirmDownload":
-				if !errors.Is(err, ErrDownloadCanceled) || l.Status != StatusPending || j.Status != JobCanceled {
-					t.Errorf("%s on a canceled job = %v (lesson %s, job %s), want ErrDownloadCanceled and nothing written", name, err, l.Status, j.Status)
-				}
-			case "FinishDownload":
-				if err != nil || l.Status != StatusDownloaded || j.Status != JobDone {
-					t.Errorf("FinishDownload after a late cancel = %v (lesson %s, job %s), want recorded, job done", err, l.Status, j.Status)
-				}
-			default:
-				if err != nil || j.Status != JobCanceled {
-					t.Errorf("%s on a canceled job = %v (job %s), want it to land and the job to stay canceled", name, err, j.Status)
-				}
-			}
-		})
+	for name, write := range guardedWrites(context.Background()) {
+		t.Run(name, func(t *testing.T) { checkWriteOnACanceledJob(t, name, write) })
+	}
+}
+
+// checkWriteOnACanceledJob runs write, the guarded write name, on a job
+// canceled while its worker holds it, and checks what it answered and wrote
+// (see TestGuardedWritesHonourACancel).
+func checkWriteOnACanceledJob(t *testing.T, name string, write guardedWrite) {
+	t.Helper()
+	s := newTestStore(t)
+	jobID := claimed(t, s, 1, sql.NullInt64{})
+	if err := s.CancelJob(context.Background(), jobID); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	err := write(s, jobID, 1)
+	l, j := mustLesson(t, s, 1), mustJob(t, s, jobID)
+	switch name {
+	case "StartDownload", "ConfirmDownload":
+		if !errors.Is(err, ErrDownloadCanceled) || l.Status != StatusPending || j.Status != JobCanceled {
+			t.Errorf("%s on a canceled job = %v (lesson %s, job %s), want ErrDownloadCanceled and nothing written", name, err, l.Status, j.Status)
+		}
+	case "FinishDownload":
+		if err != nil || l.Status != StatusDownloaded || j.Status != JobDone {
+			t.Errorf("FinishDownload after a late cancel = %v (lesson %s, job %s), want recorded, job done", err, l.Status, j.Status)
+		}
+	default:
+		if err != nil || j.Status != JobCanceled {
+			t.Errorf("%s on a canceled job = %v (job %s), want it to land and the job to stay canceled", name, err, j.Status)
+		}
 	}
 }
 
@@ -479,14 +511,7 @@ func TestBeginLessonDeleteRemovesItsJobsAndBlocksNewOnes(t *testing.T) {
 	if !reflect.DeepEqual(kill, []int64{canceled, running}) {
 		t.Errorf("jobs to kill = %v, want [%d %d]", kill, canceled, running)
 	}
-	for _, j := range []int64{canceled, running} {
-		if _, err := s.GetJob(ctx, j); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("lesson 1's job %d survived (err=%v), want removed", j, err)
-		}
-		if got := abandonedIntent(t, s, j); got != intentDelete {
-			t.Errorf("job %d intent = %q, want %q recorded", j, got, intentDelete)
-		}
-	}
+	assertJobsRemovedForADelete(t, s, canceled, running)
 	if st := mustJob(t, s, done).Status; st != JobDone {
 		t.Errorf("a finished job = %q, want kept", st)
 	}
@@ -494,6 +519,39 @@ func TestBeginLessonDeleteRemovesItsJobsAndBlocksNewOnes(t *testing.T) {
 		t.Errorf("another lesson's job = %q, want untouched (queued)", st)
 	}
 
+	assertLessonDeleteBlocksNewJobs(t, s, other)
+
+	if err := s.EndLessonDelete(ctx, 1, 404); err != nil {
+		t.Fatalf("EndLessonDelete: %v", err)
+	}
+	if _, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1); err != nil || !created {
+		t.Errorf("EnqueueJob after the delete ended = %v, %v, want a new job", created, err)
+	}
+	if _, _, err := s.BeginLessonDelete(ctx, 999); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("unknown lesson = %v, want sql.ErrNoRows", err)
+	}
+}
+
+// assertJobsRemovedForADelete fails unless every one of jobs is gone, with
+// the delete's intent recorded for it.
+func assertJobsRemovedForADelete(t *testing.T, s *Store, jobs ...int64) {
+	t.Helper()
+	for _, j := range jobs {
+		if _, err := s.GetJob(context.Background(), j); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("lesson 1's job %d survived (err=%v), want removed", j, err)
+		}
+		if got := abandonedIntent(t, s, j); got != intentDelete {
+			t.Errorf("job %d intent = %q, want %q recorded", j, got, intentDelete)
+		}
+	}
+}
+
+// assertLessonDeleteBlocksNewJobs fails unless, while lesson 1 is being
+// deleted, no job can be enqueued for it, other (made its failed job here)
+// can't be retried, the planner skips it, and a second delete is refused.
+func assertLessonDeleteBlocksNewJobs(t *testing.T, s *Store, other int64) {
+	t.Helper()
+	ctx := context.Background()
 	if _, _, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1); !errors.Is(err, ErrLessonDeleting) {
 		t.Errorf("EnqueueJob while deleting = %v, want ErrLessonDeleting", err)
 	}
@@ -507,16 +565,6 @@ func TestBeginLessonDeleteRemovesItsJobsAndBlocksNewOnes(t *testing.T) {
 	}
 	if _, _, err := s.BeginLessonDelete(ctx, 1); !errors.Is(err, ErrLessonDeleting) {
 		t.Errorf("a second BeginLessonDelete = %v, want ErrLessonDeleting", err)
-	}
-
-	if err := s.EndLessonDelete(ctx, 1, 404); err != nil {
-		t.Fatalf("EndLessonDelete: %v", err)
-	}
-	if _, created, err := s.EnqueueJob(ctx, sql.NullInt64{}, 1); err != nil || !created {
-		t.Errorf("EnqueueJob after the delete ended = %v, %v, want a new job", created, err)
-	}
-	if _, _, err := s.BeginLessonDelete(ctx, 999); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("unknown lesson = %v, want sql.ErrNoRows", err)
 	}
 }
 

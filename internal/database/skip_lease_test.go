@@ -28,69 +28,80 @@ func abandonedIntent(t *testing.T, s *Store, id int64) string {
 // "discard" recorded so the worker records nothing and removes what it wrote;
 // the planner then leaves the lesson alone.
 func TestSkipLessonSticks(t *testing.T) {
+	t.Run("queued", testSkipLessonQueued)
+	t.Run("mid-download", testSkipLessonMidDownload)
+	t.Run("refused while deleting", testSkipLessonRefusedWhileDeleting)
+	t.Run("unknown", testSkipLessonUnknown)
+}
+
+func testSkipLessonQueued(t *testing.T) {
 	ctx := context.Background()
-	t.Run("queued", func(t *testing.T) {
-		s := newTestStore(t)
-		queued := seedJob(t, s, 1, sql.NullInt64{})
-		kill, err := s.SkipLesson(ctx, 1, "not for me")
-		if err != nil || len(kill) != 0 {
-			t.Fatalf("SkipLesson = %v, %v, want nothing to kill", kill, err)
-		}
-		if _, err := s.GetJob(ctx, queued); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("the queued job survived the skip (err=%v)", err)
-		}
-		if got := abandonedIntent(t, s, queued); got != "" {
-			t.Errorf("a job no worker held recorded intent %q", got)
-		}
-		l := mustLesson(t, s, 1)
-		if l.Status != StatusSkipped || l.Error.String != "not for me" {
-			t.Errorf("lesson = %s/%v, want skipped with the reason", l.Status, l.Error)
-		}
-		if skip, err := s.ShouldSkipEnqueue(ctx, 1); err != nil || !skip {
-			t.Errorf("ShouldSkipEnqueue after Skip = %v, %v, want true", skip, err)
-		}
-	})
-	t.Run("mid-download", func(t *testing.T) {
-		s := newTestStore(t)
-		running := claimed(t, s, 1, sql.NullInt64{})
-		if err := s.StartDownload(ctx, running, 1); err != nil {
-			t.Fatalf("StartDownload: %v", err)
-		}
-		kill, err := s.SkipLesson(ctx, 1, "")
-		if err != nil || !reflect.DeepEqual(kill, []int64{running}) {
-			t.Fatalf("SkipLesson = %v, %v, want [%d] to kill", kill, err, running)
-		}
-		if got := abandonedIntent(t, s, running); got != intentDiscard {
-			t.Errorf("intent = %q, want %q", got, intentDiscard)
-		}
-		err = s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
-		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
-			t.Fatalf("FinishDownload after Skip = %v, want abandoned, not a delete", err)
-		}
-		if l := mustLesson(t, s, 1); l.Status != StatusSkipped || l.OutputDir.Valid {
-			t.Errorf("the skipped lesson was recorded: %+v", l)
-		}
-	})
-	t.Run("refused while deleting", func(t *testing.T) {
-		s := newTestStore(t)
-		seedJob(t, s, 1, sql.NullInt64{})
-		seedFiles(t, s, 1, "/dl/C/01 - L", "", sql.NullString{})
-		if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
-			t.Fatalf("BeginLessonDelete: %v", err)
-		}
-		if _, err := s.SkipLesson(ctx, 1, "x"); !errors.Is(err, ErrLessonDeleting) {
-			t.Errorf("SkipLesson during a delete = %v, want ErrLessonDeleting", err)
-		}
-		if l := mustLesson(t, s, 1); l.Status != StatusDownloaded {
-			t.Errorf("a refused skip changed the lesson to %s", l.Status)
-		}
-	})
-	t.Run("unknown", func(t *testing.T) {
-		s := newTestStore(t)
-		if _, err := s.SkipLesson(ctx, 404, ""); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("SkipLesson(unknown) = %v, want sql.ErrNoRows", err)
-		}
-	})
+	s := newTestStore(t)
+	queued := seedJob(t, s, 1, sql.NullInt64{})
+	kill, err := s.SkipLesson(ctx, 1, "not for me")
+	if err != nil || len(kill) != 0 {
+		t.Fatalf("SkipLesson = %v, %v, want nothing to kill", kill, err)
+	}
+	if _, err := s.GetJob(ctx, queued); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("the queued job survived the skip (err=%v)", err)
+	}
+	if got := abandonedIntent(t, s, queued); got != "" {
+		t.Errorf("a job no worker held recorded intent %q", got)
+	}
+	l := mustLesson(t, s, 1)
+	if l.Status != StatusSkipped || l.Error.String != "not for me" {
+		t.Errorf("lesson = %s/%v, want skipped with the reason", l.Status, l.Error)
+	}
+	if skip, err := s.ShouldSkipEnqueue(ctx, 1); err != nil || !skip {
+		t.Errorf("ShouldSkipEnqueue after Skip = %v, %v, want true", skip, err)
+	}
+}
+
+func testSkipLessonMidDownload(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	running := claimed(t, s, 1, sql.NullInt64{})
+	if err := s.StartDownload(ctx, running, 1); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	kill, err := s.SkipLesson(ctx, 1, "")
+	if err != nil || !reflect.DeepEqual(kill, []int64{running}) {
+		t.Fatalf("SkipLesson = %v, %v, want [%d] to kill", kill, err, running)
+	}
+	if got := abandonedIntent(t, s, running); got != intentDiscard {
+		t.Errorf("intent = %q, want %q", got, intentDiscard)
+	}
+	err = s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
+	if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("FinishDownload after Skip = %v, want abandoned, not a delete", err)
+	}
+	if l := mustLesson(t, s, 1); l.Status != StatusSkipped || l.OutputDir.Valid {
+		t.Errorf("the skipped lesson was recorded: %+v", l)
+	}
+}
+
+func testSkipLessonRefusedWhileDeleting(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedJob(t, s, 1, sql.NullInt64{})
+	seedFiles(t, s, 1, "/dl/C/01 - L", "", sql.NullString{})
+	if _, _, err := s.BeginLessonDelete(ctx, 1); err != nil {
+		t.Fatalf("BeginLessonDelete: %v", err)
+	}
+	if _, err := s.SkipLesson(ctx, 1, "x"); !errors.Is(err, ErrLessonDeleting) {
+		t.Errorf("SkipLesson during a delete = %v, want ErrLessonDeleting", err)
+	}
+	if l := mustLesson(t, s, 1); l.Status != StatusDownloaded {
+		t.Errorf("a refused skip changed the lesson to %s", l.Status)
+	}
+}
+
+func testSkipLessonUnknown(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.SkipLesson(ctx, 404, ""); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("SkipLesson(unknown) = %v, want sql.ErrNoRows", err)
+	}
 }
 
 // TestDeleteLeaseLapsesAndRenews proves the deleting mark is a lease: a delete
@@ -137,67 +148,78 @@ func TestDeleteLeaseLapsesAndRenews(t *testing.T) {
 // abandonedTTL, a job no worker held gets no row, and a row answers only for
 // the job AND lesson it names, so a reused job id can not inherit it.
 func TestAbandonedJobsAreBounded(t *testing.T) {
+	t.Run("consumed on read", testAbandonedConsumedOnRead)
+	t.Run("lapses", testAbandonedLapses)
+	t.Run("never-started canceled job", testAbandonedNeverStarted)
+	t.Run("matched on the lesson too", testAbandonedMatchedOnTheLesson)
+}
+
+func testAbandonedConsumedOnRead(t *testing.T) {
 	ctx := context.Background()
-	t.Run("consumed on read", func(t *testing.T) {
-		s := newTestStore(t)
-		running := claimed(t, s, 1, sql.NullInt64{})
-		mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
-		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 1, 'delete')`, running)
-		if err := s.CancelDownload(ctx, running, 1, true); !errors.Is(err, ErrLessonDeleted) {
-			t.Fatalf("first read = %v, want the delete", err)
-		}
-		if got := abandonedIntent(t, s, running); got != "" {
-			t.Errorf("the row survived its read: %q", got)
-		}
-		err := s.CancelDownload(ctx, running, 1, true)
-		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
-			t.Errorf("second read = %v, want abandoned, keeping the files", err)
-		}
-	})
-	t.Run("lapses", func(t *testing.T) {
-		s := newTestStore(t)
-		old := claimed(t, s, 1, sql.NullInt64{})
-		if _, err := s.SkipLesson(ctx, 1, ""); err != nil {
-			t.Fatalf("SkipLesson: %v", err)
-		}
-		mustExec(t, s, `UPDATE abandoned_jobs SET recorded_at = datetime('now', '-8 days') WHERE job_id = ?`, old)
-		fresh := claimed(t, s, 2, sql.NullInt64{})
-		if _, err := s.SkipLesson(ctx, 2, ""); err != nil {
-			t.Fatalf("SkipLesson: %v", err)
-		}
-		if got := abandonedIntent(t, s, old); got != "" {
-			t.Errorf("a row older than the TTL survived the next insert: %q", got)
-		}
-		if got := abandonedIntent(t, s, fresh); got != intentDiscard {
-			t.Errorf("the fresh row = %q, want %q", got, intentDiscard)
-		}
-	})
-	t.Run("never-started canceled job", func(t *testing.T) {
-		s := newTestStore(t)
-		queued := seedJob(t, s, 1, sql.NullInt64{})
-		if err := s.CancelJob(ctx, queued); err != nil {
-			t.Fatalf("CancelJob: %v", err)
-		}
-		if kill, err := s.SkipLesson(ctx, 1, ""); err != nil || len(kill) != 0 {
-			t.Errorf("SkipLesson = %v, %v, want nothing to kill", kill, err)
-		}
-		if got := abandonedIntent(t, s, queued); got != "" {
-			t.Errorf("a job no worker held recorded %q", got)
-		}
-	})
-	t.Run("matched on the lesson too", func(t *testing.T) {
-		s := newTestStore(t)
-		seedJob(t, s, 9, sql.NullInt64{})
-		running := claimed(t, s, 1, sql.NullInt64{})
-		mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
-		// A row left for the same job id but another lesson (a job id reused
-		// after a table rebuild) must not answer for this job.
-		mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 9, 'delete')`, running)
-		err := s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
-		if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
-			t.Errorf("FinishDownload = %v, want abandoned, keeping the files", err)
-		}
-	})
+	s := newTestStore(t)
+	running := claimed(t, s, 1, sql.NullInt64{})
+	mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
+	mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 1, 'delete')`, running)
+	if err := s.CancelDownload(ctx, running, 1, true); !errors.Is(err, ErrLessonDeleted) {
+		t.Fatalf("first read = %v, want the delete", err)
+	}
+	if got := abandonedIntent(t, s, running); got != "" {
+		t.Errorf("the row survived its read: %q", got)
+	}
+	err := s.CancelDownload(ctx, running, 1, true)
+	if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+		t.Errorf("second read = %v, want abandoned, keeping the files", err)
+	}
+}
+
+func testAbandonedLapses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	old := claimed(t, s, 1, sql.NullInt64{})
+	if _, err := s.SkipLesson(ctx, 1, ""); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
+	}
+	mustExec(t, s, `UPDATE abandoned_jobs SET recorded_at = datetime('now', '-8 days') WHERE job_id = ?`, old)
+	fresh := claimed(t, s, 2, sql.NullInt64{})
+	if _, err := s.SkipLesson(ctx, 2, ""); err != nil {
+		t.Fatalf("SkipLesson: %v", err)
+	}
+	if got := abandonedIntent(t, s, old); got != "" {
+		t.Errorf("a row older than the TTL survived the next insert: %q", got)
+	}
+	if got := abandonedIntent(t, s, fresh); got != intentDiscard {
+		t.Errorf("the fresh row = %q, want %q", got, intentDiscard)
+	}
+}
+
+func testAbandonedNeverStarted(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	queued := seedJob(t, s, 1, sql.NullInt64{})
+	if err := s.CancelJob(ctx, queued); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if kill, err := s.SkipLesson(ctx, 1, ""); err != nil || len(kill) != 0 {
+		t.Errorf("SkipLesson = %v, %v, want nothing to kill", kill, err)
+	}
+	if got := abandonedIntent(t, s, queued); got != "" {
+		t.Errorf("a job no worker held recorded %q", got)
+	}
+}
+
+func testAbandonedMatchedOnTheLesson(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedJob(t, s, 9, sql.NullInt64{})
+	running := claimed(t, s, 1, sql.NullInt64{})
+	mustExec(t, s, `DELETE FROM jobs WHERE id = ?`, running)
+	// A row left for the same job id but another lesson (a job id reused
+	// after a table rebuild) must not answer for this job.
+	mustExec(t, s, `INSERT INTO abandoned_jobs(job_id, railcontent_id, intent) VALUES(?, 9, 'delete')`, running)
+	err := s.FinishDownload(ctx, running, 1, DownloadRecord{OutputDir: "/dl/C/01 - L"})
+	if !errors.Is(err, ErrDownloadAbandoned) || errors.Is(err, ErrLessonDeleted) {
+		t.Errorf("FinishDownload = %v, want abandoned, keeping the files", err)
+	}
 }
 
 // TestStoppingAPendingLessonKeepsItPending (L5) proves removing a queued job
