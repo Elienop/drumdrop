@@ -40,30 +40,131 @@ it("a sync that fails without a server message toasts the outcome and a sentence
   expect(screen.getByRole("button", { name: "Close toast" })).toBeInTheDocument()
 })
 
-it("disables the Dry-run button after a 503 probe", async () => {
-  server.use(
-    http.get(`${ORIGIN}/api/summary`, () =>
-      HttpResponse.json({
-        follows: 0,
-        lessons: { downloaded: 0, pending: 0, downloading: 0, failed: 0, skipped: 0 },
-        jobs: { queued: 0, running: 0, done: 0, failed: 0, canceled: 0 },
+// A 503 means nothing is attached to run a sync, so the button that got it is
+// blocked: aria-disabled, with the reason in a tooltip. jsdom applies no CSS,
+// so how it LOOKS is read from its classes here; the browser pass checks it.
+describe("a sync button blocked by a 503", () => {
+  // Every POST to /api/sync answers 503 and is counted, so a test can show
+  // that pressing a blocked button sends nothing.
+  function blockSync() {
+    const posts = { count: 0 }
+    server.use(
+      http.post(`${ORIGIN}/api/sync`, () => {
+        posts.count++
+        return HttpResponse.json({ error: "nothing attached" }, { status: 503 })
       }),
-    ),
-    http.post(`${ORIGIN}/api/sync`, () =>
-      HttpResponse.json({ error: "no planner attached" }, { status: 503 }),
-    ),
-  )
-  renderWithProviders(<Dashboard />)
+    )
+    return posts
+  }
 
-  const dryRun = await screen.findByRole("button", { name: /dry-run/i })
-  expect(dryRun).toBeEnabled()
-  await userEvent.click(dryRun)
+  // Presses the named button once, so it gets its 503, and returns it blocked.
+  // Re-queried: the blocked button is a new node, the first one is detached.
+  async function block(name: string) {
+    renderWithProviders(<Dashboard />)
+    const idle = await screen.findByRole("button", { name })
+    expect(idle).not.toHaveAttribute("aria-disabled")
+    await userEvent.click(idle)
+    return waitFor(() => {
+      const blocked = screen.getByRole("button", { name })
+      expect(blocked).toHaveAttribute("aria-disabled", "true")
+      return blocked
+    })
+  }
 
-  // Re-query: a blocked button is re-wrapped in a tooltip trigger, so the
-  // original node is detached after the 503 settles.
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: /dry-run/i })).toBeDisabled(),
+  // Run sync comes first in the tab order, Dry-run second.
+  it.each([
+    ["Run sync", 1, "no daemon attached"],
+    ["Dry-run", 2, "no planner attached"],
+  ])(
+    "%s stays in the tab order, is announced as unavailable, and gives the reason on focus",
+    async (name, tabs, reason) => {
+      blockSync()
+      const button = await block(name)
+
+      // The pressed node was replaced, so focus starts from the page.
+      for (let i = 0; i < tabs; i++) await userEvent.tab()
+      expect(button).toHaveFocus()
+      expect(button).toHaveAttribute("aria-disabled", "true")
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(reason)
+      expect(button).toHaveAccessibleDescription(reason)
+    },
   )
+
+  it("gives the reason on hover", async () => {
+    blockSync()
+    const button = await block("Run sync")
+
+    await userEvent.hover(button)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("no daemon attached")
+  })
+
+  it("does nothing when pressed, and Enter or Space leaves the reason showing", async () => {
+    const posts = blockSync()
+    const button = await block("Run sync")
+    expect(posts.count).toBe(1)
+
+    await userEvent.tab()
+    expect(button).toHaveFocus()
+    await screen.findByRole("tooltip")
+    await userEvent.keyboard("{Enter}")
+    expect(screen.getByRole("tooltip")).toHaveTextContent("no daemon attached")
+    await userEvent.keyboard(" ")
+    expect(screen.getByRole("tooltip")).toHaveTextContent("no daemon attached")
+    await userEvent.click(button)
+
+    expect(posts.count).toBe(1)
+    expect(button).toHaveAttribute("aria-disabled", "true")
+  })
+
+  // The disabled look: dimmed, the same size (h-8, size sm), and no hover
+  // change (each variant's own hover classes give way to its resting colours).
+  it.each([
+    ["Run sync", ["hover:bg-primary"], ["hover:bg-primary/90"]],
+    [
+      "Dry-run",
+      ["hover:bg-background", "hover:text-inherit", "dark:hover:bg-input/30"],
+      ["hover:bg-accent", "hover:text-accent-foreground", "dark:hover:bg-input/50"],
+    ],
+  ])("%s keeps the disabled look", async (name, kept, dropped) => {
+    blockSync()
+    const classes = (await block(name)).className.split(/\s+/)
+
+    expect(classes).toEqual(expect.arrayContaining(["opacity-50", "h-8", ...kept]))
+    for (const c of dropped) expect(classes).not.toContain(c)
+  })
+
+  // opacity-50 would dim the button's own ring to 1.83:1, so the wrapper,
+  // at full opacity, draws the app's ring (ring-ring/60, 3px, offset off a
+  // filled button only) while the button inside has keyboard focus.
+  it.each([
+    ["Run sync", true],
+    ["Dry-run", false],
+  ])("%s has its focus ring drawn undimmed around it", async (name, filled) => {
+    blockSync()
+    const button = await block(name)
+    const own = button.className.split(/\s+/)
+    const wrapper = button.parentElement!.className.split(/\s+/)
+
+    expect(own).toEqual(
+      expect.arrayContaining(["focus-visible:ring-0", "focus-visible:ring-offset-0"]),
+    )
+    expect(own).not.toContain("focus-visible:ring-[3px]")
+    expect(own).not.toContain("focus-visible:ring-offset-2")
+    expect(wrapper).toEqual(
+      expect.arrayContaining([
+        "inline-flex",
+        "rounded-md",
+        "has-focus-visible:ring-[3px]",
+        "has-focus-visible:ring-ring/60",
+      ]),
+    )
+    const offset = ["has-focus-visible:ring-offset-2", "has-focus-visible:ring-offset-background"]
+    if (filled) expect(wrapper).toEqual(expect.arrayContaining(offset))
+    else expect(wrapper.filter((c) => /ring-offset/.test(c))).toEqual([])
+    // The wrapper is only a frame: not focusable, no role.
+    expect(button.parentElement).not.toHaveAttribute("tabindex")
+    expect(button.parentElement).not.toHaveAttribute("role")
+  })
 })
 
 it.each([

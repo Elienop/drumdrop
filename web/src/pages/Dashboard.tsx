@@ -6,6 +6,7 @@ import { errorMessage, failureToast } from "@/lib/errors"
 import { qk } from "@/lib/queryKeys"
 import { useSSE } from "@/lib/sse"
 import { countOf, formatRelativeTime } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import type { JobStatus, LessonStatus } from "@/types"
 import { Button } from "@/components/ui/button"
 import {
@@ -275,19 +276,57 @@ function SyncButton({
       </PendingButton>
     )
   }
-  // A disabled button swallows pointer events, so wrap it in a focusable span
-  // that owns the tooltip trigger.
+  // Blocked, the button is aria-disabled, not `disabled` (the PendingButton
+  // way): it stays in the tab order and takes the pointer, so it is the
+  // tooltip's trigger itself and Radix points its aria-describedby at the
+  // reason. A `disabled` button gets neither focus nor pointer events, which
+  // needed a focusable span around it (BACKLOG D12).
+  //
+  // It keeps the disabled look, opacity-50 with no hover change, but that
+  // opacity would dim its own focus ring to 1.83:1. So the button draws no
+  // ring, and the span around it (not focusable, and not the trigger) draws
+  // the app's ring while the button has keyboard focus: undimmed, 3.85:1.
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span tabIndex={0}>
-          <Button size="sm" variant={variant} disabled>
+    <span className={cn(BLOCKED_RING, BLOCKED[variant].ringOffset)}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            size="sm"
+            variant={variant}
+            aria-disabled="true"
+            className={cn(
+              "opacity-50 focus-visible:ring-0 focus-visible:ring-offset-0",
+              BLOCKED[variant].hover,
+            )}
+            // Pressing it does nothing. preventDefault also skips the trigger's
+            // own click handler, so Enter or Space leaves the reason showing.
+            onClick={(e) => e.preventDefault()}
+          >
             <Icon data-icon="inline-start" />
             {label}
           </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{tooltip}</TooltipContent>
-    </Tooltip>
+        </TooltipTrigger>
+        <TooltipContent>{tooltip}</TooltipContent>
+      </Tooltip>
+    </span>
   )
+}
+
+// The ring every button draws on keyboard focus (ui/button.tsx), drawn by a
+// blocked SyncButton's wrapper instead, which is exactly the button's size.
+const BLOCKED_RING =
+  "inline-flex rounded-md has-focus-visible:ring-[3px] has-focus-visible:ring-ring/60"
+
+// Per variant: its hover classes from ui/button.tsx, replaced by cn()
+// (tailwind-merge) with its resting colours, as a disabled button shows;
+// and the ring offset a filled button takes (lib/ring.ts), for the wrapper.
+const BLOCKED: Record<"default" | "outline", { hover: string; ringOffset: string }> = {
+  default: {
+    hover: "hover:bg-primary",
+    ringOffset: "has-focus-visible:ring-offset-2 has-focus-visible:ring-offset-background",
+  },
+  outline: {
+    hover: "hover:bg-background hover:text-inherit dark:hover:bg-input/30",
+    ringOffset: "",
+  },
 }
