@@ -331,3 +331,30 @@ func TestPlexTVSongVersionNotBroughtBackKeepsItsFiles(t *testing.T) {
 	assertExist(t, false, filepath.Join(season, base+".nfo"), filepath.Join(season, base+musora.PosterSuffix))
 	assertRecordIs(t, store, season, append(append(append(append([]string(nil), videos...), nfos...), images...), base+" resources")...)
 }
+
+// TestAKeptVersionKeepsItsFilesBesideTheLessonsOwnVideo pins that a lesson
+// Musora no longer calls a song, whose record names its own "<base>.mp4"
+// beside versions it kept, names a resources-only re-download's nfo for that
+// video: "<base>.nfo" is replaced, and each kept version keeps its own nfo
+// and image as they were (the download brings no version to name them for).
+func TestAKeptVersionKeepsItsFilesBesideTheLessonsOwnVideo(t *testing.T) {
+	const base = sameTitleBase
+	w, store, _, _, season := plexWorker(t) // lesson 100 is not a song now
+	w.Cfg.ResourcesOnly = true
+	w.Downloader = resourcesRedownload{}
+	var versions []string
+	for _, ext := range []string{".mp4", ".nfo", ".jpg"} {
+		versions = append(versions, versionNames(base, ext, "Drumless", "Original")...)
+	}
+	own := []string{base + ".mp4", base + ".nfo", base + ".jpg"}
+	seedRecordedSong(t, store, season, append(append([]string(nil), own...), versions...)...)
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, season, versions...)
+	assertContent(t, season, base+".mp4", base+".jpg")
+	if got := readFile(filepath.Join(season, base+".nfo")); !strings.Contains(got, "<episodedetails>") {
+		t.Errorf("%s.nfo = %q, want the new episode nfo", base, got)
+	}
+	assertRecordIs(t, store, season, append(append(append([]string(nil), own...), versions...), base+" resources")...)
+}

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,21 +270,25 @@ func TestCreateOnlyNeverPublishesAnotherWritersFile(t *testing.T) {
 		err     error
 	}
 	bResult := make(chan result, 1)
-	var once sync.Once
+	// The temp files are flushed in turn: A's first, then B's (whatever their
+	// names); a folder's flush is let through.
+	var temps atomic.Int32
 	syncFile = func(f *os.File) error {
-		if strings.Contains(filepath.Base(f.Name()), ".B.") {
-			close(bWrote) // B has written its file and not flushed it...
-			<-aDone       // ...and stays there until A is done
+		if !strings.HasSuffix(f.Name(), musora.TempSuffix) {
 			return origSync(f)
 		}
-		once.Do(func() {
-			tempWriter = "B" // a second process, from here on
+		switch temps.Add(1) {
+		case 1: // A's file is written: B, a second process, starts
+			tempWriter = "B"
 			go func() {
 				created, err := createOnly(r, "poster.jpg", []byte("B's, unflushed"))
 				bResult <- result{created, err}
 			}()
 			<-bWrote
-		})
+		case 2: // B has written its file and not flushed it, until A is done
+			close(bWrote)
+			<-aDone
+		}
 		return origSync(f)
 	}
 	tempWriter = "A"
