@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -162,8 +163,17 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	seasonDir := filepath.Join(libraryDir, seasonRel)
 	self := lib.self.RailcontentID
 	previous, known, notes := previousDownload(c, lib.self)
-	recorded := recordedVersions(lib.song, previous.Remove, seasonDir)
-	plan, err := planPlexTVMove(src, src.dir.Name(), seasonDir, show, title, season, episode, recorded)
+	prevNames := namesIn(previous.Remove, seasonDir)
+	versionsAt := func(base string) []string { return recordedVersions(lib.song, prevNames, base) }
+	plan, err := planPlexTVMove(src, src.dir.Name(), seasonDir, show, title, season, episode, func(base string) []string {
+		// A lesson Musora no longer calls a song whose record names its own
+		// "<base>.mp4" has that video's image and nfo at "<base>.jpg" and
+		// "<base>.nfo": its kept versions keep theirs, and are not named for.
+		if !lib.song && slices.Contains(prevNames, base+".mp4") {
+			return nil
+		}
+		return versionsAt(base)
+	})
 	if err != nil {
 		return plexMoveResult{}, err
 	}
@@ -212,7 +222,7 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
 	}
 	prevSeason := seasonPrevious{libraryDir: libraryDir, seasonDir: seasonDir, plan: plan, tree: tree, listing: listing,
-		versions: recorded(plan.episodeBase)}
+		versions: versionsAt(plan.episodeBase)}
 	ours, kept, stays, err := prevSeason.setAside(previous.Remove, aside)
 	if err != nil {
 		return fail(err, nil)
@@ -432,25 +442,45 @@ func atEpisodeBase(p, seasonDir, base string, listing map[string]bool, versions 
 	return !isDir && library.VersionEntry(base, name, versions) || library.EpisodeEntry(base, name, isDir, listing)
 }
 
-// recordedVersions returns, for a song (Musora says so: plexLibrary.song),
-// the labels of the version videos "<base> [L].mp4" that the lesson's own
-// previous entries (its plan's Remove) name in the season folder seasonDir,
-// for an episode base; nil for any other lesson. The record proves them the
-// lesson's, and Musora that they are versions, not the video of another
-// title "<title> [L]" (see library.VersionEntry).
-func recordedVersions(song bool, previous []string, seasonDir string) func(base string) []string {
-	return func(base string) []string {
-		if !song {
-			return nil
-		}
-		var names []string
-		for _, p := range previous {
-			if filepath.Dir(p) == filepath.Clean(seasonDir) {
-				names = append(names, filepath.Base(p))
-			}
-		}
-		return library.Versions(base, names)
+// recordedVersions returns the labels of the version videos "<base> [L].mp4"
+// that names, the lesson's own previous entries in this season folder
+// (namesIn), hold at the episode base base, when they are versions of the
+// episode: its record proves them the lesson's, and only a name shared with
+// another title of this lesson, "<title> [L]", could make one not a version.
+// So they are versions when
+//   - Musora says the lesson is a song (song);
+//   - there are two or more: one earlier title is one video, never two;
+//   - there is one, and it is not provably an earlier title: the record does
+//     not name "<base> [L]-poster.jpg", the shape of a title placed before
+//     each version had its own files (a song then had one "<base>-poster.jpg").
+//
+// A single "<base> [L].mp4" with its own "<base> [L].jpg" and ".nfo" is
+// either a song's one version whose song flag changed on Musora or an earlier
+// title "<title> [L]" of a lesson that is not a song; the names can not tell,
+// so it is kept (a re-download keeps what it did not bring back, owner ruling
+// #72 (j)), never deleted on a guess (BACKLOG D153's residuals). nil when
+// there is no version.
+func recordedVersions(song bool, names []string, base string) []string {
+	labels := library.Versions(base, names)
+	switch {
+	case song || len(labels) > 1:
+		return labels
+	case len(labels) == 1 && !slices.Contains(names, base+" ["+labels[0]+"]"+musora.PosterSuffix):
+		return labels
 	}
+	return nil
+}
+
+// namesIn is the names of the entries of previous in the season folder
+// seasonDir.
+func namesIn(previous []string, seasonDir string) []string {
+	var names []string
+	for _, p := range previous {
+		if filepath.Dir(p) == filepath.Clean(seasonDir) {
+			names = append(names, filepath.Base(p))
+		}
+	}
+	return names
 }
 
 // listSeason lists the season folder the plex-tv move holds open. A package
@@ -707,9 +737,11 @@ type plexMoveStep struct {
 //   - a folder becomes "<episodeBase> <folder>" (e.g. "<episodeBase> resources").
 //
 // A song's versions are the labels of the version videos the download
-// brings ("<base> [L].mp4"); when it brings none, those recorded(episodeBase)
-// returns (the lesson's own recorded versions, for a song: recordedVersions),
-// so a resources-only re-download names the files as the videos it keeps.
+// brings ("<base> [L].mp4") and, unless it brings a "<base>.mp4" of its own,
+// those recorded(episodeBase) returns (the lesson's own recorded versions,
+// recordedVersions): so a resources-only re-download names the files as the
+// videos it keeps, and a version the download does not bring back still gets
+// its own image and nfo.
 //
 // Any name is fine, brackets included: the lesson records exactly what it
 // placed, so nothing ever has to parse these names back.
@@ -772,8 +804,12 @@ func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title strin
 		return plexMovePlan{}, err
 	}
 	plan := plexMovePlan{episodeBase: episodeBase, labels: library.Versions(scratch.base, videos)}
-	if len(plan.labels) == 0 && recorded != nil {
-		plan.labels = recorded(episodeBase)
+	if recorded != nil && !slices.Contains(videos, scratch.base+".mp4") {
+		// Every version that stays gets its own image and nfo too, before the
+		// one shared file is retired (replacedByVersion).
+		plan.labels = append(plan.labels, recorded(episodeBase)...)
+		slices.Sort(plan.labels)
+		plan.labels = slices.Compact(plan.labels)
 	}
 	for _, en := range list {
 		names := []string{en.suffix}

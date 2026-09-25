@@ -152,10 +152,16 @@ func TestPlexTVSongRefusedRecordPutsTheSharedFilesBack(t *testing.T) {
 //   - a resources-only re-download, which brings no version, keeps every
 //     version video and names the new nfo per recorded version;
 //   - a version the re-download no longer brings (Musora dropped it) stays,
-//     its video, image and nfo, and stays recorded, as it did before the
-//     per-version nfo;
-//   - a lesson that is NOT a song gets no such reading: the files of an old
-//     title "<title> [Live]" still go (ruling #66).
+//     its video as it was, and stays recorded, as it did before the
+//     per-version nfo; its image and nfo are the song's new ones, like every
+//     version's (see TestPlexTVSongVersionNotBroughtBackKeepsItsFiles);
+//   - for a lesson that is NOT a song, the files of an old title
+//     "<title> [Live]" placed before each version had its own image (its
+//     "-poster.jpg" proves it a title, not a version) still go (ruling #66),
+//     as they did before the per-version files;
+//   - but one "<title> [Live]" with its own ".jpg" and ".nfo" can not be told
+//     from a song's single version whose song flag changed: it is kept, and
+//     stays recorded (TestAVersionIsKeptWhateverMusorasSongFlagSays).
 func TestPlexTVSongReDownloadKeepsItsVersionFiles(t *testing.T) {
 	const base = sameTitleBase
 	videos := versionNames(base, ".mp4", "Drumless", "Original")
@@ -199,14 +205,20 @@ func TestPlexTVSongReDownloadKeepsItsVersionFiles(t *testing.T) {
 		if _, err := w.RunOnce(context.Background(), 0); err != nil {
 			t.Fatalf("RunOnce: %v", err)
 		}
-		assertContent(t, season, goneFiles...)
+		assertContent(t, season, goneFiles[0])
+		if got := readFile(filepath.Join(season, goneFiles[2])); got != "new image" {
+			t.Errorf("%s = %q, want the song's new image", goneFiles[2], got)
+		}
+		if got := readFile(filepath.Join(season, goneFiles[1])); !strings.Contains(got, "<episodedetails>") {
+			t.Errorf("%s = %q, want the song's new episode nfo", goneFiles[1], got)
+		}
 		assertRecordIs(t, store, season, append(append(append([]string(nil), perVersion...), goneFiles...), base+" resources")...)
 	})
 
 	t.Run("not a song: an old title's files go", func(t *testing.T) {
 		w, store, dl, _, season := plexWorker(t)
 		dl.afterWrite = func(dir string) { writeExtrasExcept(t, dir, "resources") }
-		oldTitle := []string{base + " [Live].mp4", base + " [Live].nfo", base + " [Live].jpg"}
+		oldTitle := []string{base + " [Live].mp4", base + " [Live].nfo", base + " [Live]" + musora.PosterSuffix}
 		prev := seedRecordedSong(t, store, season, oldTitle...)
 		prev.VideoPath = sql.NullString{String: filepath.Join(season, oldTitle[0]), Valid: true}
 		store.lessons[100], store.withFiles = prev, []database.Lesson{prev}
@@ -246,4 +258,76 @@ func TestPlexTVSongImageAndNfoArePlacedBeforeEitherVersion(t *testing.T) {
 			t.Errorf("record %v does not name %s", rec.entries, n)
 		}
 	}
+}
+
+// TestAVersionIsKeptWhateverMusorasSongFlagSays pins that a re-download never
+// deletes a recorded song version's video because Musora's song flag changed
+// (an HLS video added, the soundslice slug gone), as the per-version nfo
+// would otherwise have made the name grammar read the versions as another
+// title's files: two or more version videos are versions whatever the flag
+// says (one earlier title is one video, never two), and a single one in the
+// per-version shape can not be told from an earlier title, so it is kept
+// too, never deleted on a guess (owner ruling #72 (j)). Each version keeps
+// its video, image and nfo, and stays recorded beside the new download.
+func TestAVersionIsKeptWhateverMusorasSongFlagSays(t *testing.T) {
+	const base = sameTitleBase
+	for _, labels := range [][]string{{"Drumless", "Original"}, {"Drumless"}} {
+		t.Run(strings.Join(labels, "+"), func(t *testing.T) {
+			w, store, dl, _, season := plexWorker(t) // lesson 100 is not a song now
+			withPoster(dl)
+			var versions []string
+			for _, ext := range []string{".mp4", ".nfo", ".jpg"} {
+				versions = append(versions, versionNames(base, ext, labels...)...)
+			}
+			seedRecordedSong(t, store, season, versions...)
+			if _, err := w.RunOnce(context.Background(), 0); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertContent(t, season, versions...)
+			assertExist(t, true, paths(season, base+".mp4", base+".nfo", base+".jpg")...)
+			assertRecordIs(t, store, season, append(append([]string(nil), versions...), base+".mp4", base+".nfo", base+".jpg", base+".en.vtt")...)
+		})
+	}
+}
+
+// TestPlexTVSongVersionNotBroughtBackKeepsItsFiles pins that a song
+// re-download that does not bring back a version its record names (Musora
+// renamed a recording) still gives that version its own image and nfo
+// before the one shared "<base>.nfo" and image are retired: the version
+// stays, with its video, image and nfo, never without them.
+func TestPlexTVSongVersionNotBroughtBackKeepsItsFiles(t *testing.T) {
+	const base = sameTitleBase
+	w, store, dl, _, season := plexWorker(t)
+	song := lesson(100, "Lesson A")
+	song.Soundslice = []musora.SoundsliceRef{{Slug: "s"}}
+	w.Resolver = fakeResolver{lessons: map[int]*musora.Lesson{100: song}}
+	dl.afterWrite = func(dir string) {
+		b := filepath.Base(dir)
+		if err := os.Remove(filepath.Join(dir, b+" [Original].mp4")); err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, b+"-poster.jpg"), []byte("new image"), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	seedRecordedSong(t, store, season, append(append([]string(nil), videos...), base+".nfo", base+musora.PosterSuffix)...)
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	assertContent(t, season, videos[1]) // [Original], not brought back
+	for _, p := range paths(season, images...) {
+		if got := readFile(p); got != "new image" {
+			t.Errorf("%s = %q, want the song's image", filepath.Base(p), got)
+		}
+	}
+	for _, p := range paths(season, nfos...) {
+		if got := readFile(p); !strings.Contains(got, "<episodedetails>") {
+			t.Errorf("%s = %q, want the episode nfo", filepath.Base(p), got)
+		}
+	}
+	assertExist(t, false, filepath.Join(season, base+".nfo"), filepath.Join(season, base+musora.PosterSuffix))
+	assertRecordIs(t, store, season, append(append(append(append([]string(nil), videos...), nfos...), images...), base+" resources")...)
 }
