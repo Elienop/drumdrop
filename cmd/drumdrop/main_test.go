@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,9 +61,14 @@ func TestRunHelpPrintsUsage(t *testing.T) {
 }
 
 // TestRunReportsAFailedCommand proves each command name reaches its own
-// command: every case fails early, with an error only that command gives, and
-// run prints it on stderr after "✖ " and exits 1. The default case is a
-// download. None of them reaches the network or the real config folder.
+// command: every case fails early, and run prints the error on stderr after
+// "✖ " and exits 1. The default case is a download, so a command whose case
+// is missing becomes a download of its name; each case therefore expects an
+// error the download does not give for the same arguments. None of them
+// reaches the network or the real config folder. sync is pinned in
+// TestRunReportsASucceededCommand instead: every sync flag is a download flag
+// too, and Go's flag errors do not name the flag set, so a sync flag error
+// reads word for word like the download's.
 func TestRunReportsAFailedCommand(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -74,12 +80,15 @@ func TestRunReportsAFailedCommand(t *testing.T) {
 		{"whoami", []string{"whoami"}, nil, "not logged in — run `drumdrop login` first"},
 		{"follow", []string{"follow"}, nil, "follow: provide a lesson/course id or URL, or @slug / --instructor slug"},
 		{"unfollow", []string{"unfollow"}, nil, "unfollow: provide a follow id (see `drumdrop follows`)"},
-		// Only a flag the command defines gives "invalid value": --limit is
-		// sync's alone, --once daemon's alone.
-		{"sync", []string{"sync", "--limit=x"}, nil, `invalid value "x" for flag -limit`},
+		// The download defines no --once: it would answer "flag provided but
+		// not defined: -once".
 		{"daemon", []string{"daemon", "--once=maybe"}, nil, `invalid boolean value "maybe" for -once`},
-		{"serve", []string{"serve", "--listen", "0.0.0.0:0"}, noAPIToken,
-			`refusing to bind "0.0.0.0:0" without an API token: set DRUMDROP_API_TOKEN or listen on loopback`},
+		// 192.0.2.1 is TEST-NET-1 (RFC 5737), reserved for documentation and
+		// on no interface: if GuardListen ever let this bind through, the
+		// listen fails at once with another error, rather than opening a
+		// tokenless API and serving until the test times out.
+		{"serve", []string{"serve", "--listen", "192.0.2.1:0"}, noAPIToken,
+			`refusing to bind "192.0.2.1:0" without an API token: set DRUMDROP_API_TOKEN or listen on loopback`},
 		{"download", []string{"not-an-id"}, nil, "could not parse a content id from: not-an-id"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -127,10 +136,32 @@ func stubRefusedLogin(t *testing.T) {
 // before it listens.
 func noAPIToken(t *testing.T) { t.Setenv("DRUMDROP_API_TOKEN", "") }
 
+// failIfMusoraAsked points Musora's auth and GROQ endpoints at a server that
+// fails the test if anything asks it, so a command that must not reach the
+// network proves it did not.
+func failIfMusoraAsked(t *testing.T) {
+	var asked atomic.Pointer[string] // the first path asked
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		asked.CompareAndSwap(nil, &path)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+	prev := musora.AuthBase
+	musora.AuthBase = srv.URL
+	t.Cleanup(func() { musora.AuthBase = prev })
+	t.Cleanup(musora.SetSanityBase(srv.URL))
+	t.Cleanup(func() {
+		if p := asked.Load(); p != nil {
+			t.Errorf("Musora was asked %s", *p)
+		}
+	})
+}
+
 // TestRunReportsASucceededCommand proves a command that succeeds exits 0 with
-// nothing on run's stdout or stderr, and that logout and follows reach their
-// own commands: logout removes the saved session and credentials, follows
-// opens the database.
+// nothing on run's stdout or stderr, and that logout, follows and sync reach
+// their own commands: logout removes the saved session and credentials,
+// follows and sync open the database.
 func TestRunReportsASucceededCommand(t *testing.T) {
 	t.Run("logout", func(t *testing.T) {
 		dir := t.TempDir()
@@ -160,4 +191,76 @@ func TestRunReportsASucceededCommand(t *testing.T) {
 			t.Errorf("follows opened no database in the config folder: %v", err)
 		}
 	})
+	t.Run("sync", func(t *testing.T) {
+		// A dry run over a new database has no follow to expand, so it asks
+		// Musora nothing, and it downloads nothing; --out keeps even the
+		// downloads folder it would resolve out of the package directory.
+		// Without the sync case this is a download of "sync", which fails:
+		// "could not parse a content id from: sync".
+		failIfMusoraAsked(t)
+		code, stdout, stderr, dir := runArgs(t, "sync", "--dry-run", "--out", t.TempDir())
+		if code != 0 || stdout != "" || stderr != "" {
+			t.Fatalf("run(sync --dry-run) = %d, stdout %q, stderr %q; want 0, nothing, nothing", code, stdout, stderr)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "drumdrop.db")); err != nil {
+			t.Errorf("sync opened no database in the config folder: %v", err)
+		}
+	})
+}
+
+// TestRunCommandHelpExitsZero pins a command's own -h or --help: its flag set
+// prints that command's usage on the process's stderr, as before, and run
+// exits 0 with nothing on its own stdout or stderr, like `drumdrop -h`. The
+// usage header names the flag set, so each case also proves the command name
+// reached its own command.
+func TestRunCommandHelpExitsZero(t *testing.T) {
+	for _, c := range []struct {
+		args   []string
+		header string // the first line of the usage the flag set prints
+	}{
+		{[]string{"follow", "-h"}, "Usage of drumdrop follow:"},
+		{[]string{"sync", "-h"}, "Usage of drumdrop sync:"},
+		{[]string{"daemon", "--help"}, "Usage of drumdrop daemon:"},
+		{[]string{"serve", "-h"}, "Usage of drumdrop serve:"},
+		{[]string{"123", "-h"}, "Usage of drumdrop:"},
+	} {
+		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
+			var code int
+			var stdout, stderr string
+			printed := captureStderr(t, func() { code, stdout, stderr, _ = runArgs(t, c.args...) })
+			if code != 0 || stdout != "" || stderr != "" {
+				t.Errorf("run(%v) = %d, stdout %q, stderr %q; want 0, nothing, nothing", c.args, code, stdout, stderr)
+			}
+			if !strings.HasPrefix(printed, c.header+"\n") {
+				t.Errorf("the process's stderr = %q, want the usage starting %q", printed, c.header)
+			}
+		})
+	}
+}
+
+// captureStderr runs fn with os.Stderr swapped for a pipe, and returns what fn
+// wrote to it. The flag sets write their usage there (SetOutput(os.Stderr) is
+// read when each command builds its flag set, inside fn).
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		_ = r.Close()
+		read <- string(b)
+	}()
+	prev := os.Stderr
+	os.Stderr = w
+	func() {
+		defer func() {
+			os.Stderr = prev
+			_ = w.Close()
+		}()
+		fn()
+	}()
+	return <-read
 }

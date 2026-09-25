@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -69,10 +70,12 @@ func main() {
 }
 
 // run dispatches args (the command line without the program name) to its
-// command and returns the exit code: 0 for --help or a command that succeeded,
-// 1 for no arguments or no download target (after printing the usage) or a
-// command that failed (after printing its error). The commands write their own output to
-// os.Stdout; stdout and stderr receive only the usage and the error line.
+// command and returns the exit code: 0 for --help, for a command's own -h or
+// --help, or for a command that succeeded; 1 for no arguments or no download
+// target (after printing the usage) or a command that failed (after printing
+// its error). The commands write their own output to os.Stdout, and a
+// command's flag set prints its usage and flag errors to os.Stderr; stdout and
+// stderr receive only the usage and the error line.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stdout, usage)
@@ -107,6 +110,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if errors.Is(err, errNoTarget) {
 		fmt.Fprint(stdout, usage)
 		return 1
+	}
+	// A command's -h or --help: its flag set has printed the command's usage
+	// to os.Stderr and answers flag.ErrHelp. Asking for help is not a failure:
+	// `drumdrop -h` exits 0 above, and so does a flag set left to exit by
+	// itself (flag.ExitOnError).
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "✖ ", err)
