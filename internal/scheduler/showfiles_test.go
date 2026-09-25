@@ -147,104 +147,119 @@ func TestSlotsOf(t *testing.T) {
 // renamed into place only if nothing is there (an entry that appears at the
 // name meanwhile is kept), and a failed write leaves nothing behind.
 func TestCreateOnlyNeverReplacesAndNeverLeavesAPart(t *testing.T) {
-	open := func(t *testing.T) (*os.Root, string) {
-		dir := t.TempDir()
-		r, err := os.OpenRoot(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { r.Close() })
-		return r, dir
-	}
-	onlyNames := func(t *testing.T, dir string, want ...string) {
-		t.Helper()
-		entries, _ := os.ReadDir(dir)
-		var got []string
-		for _, e := range entries {
-			got = append(got, e.Name())
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s holds %q, want %q", dir, got, want)
-		}
-	}
+	t.Run("created through a hidden file", testCreateOnlyThroughAHiddenFile)
+	t.Run("an existing entry is kept", testCreateOnlyKeepsAnExistingEntry)
+	t.Run("an entry that appears meanwhile is kept", testCreateOnlyKeepsAnEntryThatAppears)
+	t.Run("a failed rename leaves nothing", testCreateOnlyFailedRenameLeavesNothing)
+	t.Run("a leftover part is replaced", testCreateOnlyReplacesALeftoverPart)
+}
 
-	t.Run("created through a hidden file", func(t *testing.T) {
-		r, dir := open(t)
-		var renamed, flushed []string
-		origSync := syncFile
-		syncFile = func(f *os.File) error {
-			flushed = append(flushed, filepath.Base(f.Name()))
-			return origSync(f)
+// openTempRoot is a new temporary folder, held open, and its path.
+func openTempRoot(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	dir := t.TempDir()
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r, dir
+}
+
+// assertOnlyNames fails unless dir holds exactly the entries want, in name
+// order.
+func assertOnlyNames(t *testing.T, dir string, want ...string) {
+	t.Helper()
+	entries, _ := os.ReadDir(dir)
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s holds %q, want %q", dir, got, want)
+	}
+}
+
+func testCreateOnlyThroughAHiddenFile(t *testing.T) {
+	r, dir := openTempRoot(t)
+	var renamed, flushed []string
+	origSync := syncFile
+	syncFile = func(f *os.File) error {
+		flushed = append(flushed, filepath.Base(f.Name()))
+		return origSync(f)
+	}
+	t.Cleanup(func() { syncFile = origSync })
+	stubRename(t, func(oldpath, newpath string) error {
+		// The file is whole, and on disk, before it takes its name, and
+		// nothing is at the name yet: a crash can only ever leave the
+		// hidden file.
+		if readFile(oldpath) != "image" {
+			t.Errorf("renamed %s holding %q, want the whole file", oldpath, readFile(oldpath))
 		}
-		t.Cleanup(func() { syncFile = origSync })
-		stubRename(t, func(oldpath, newpath string) error {
-			// The file is whole, and on disk, before it takes its name, and
-			// nothing is at the name yet: a crash can only ever leave the
-			// hidden file.
-			if readFile(oldpath) != "image" {
-				t.Errorf("renamed %s holding %q, want the whole file", oldpath, readFile(oldpath))
-			}
-			if !slices.Contains(flushed, filepath.Base(oldpath)) {
-				t.Errorf("renamed %s before it was flushed (flushed %v)", oldpath, flushed)
-			}
-			renamed = append(renamed, filepath.Base(oldpath)+" -> "+filepath.Base(newpath))
-			return renameNoReplace(oldpath, newpath)
-		})
-		created, err := createOnly(r, "poster.jpg", []byte("image"))
-		if !created || err != nil {
-			t.Fatalf("createOnly = %v, %v; want created", created, err)
+		if !slices.Contains(flushed, filepath.Base(oldpath)) {
+			t.Errorf("renamed %s before it was flushed (flushed %v)", oldpath, flushed)
 		}
-		if want := []string{".poster.jpg." + tempWriter + ".drumdrop-part -> poster.jpg"}; !reflect.DeepEqual(renamed, want) {
-			t.Errorf("renames %q, want %q", renamed, want)
-		}
-		if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
-			t.Errorf("poster.jpg = %q", got)
-		}
-		onlyNames(t, dir, "poster.jpg")
+		renamed = append(renamed, filepath.Base(oldpath)+" -> "+filepath.Base(newpath))
+		return renameNoReplace(oldpath, newpath)
 	})
-	t.Run("an existing entry is kept", func(t *testing.T) {
-		r, dir := open(t)
-		seedSeason(t, dir, "poster.jpg")
-		created, err := createOnly(r, "poster.jpg", []byte("image"))
-		if created || err != nil {
-			t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
-		}
-		assertContent(t, dir, "poster.jpg")
-		onlyNames(t, dir, "poster.jpg")
+	created, err := createOnly(r, "poster.jpg", []byte("image"))
+	if !created || err != nil {
+		t.Fatalf("createOnly = %v, %v; want created", created, err)
+	}
+	if want := []string{".poster.jpg." + tempWriter + ".drumdrop-part -> poster.jpg"}; !reflect.DeepEqual(renamed, want) {
+		t.Errorf("renames %q, want %q", renamed, want)
+	}
+	if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
+		t.Errorf("poster.jpg = %q", got)
+	}
+	assertOnlyNames(t, dir, "poster.jpg")
+}
+
+func testCreateOnlyKeepsAnExistingEntry(t *testing.T) {
+	r, dir := openTempRoot(t)
+	seedSeason(t, dir, "poster.jpg")
+	created, err := createOnly(r, "poster.jpg", []byte("image"))
+	if created || err != nil {
+		t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
+	}
+	assertContent(t, dir, "poster.jpg")
+	assertOnlyNames(t, dir, "poster.jpg")
+}
+
+func testCreateOnlyKeepsAnEntryThatAppears(t *testing.T) {
+	r, dir := openTempRoot(t)
+	stubRename(t, func(oldpath, newpath string) error {
+		seedSeason(t, dir, "poster.jpg") // the owner's, just before the rename
+		return renameNoReplace(oldpath, newpath)
 	})
-	t.Run("an entry that appears meanwhile is kept", func(t *testing.T) {
-		r, dir := open(t)
-		stubRename(t, func(oldpath, newpath string) error {
-			seedSeason(t, dir, "poster.jpg") // the owner's, just before the rename
-			return renameNoReplace(oldpath, newpath)
-		})
-		created, err := createOnly(r, "poster.jpg", []byte("image"))
-		if created || err != nil {
-			t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
-		}
-		assertContent(t, dir, "poster.jpg")
-		onlyNames(t, dir, "poster.jpg")
-	})
-	t.Run("a failed rename leaves nothing", func(t *testing.T) {
-		r, dir := open(t)
-		stubRename(t, func(string, string) error { return errors.New("injected") })
-		created, err := createOnly(r, "poster.jpg", []byte("image"))
-		if created || err == nil {
-			t.Errorf("createOnly = %v, %v; want the failure", created, err)
-		}
-		onlyNames(t, dir)
-	})
-	t.Run("a leftover part is replaced", func(t *testing.T) {
-		r, dir := open(t)
-		seedSeason(t, dir, createTempName("poster.jpg")) // this writer's crash's
-		if created, err := createOnly(r, "poster.jpg", []byte("image")); !created || err != nil {
-			t.Fatalf("createOnly = %v, %v; want created", created, err)
-		}
-		onlyNames(t, dir, "poster.jpg")
-		if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
-			t.Errorf("poster.jpg = %q", got)
-		}
-	})
+	created, err := createOnly(r, "poster.jpg", []byte("image"))
+	if created || err != nil {
+		t.Errorf("createOnly = %v, %v; want nothing created, no error", created, err)
+	}
+	assertContent(t, dir, "poster.jpg")
+	assertOnlyNames(t, dir, "poster.jpg")
+}
+
+func testCreateOnlyFailedRenameLeavesNothing(t *testing.T) {
+	r, dir := openTempRoot(t)
+	stubRename(t, func(string, string) error { return errors.New("injected") })
+	created, err := createOnly(r, "poster.jpg", []byte("image"))
+	if created || err == nil {
+		t.Errorf("createOnly = %v, %v; want the failure", created, err)
+	}
+	assertOnlyNames(t, dir)
+}
+
+func testCreateOnlyReplacesALeftoverPart(t *testing.T) {
+	r, dir := openTempRoot(t)
+	seedSeason(t, dir, createTempName("poster.jpg")) // this writer's crash's
+	if created, err := createOnly(r, "poster.jpg", []byte("image")); !created || err != nil {
+		t.Fatalf("createOnly = %v, %v; want created", created, err)
+	}
+	assertOnlyNames(t, dir, "poster.jpg")
+	if got := readFile(filepath.Join(dir, "poster.jpg")); got != "image" {
+		t.Errorf("poster.jpg = %q", got)
+	}
 }
 
 // TestCreateOnlyNeverPublishesAnotherWritersFile pins that two writers of one
@@ -407,64 +422,100 @@ func withPoster(dl *fakeDownloader) {
 // "<episode base> [Label].jpg" and ".nfo", are there before either video.
 func TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo(t *testing.T) {
 	for _, song := range []bool{false, true} {
-		t.Run(fmt.Sprintf("song=%v", song), func(t *testing.T) {
-			w, store, dl, res, _, lib, season := artWorker(t)
-			if song {
-				res.docs[100].Soundslice = []musora.SoundsliceRef{{Slug: "1"}}
-			}
-			withPoster(dl)
-			show := filepath.Join(lib, "Beginner Course")
-			base := filepath.Join(season, sameTitleBase)
-			videos := 0
-			stubRename(t, func(oldpath, newpath string) error {
-				if strings.HasSuffix(newpath, ".mp4") {
-					videos++
-					before := []string{filepath.Join(show, "tvshow.nfo"), filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), base + ".jpg", base + ".nfo", base + ".en.vtt"}
-					if song {
-						before = []string{before[0], before[1], before[2],
-							base + " [Drumless].jpg", base + " [Drumless].nfo", base + " [Original].jpg", base + " [Original].nfo"}
-					}
-					for _, p := range before {
-						if _, err := os.Lstat(p); err != nil {
-							t.Errorf("%s placed before %s", filepath.Base(newpath), p)
-						}
-					}
-				}
-				return renameNoReplace(oldpath, newpath)
-			})
-			if _, err := w.RunOnce(context.Background(), 0); err != nil {
-				t.Fatalf("RunOnce: %v", err)
-			}
-			if want := map[bool]int{false: 1, true: 2}[song]; videos != want {
-				t.Fatalf("%d videos placed, want %d", videos, want)
-			}
-			if got := readFile(filepath.Join(show, "poster.jpg")); got != "jpeg:"+artHeader {
-				t.Errorf("poster.jpg = %q, want the course's square header", got)
-			}
-			if got := readFile(filepath.Join(show, "fanart.jpg")); got != "jpeg:"+artThumb {
-				t.Errorf("fanart.jpg = %q, want the course's thumbnail", got)
-			}
-			nfo := readFile(filepath.Join(show, "tvshow.nfo"))
-			for _, want := range []string{"<tvshow>", "<title>Beginner Course</title>", "<plot>A course.</plot>", `<uniqueid type="musora" default="true">4242</uniqueid>`} {
-				if !strings.Contains(nfo, want) {
-					t.Errorf("tvshow.nfo lacks %s:\n%s", want, nfo)
-				}
-			}
-			assertExist(t, false, base+"-poster.jpg")
-			rec := onlyRecord(t, store)
-			image := "Beginner Course/Season 01/" + sameTitleBase + ".jpg"
-			if song {
-				image = "Beginner Course/Season 01/" + sameTitleBase + " [Original].jpg"
-			}
-			if !slices.Contains(rec.entries, image) {
-				t.Errorf("record %v does not name the episode image %s", rec.entries, image)
-			}
-			for _, e := range rec.entries {
-				if !strings.HasPrefix(e, "Beginner Course/Season 01/") {
-					t.Errorf("record names %q, a show-level file", e)
-				}
-			}
-		})
+		t.Run(fmt.Sprintf("song=%v", song), func(t *testing.T) { checkShowFilesBeforeTheVideo(t, song) })
+	}
+}
+
+// checkShowFilesBeforeTheVideo is TestPlexTVPlacementWritesTheShowFilesBeforeTheVideo
+// for lesson 100 as a song or not.
+func checkShowFilesBeforeTheVideo(t *testing.T, song bool) {
+	w, store, dl, res, _, lib, season := artWorker(t)
+	if song {
+		res.docs[100].Soundslice = []musora.SoundsliceRef{{Slug: "1"}}
+	}
+	withPoster(dl)
+	show := filepath.Join(lib, "Beginner Course")
+	base := filepath.Join(season, sameTitleBase)
+	before := []string{filepath.Join(show, "tvshow.nfo"), filepath.Join(show, "poster.jpg"), filepath.Join(show, "fanart.jpg"), base + ".jpg", base + ".nfo", base + ".en.vtt"}
+	if song {
+		before = []string{before[0], before[1], before[2],
+			base + " [Drumless].jpg", base + " [Drumless].nfo", base + " [Original].jpg", base + " [Original].nfo"}
+	}
+	videos := countVideosPlacedAfter(t, before)
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if want := map[bool]int{false: 1, true: 2}[song]; *videos != want {
+		t.Fatalf("%d videos placed, want %d", *videos, want)
+	}
+	assertCourseShowFiles(t, show)
+	assertExist(t, false, base+"-poster.jpg")
+	image := "Beginner Course/Season 01/" + sameTitleBase + ".jpg"
+	if song {
+		image = "Beginner Course/Season 01/" + sameTitleBase + " [Original].jpg"
+	}
+	assertRecordNamesTheEpisodeImage(t, store, image)
+}
+
+// countVideosPlacedAfter stubs the rename so that placing a video (".mp4")
+// fails the test unless every path in before is there already; it returns
+// the count of videos placed.
+func countVideosPlacedAfter(t *testing.T, before []string) *int {
+	t.Helper()
+	videos := 0
+	stubRename(t, func(oldpath, newpath string) error {
+		if strings.HasSuffix(newpath, ".mp4") {
+			videos++
+			assertPlacedBefore(t, filepath.Base(newpath), before)
+		}
+		return renameNoReplace(oldpath, newpath)
+	})
+	return &videos
+}
+
+// assertPlacedBefore fails unless every path in before is there as video is
+// placed.
+func assertPlacedBefore(t *testing.T, video string, before []string) {
+	t.Helper()
+	for _, p := range before {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s placed before %s", video, p)
+		}
+	}
+}
+
+// assertCourseShowFiles fails unless the show folder show holds the course's
+// (courseDoc's) poster, background and tvshow.nfo, the show named
+// "Beginner Course" after node 4242.
+func assertCourseShowFiles(t *testing.T, show string) {
+	t.Helper()
+	if got := readFile(filepath.Join(show, "poster.jpg")); got != "jpeg:"+artHeader {
+		t.Errorf("poster.jpg = %q, want the course's square header", got)
+	}
+	if got := readFile(filepath.Join(show, "fanart.jpg")); got != "jpeg:"+artThumb {
+		t.Errorf("fanart.jpg = %q, want the course's thumbnail", got)
+	}
+	nfo := readFile(filepath.Join(show, "tvshow.nfo"))
+	for _, want := range []string{"<tvshow>", "<title>Beginner Course</title>", "<plot>A course.</plot>", `<uniqueid type="musora" default="true">4242</uniqueid>`} {
+		if !strings.Contains(nfo, want) {
+			t.Errorf("tvshow.nfo lacks %s:\n%s", want, nfo)
+		}
+	}
+}
+
+// assertRecordNamesTheEpisodeImage fails unless the only recorded download
+// names the episode image image, and names nothing outside the season
+// folder (never a show-level file).
+func assertRecordNamesTheEpisodeImage(t *testing.T, store *fakeWorkerStore, image string) {
+	t.Helper()
+	rec := onlyRecord(t, store)
+	if !slices.Contains(rec.entries, image) {
+		t.Errorf("record %v does not name the episode image %s", rec.entries, image)
+	}
+	for _, e := range rec.entries {
+		if !strings.HasPrefix(e, "Beginner Course/Season 01/") {
+			t.Errorf("record names %q, a show-level file", e)
+		}
 	}
 }
 
@@ -559,19 +610,7 @@ func TestEnsureShowFilesFillsTheShowsAlreadyInTheLibrary(t *testing.T) {
 		filepath.Join(lib, "Groove Course"):   {"poster.jpg": "jpeg:" + artCoach, "fanart.jpg": "jpeg:" + artThumb},
 		filepath.Join(lib, "Mike Johnston"):   {"poster.jpg": "jpeg:" + artCoach},
 	} {
-		names := []string{"tvshow.nfo"}
-		for n := range want {
-			names = append(names, n)
-		}
-		slices.Sort(names)
-		if got := showFileNames(t, dir); !reflect.DeepEqual(got, names) {
-			t.Errorf("%s holds %v, want %v", dir, got, names)
-		}
-		for n, body := range want {
-			if got := readFile(filepath.Join(dir, n)); got != body {
-				t.Errorf("%s/%s = %q, want %q", dir, n, got, body)
-			}
-		}
+		assertShowImages(t, dir, want)
 	}
 	for dir, title := range map[string]string{"Beginner Course": "Beginner Course", "Groove Course": "Groove Course", "Mike Johnston": "Mike Johnston"} {
 		if nfo := readFile(filepath.Join(lib, dir, "tvshow.nfo")); !strings.Contains(nfo, "<title>"+title+"</title>") {
@@ -591,6 +630,25 @@ func TestEnsureShowFilesFillsTheShowsAlreadyInTheLibrary(t *testing.T) {
 	w.EnsureShowFiles(context.Background())
 	if len(res.asked()) != asked || len(img.fetched()) != fetched {
 		t.Errorf("a cycle over complete shows asked %v and fetched %v more", res.asked()[asked:], img.fetched()[fetched:])
+	}
+}
+
+// assertShowImages fails unless the show folder dir holds exactly the images
+// want names (name -> content) and a tvshow.nfo.
+func assertShowImages(t *testing.T, dir string, want map[string]string) {
+	t.Helper()
+	names := []string{"tvshow.nfo"}
+	for n := range want {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	if got := showFileNames(t, dir); !reflect.DeepEqual(got, names) {
+		t.Errorf("%s holds %v, want %v", dir, got, names)
+	}
+	for n, body := range want {
+		if got := readFile(filepath.Join(dir, n)); got != body {
+			t.Errorf("%s/%s = %q, want %q", dir, n, got, body)
+		}
 	}
 }
 
@@ -713,87 +771,97 @@ func twoShows(t *testing.T, w *Worker, store *fakeWorkerStore, res *countingReso
 // server out of reach stops the step until the next cycle, writing nothing
 // and leaving no part of a file.
 func TestShowFilesWhenAFetchFails(t *testing.T) {
-	t.Run("gone", func(t *testing.T) {
-		w, store, res, img, lib := backfillWorker(t)
-		first, _ := twoShows(t, w, store, res, lib)
-		img.errs = map[string]error{artHeader: fmt.Errorf("%w: GET 404", musora.ErrImageMissing)}
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "tvshow.nfo"}) {
-			t.Errorf("show folder holds %v, want the background and the nfo", got)
+	t.Run("gone", testShowFilesWhenAnImageIsGone)
+	t.Run("for now", testShowFilesWhenAFetchFailsForNow)
+	t.Run("out of reach", testShowFilesWhenTheImageServerIsOutOfReach)
+	t.Run("no scheme", testShowFilesWhenAnImageURLHasNoScheme)
+	t.Run("Musora out of reach", testShowFilesWhenMusoraIsOutOfReach)
+}
+
+func testShowFilesWhenAnImageIsGone(t *testing.T) {
+	w, store, res, img, lib := backfillWorker(t)
+	first, _ := twoShows(t, w, store, res, lib)
+	img.errs = map[string]error{artHeader: fmt.Errorf("%w: GET 404", musora.ErrImageMissing)}
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "tvshow.nfo"}) {
+		t.Errorf("show folder holds %v, want the background and the nfo", got)
+	}
+}
+
+func testShowFilesWhenAFetchFailsForNow(t *testing.T) {
+	w, store, res, img, lib := backfillWorker(t)
+	first, _ := twoShows(t, w, store, res, lib)
+	img.errs = map[string]error{artHeader: errors.New("GET 503")}
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
+		t.Errorf("show folder holds %v, want the background only", got)
+	}
+	img.errs = nil
+	before := len(img.fetched())
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
+		t.Errorf("show folder holds %v after a retry, want all three", got)
+	}
+	if got := img.fetched()[before:]; !reflect.DeepEqual(got, []string{artHeader}) {
+		t.Errorf("the retry fetched %v, want the poster only", got)
+	}
+}
+
+func testShowFilesWhenTheImageServerIsOutOfReach(t *testing.T) {
+	w, store, res, img, lib := backfillWorker(t)
+	first, second := twoShows(t, w, store, res, lib)
+	img.errs = map[string]error{artHeader: fmt.Errorf("%w: dial tcp: timeout", musora.ErrUnreachable)}
+	w.EnsureShowFiles(context.Background())
+	for _, dir := range []string{first, second} {
+		if got := showFileNames(t, dir); len(got) != 0 {
+			t.Errorf("%s holds %v, want nothing", dir, got)
 		}
-	})
-	t.Run("for now", func(t *testing.T) {
-		w, store, res, img, lib := backfillWorker(t)
-		first, _ := twoShows(t, w, store, res, lib)
-		img.errs = map[string]error{artHeader: errors.New("GET 503")}
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
-			t.Errorf("show folder holds %v, want the background only", got)
-		}
-		img.errs = nil
-		before := len(img.fetched())
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
-			t.Errorf("show folder holds %v after a retry, want all three", got)
-		}
-		if got := img.fetched()[before:]; !reflect.DeepEqual(got, []string{artHeader}) {
-			t.Errorf("the retry fetched %v, want the poster only", got)
-		}
-	})
-	t.Run("out of reach", func(t *testing.T) {
-		w, store, res, img, lib := backfillWorker(t)
-		first, second := twoShows(t, w, store, res, lib)
-		img.errs = map[string]error{artHeader: fmt.Errorf("%w: dial tcp: timeout", musora.ErrUnreachable)}
-		w.EnsureShowFiles(context.Background())
-		for _, dir := range []string{first, second} {
-			if got := showFileNames(t, dir); len(got) != 0 {
-				t.Errorf("%s holds %v, want nothing", dir, got)
-			}
-		}
-		if slices.Contains(res.asked(), 5555) || slices.Contains(img.fetched(), artSquare) {
-			t.Errorf("asked %v, fetched %v: the step went on", res.asked(), img.fetched())
-		}
-		img.errs = nil
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
-			t.Errorf("the next cycle left %v in the song's show, want its poster and nfo", got)
-		}
-	})
-	t.Run("no scheme", func(t *testing.T) {
-		// The error the real client gives an image URL with no scheme (Musora
-		// writing its URLs another way): not final, and not out of reach.
-		_, noScheme := musora.FetchJPEG(context.Background(), "cdn.sanity.io/images/p/d/header-4500x4500.png")
-		if noScheme == nil {
-			t.Fatal("FetchJPEG fetched a URL with no scheme")
-		}
-		w, store, res, img, lib := backfillWorker(t)
-		first, second := twoShows(t, w, store, res, lib)
-		img.errs = map[string]error{artHeader: noScheme}
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
-			t.Errorf("show folder holds %v, want the background only (no tvshow.nfo)", got)
-		}
-		if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
-			t.Errorf("the next show holds %v, want its poster and nfo", got)
-		}
-		if w.showOffline() {
-			t.Error("the show-file step was stopped for the cycle")
-		}
-		img.errs = nil
-		w.EnsureShowFiles(context.Background())
-		if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
-			t.Errorf("show folder holds %v after a later cycle, want all three", got)
-		}
-	})
-	t.Run("Musora out of reach", func(t *testing.T) {
-		w, store, res, _, lib := backfillWorker(t)
-		twoShows(t, w, store, res, lib)
-		res.errs = map[int]error{4242: &url.Error{Op: "Post", URL: "https://sanity", Err: errors.New("no route")}}
-		w.EnsureShowFiles(context.Background())
-		if slices.Contains(res.asked(), 5555) {
-			t.Errorf("asked %v: the step went on", res.asked())
-		}
-	})
+	}
+	if slices.Contains(res.asked(), 5555) || slices.Contains(img.fetched(), artSquare) {
+		t.Errorf("asked %v, fetched %v: the step went on", res.asked(), img.fetched())
+	}
+	img.errs = nil
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
+		t.Errorf("the next cycle left %v in the song's show, want its poster and nfo", got)
+	}
+}
+
+func testShowFilesWhenAnImageURLHasNoScheme(t *testing.T) {
+	// The error the real client gives an image URL with no scheme (Musora
+	// writing its URLs another way): not final, and not out of reach.
+	_, noScheme := musora.FetchJPEG(context.Background(), "cdn.sanity.io/images/p/d/header-4500x4500.png")
+	if noScheme == nil {
+		t.Fatal("FetchJPEG fetched a URL with no scheme")
+	}
+	w, store, res, img, lib := backfillWorker(t)
+	first, second := twoShows(t, w, store, res, lib)
+	img.errs = map[string]error{artHeader: noScheme}
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg"}) {
+		t.Errorf("show folder holds %v, want the background only (no tvshow.nfo)", got)
+	}
+	if got := showFileNames(t, second); !reflect.DeepEqual(got, []string{"poster.jpg", "tvshow.nfo"}) {
+		t.Errorf("the next show holds %v, want its poster and nfo", got)
+	}
+	if w.showOffline() {
+		t.Error("the show-file step was stopped for the cycle")
+	}
+	img.errs = nil
+	w.EnsureShowFiles(context.Background())
+	if got := showFileNames(t, first); !reflect.DeepEqual(got, []string{"fanart.jpg", "poster.jpg", "tvshow.nfo"}) {
+		t.Errorf("show folder holds %v after a later cycle, want all three", got)
+	}
+}
+
+func testShowFilesWhenMusoraIsOutOfReach(t *testing.T) {
+	w, store, res, _, lib := backfillWorker(t)
+	twoShows(t, w, store, res, lib)
+	res.errs = map[int]error{4242: &url.Error{Op: "Post", URL: "https://sanity", Err: errors.New("no route")}}
+	w.EnsureShowFiles(context.Background())
+	if slices.Contains(res.asked(), 5555) {
+		t.Errorf("asked %v: the step went on", res.asked())
+	}
 }
 
 // TestShowFileLogQuotesTheImageURL pins that an image URL from Musora is
