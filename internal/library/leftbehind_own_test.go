@@ -77,22 +77,30 @@ func TestLeftBehindAsksForTheLessonsOwnFiles(t *testing.T) {
 	} {
 		for _, recorded := range []bool{true, false} {
 			t.Run(c.name+"/recorded="+strconv.FormatBool(recorded), func(t *testing.T) {
-				_, lib, oldSeason := movedLibrary(t)
-				if c.old != nil {
-					seedSeason(t, oldSeason, c.old...)
-				}
-				if c.new != nil {
-					seedSeason(t, filepath.Join(lib, "Show", "Season 01"), c.new...)
-				}
-				dir, got, err := leftBehind(t, lib, leftBehindRow(oldSeason, recorded))
-				if err != nil || got != c.want {
-					t.Fatalf("LeftBehind = %q, %v, %v; want %v, no error", dir, got, err, c.want)
-				}
-				if got && dir != oldSeason {
-					t.Errorf("LeftBehind named %q, want the recorded folder %q", dir, oldSeason)
-				}
+				checkOwnFilesLeftBehind(t, c.old, c.new, recorded, c.want)
 			})
 		}
+	}
+}
+
+// checkOwnFilesLeftBehind runs one TestLeftBehindAsksForTheLessonsOwnFiles
+// case: inOld and inNew are the names in the old and in the new season folder
+// (nil: that folder is not there).
+func checkOwnFilesLeftBehind(t *testing.T, inOld, inNew []string, recorded, want bool) {
+	t.Helper()
+	_, lib, oldSeason := movedLibrary(t)
+	if inOld != nil {
+		seedSeason(t, oldSeason, inOld...)
+	}
+	if inNew != nil {
+		seedSeason(t, filepath.Join(lib, "Show", "Season 01"), inNew...)
+	}
+	dir, got, err := leftBehind(t, lib, leftBehindRow(oldSeason, recorded))
+	if err != nil || got != want {
+		t.Fatalf("LeftBehind = %q, %v, %v; want %v, no error", dir, got, err, want)
+	}
+	if got && dir != oldSeason {
+		t.Errorf("LeftBehind named %q, want the recorded folder %q", dir, oldSeason)
 	}
 }
 
