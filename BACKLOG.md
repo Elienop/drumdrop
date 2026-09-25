@@ -1309,14 +1309,15 @@ D53 waits on an owner decision.
     One is accessibility: `ProgressRow` uses a `progressbar` role instead of `<progress>`
     (S6819). Branch `fix/sonar-gate-and-coverage` fixes the five that `main`'s gate counts as
     new code: three `go:S3776`, `StatusBadge`'s props, and `Dashboard.tsx`'s focusable span
-    (S6845, which was the one reliability issue). So 38 should remain after its release.
+    (S6845, which was the one reliability issue), and the 4 in `web/src/test/` (D30). Its
+    branch scan at `96eed52` has 34 open (*moves*), so 34 should remain after its release.
   - *Why:* the owner's standing rule is that Sonar findings get fixed: no false-positive
     marking, no rule deactivation, no custom profile (decisions #3 in the vault). The
     accessibility finding is a real problem for screen-reader users. Leaving the rest open
     also costs the gate. An older issue on a line a PR changes counts as new code, which is how
     v0.8.0's scan got `new_violations` 5.
   - *Evidence:* `sonar-issues --all` (read-only)
-  - *Detail:* vault note drumdrop-sonarqube. The 4 findings in `web/src/test/` wait on D30.
+  - *Detail:* vault note drumdrop-sonarqube.
 
 - **D13 · Status colours bypass the design tokens.**
   - *What:* `web/src/index.css` defines the shadcn base tokens (including `--destructive`)
@@ -1472,11 +1473,14 @@ D53 waits on an owner decision.
     @vitejs/plugin-react 4 → 6. Nothing tracks this automatically (D31).
   - *Why:* dev-only advisories don't ship to users, but they run on the developer machine and
     in CI, and the longer the majors wait, the bigger the eventual jump. Coverage (D18) runs on
-    vitest 2.1: `@vitest/coverage-v8` is pinned to 2.1.9, which peers exactly vitest 2.1.9, and
-    `vitest-sonar-reporter` to 2.0.4 (its 3.x needs vitest 3). A vitest upgrade moves all three
-    together. `npm audit` also lists `@vitest/coverage-v8` as critical, through vitest's own
-    advisory.
-  - *Evidence:* `cd web && npm audit` · `cd web && npm outdated`
+    vitest 2.1: `@vitest/coverage-v8` is pinned to 2.1.9, which peers exactly vitest 2.1.9, so a
+    vitest upgrade moves both together. `npm audit` also lists `@vitest/coverage-v8` as
+    critical, through vitest's own advisory. That coverage also reports line 1 of a module that
+    imports anything as never run (46 of 51 files on 2026-09-25, *moves*), so a new file's
+    first line counts against new-code coverage. Whether a newer `@vitest/coverage-v8` fixes
+    it is unchecked.
+  - *Evidence:* `cd web && npm audit` · `cd web && npm outdated` · after `make coverage`,
+    `awk '/^SF:/{f=$0} /^DA:1,0$/{print f}' web/coverage/lcov.info | wc -l`
 
 - **D20 · `make test` is weaker than CI.**
   - *What:* `make test` is `go test ./...`, which is cached and runs without `-race`. CI runs
@@ -1763,13 +1767,14 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     `gh release list -R mathieudutour/github-tag-action --limit 3`
 
 - **D29 · Keep `web/src/components/ui/**` out of SonarQube?**
-  - *What:* the 13 vendored shadcn primitives are excluded from analysis. SpenDrop's test is
-    that an edited primitive has become our code and should be analysed. SpenDrop analyses
-    its copy for that reason (more than half of its primitives had been edited); MusicDrop
-    excludes its folder. Here, one file is edited: `sonner.tsx`. In PR #6, commit `5f1541c`
-    removed its theme lookup (next-themes) and hardcoded `theme="dark"`, because the app is
-    dark-only (the comment at the top of the file). In their PRs' own commits the other 12
-    were added once and never changed.
+  - *What:* the 14 vendored shadcn primitives (plus `sonner.test.tsx`) are excluded from
+    analysis. SpenDrop's test is that an edited primitive has become our code and should be
+    analysed. SpenDrop analyses its copy for that reason (more than half of its primitives
+    had been edited); MusicDrop excludes its folder. Here, 9 of the 14 now carry a
+    `LOCAL EDIT` comment: alert-dialog, badge, button, checkbox, dialog, input, select,
+    sonner and tabs (*moves*). The first was `sonner.tsx`: in PR #6, commit `5f1541c` removed
+    its theme lookup (next-themes) and hardcoded `theme="dark"`, because the app is dark-only.
+    When this entry was first written, that was the only edit.
   - *How to check, and how not to:* `git log` on main can't show an edit like that. PRs are
     squash-merged, so main has one "added" line per file and hides whatever happened on the
     PR branch. That is how this board and `sonar-project.properties` first said "none has
@@ -1777,28 +1782,22 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     shadcn registry. The registry diff is the stronger check, because it also catches an edit
     made before a file's first commit; it hasn't been run.
   - *Options:* (a) keep excluding the whole folder, accepting that one edited file goes
-    unanalysed. (b) exclude only the 12 unedited files by name and let Sonar analyse
-    `sonner.tsx`. (c) analyse the whole folder, SpenDrop's choice.
-  - *To weigh:* (b) applies SpenDrop's test exactly, but the list of 12 then has to be updated
+    unanalysed. (b) exclude only the unedited files by name (5 today) and let Sonar analyse
+    the edited ones. (c) analyse the whole folder, SpenDrop's choice.
+  - *To weigh:* (b) applies SpenDrop's test exactly, but the list then has to be updated
     by hand whenever a primitive is edited or added. (c) needs no list, but under decisions #3
     every finding in vendored code then has to be fixed, not marked.
   - *Why it's the owner's:* what Sonar sees is the owner's call under decisions #3. The reason
-    and the check are written in `sonar-project.properties`.
-  - *Evidence:* `gh api repos/elienop/drumdrop/pulls/6/commits --jq '.[].sha'`, then
+    and the check are written in `sonar-project.properties`. The owner's 2026-09-25 ruling on
+    coverage (decisions #75, *"no work around sonarqube find fixes instead"*) may bear on it;
+    whether it also covers what Sonar analyses is the owner's to say.
+  - *Evidence:* `grep -l "LOCAL EDIT" web/src/components/ui/*` ·
+    `gh api repos/elienop/drumdrop/pulls/6/commits --jq '.[].sha'`, then
     `gh api repos/elienop/drumdrop/commits/<sha> --jq '.files[].filename'` for each; the
     folder came in through #6, #8 and #11 ·
     `gh api repos/elienop/drumdrop/commits/5f1541c --jq '.files[] | select(.filename|endswith("sonner.tsx")) | .patch'` ·
     not `git log -- web/src/components/ui` on main, which shows only `A` lines whatever
     happened on the PR branches
-
-- **D30 · The 5 SonarQube findings in `web/src/test/`: fix them, or exclude the folder?**
-  - *What:* `msw.ts` and `setup.ts` are test infrastructure, but Sonar analyses them as source,
-    and they carry 5 open findings.
-  - *Options:* (a) fix the 5 and add `web/src/test/**` only to `sonar.coverage.exclusions`
-    (MusicDrop's pattern). This is the recommended one. (b) Add the folder to
-    `sonar.exclusions` (SpenDrop's pattern). That makes the 5 disappear without fixing them,
-    which decisions #3 treats as hiding code from the rules.
-  - *Evidence:* `sonar-issues --all | grep web/src/test`
 
 - **D31 · Turn on Dependabot and vulnerability alerts?**
   - *What:* there's no `.github/dependabot.yml`, and the repo's vulnerability alerts are off
@@ -1986,18 +1985,36 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of
     `main`, the first with new code since v0.7.1, failed the gate's new-code coverage condition
     (0 against 80), and would have failed it on every release.
-  - *Now:* `make coverage` writes:
-    - the Go cover profile and the `go test -json` stream;
-    - vitest's v8 lcov;
-    - a Generic Test Execution report (`vitest-sonar-reporter`).
+  - *Now:* `make coverage` writes three reports: the Go cover profile (`coverage.out`), the
+    `go test -json` stream (`go-test-report.json`) and vitest's v8 lcov
+    (`web/coverage/lcov.info`). `sonar-scan` runs it before each upload, and a failing test
+    fails it. `sonar-project.properties` names the three files and excludes nothing from
+    coverage: the owner's ruling on 2026-09-25 (decisions #75) was *"no work around sonarqube
+    find fixes instead"*. So the code that was hard to test was made testable:
+    - `main` hands the command line to `run(args, stdout, stderr)`, which the tests drive;
+      only `main()`'s own `os.Exit` line is left unrun;
+    - the Musora test fake (`internal/musora/musoratest`) has tests of its own;
+    - the vitest setup moved into `web/src/test/jsdom-shims.ts` and `msw.ts`, which coverage
+      sees (it leaves setup files out), and installs the same stand-ins on every Node (D30).
 
-    `sonar-scan` runs it before each upload, and a failing test fails it.
-    `sonar-project.properties` names the four files. It excludes from coverage only what no
-    unit test can run: `cmd/drumdrop/main.go`, `web/src/main.tsx` and `web/vite.config.ts`,
-    each with its reason. Every plain `vitest run` also writes the gitignored
-    `web/coverage/sonar-report.xml`. It runs on vitest 2.1 (see D17 for the pins).
-  - *Evidence:* `make coverage` ·
-    `grep -n 'reportPaths\|coverage.exclusions' sonar-project.properties`
+    `web/src/main.tsx` and `web/vite.config.ts` stay uncovered, and are counted as such. It
+    runs on vitest 2.1 (see D17 for the pin).
+  - *Measured:* at `9efb083`, the source lines this branch changed are 171/173 lines and 32/32
+    branch conditions covered (99.0%), not counting `web/vite.config.ts` and
+    `web/src/test/setup.ts`, which lcov does not list. The gate's own figure comes from the
+    next release's scan of `main` (D19).
+  - *Evidence:* `make coverage` · `grep -n 'reportPaths\|exclusions' sonar-project.properties`
+    (no `coverage.exclusions`)
+- **D30 · The findings in `web/src/test/` are fixed, not excluded.** Branch
+  `fix/sonar-gate-and-coverage`. The owner's ruling on 2026-09-25 (decisions #75): *"no work
+  around sonarqube find fixes instead"*.
+  - *Was:* `msw.ts` and `setup.ts` carried open findings (4 at v0.8.0), and the recommended
+    option was to add `web/src/test/**` to `sonar.coverage.exclusions`.
+  - *Now:* the findings are fixed, and the folder is analysed and covered like any other
+    source. `setup.ts` only imports `jsdom-shims.ts` and `msw.ts`, and each of those has its
+    own test file. Every stub installs unconditionally, so the tests (and the coverage) are
+    the same on CI's Node 20 and on a newer local Node.
+  - *Evidence:* `sonar-issues --all | grep web/src/test` (nothing) · `ls web/src/test`
 - **D19 · `main` rescanned at v0.8.0.** No PR, since a scan writes only to the Sonar server. The
   owner's OK on 2026-09-25: *"Yes, right after the merge"*.
   - *Was:* one analysis, of `1c2dbda` (v0.7.1) on 2026-08-15: 67 open, under older rule sets.
