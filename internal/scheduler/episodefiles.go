@@ -115,14 +115,14 @@ func (w *Worker) renameDone(id int, mark bool) bool {
 // row as the store now has it when the pass changed its record, else nil.
 func (w *Worker) renameRow(ctx context.Context, lib *os.Root, c *library.Claims, row database.Lesson) *database.Lesson {
 	entries, recorded, err := library.Record(row)
-	switch {
-	case err != nil:
-		w.renameDone(row.RailcontentID, true)
-		return nil
-	case recorded:
+	if err == nil && recorded {
 		return w.renameRecorded(ctx, lib, c, row, entries)
-	case !row.OutputDir.Valid || !library.IsSeasonDir(row.OutputDir.String):
-		w.renameDone(row.RailcontentID, true) // not in a season folder: nothing of plex-tv's
+	}
+	// A damaged record (which NewClaims already refused, so the pass never
+	// gets here with one), or a legacy row not in a season folder (nothing of
+	// plex-tv's): nothing to rename.
+	if err != nil || !row.OutputDir.Valid || !library.IsSeasonDir(row.OutputDir.String) {
+		w.renameDone(row.RailcontentID, true)
 		return nil
 	}
 	return w.recordLegacy(ctx, lib, c, row)
