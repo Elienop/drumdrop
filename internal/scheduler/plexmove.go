@@ -336,19 +336,23 @@ type seasonPrevious struct {
 // setAside is step 2 of moveToLibraryPlexTV for the entries remove, the
 // lesson's previous download by its record: one at one of this episode's
 // names is left to step 3 (ours, which also holds every entry of remove,
-// says it is the lesson's own); one at this episode's base that no step
-// places at stays, and stays the lesson's (stays); a folder the download does
+// says it is the lesson's own); an image or nfo under a name earlier
+// versions gave it is set aside as replaced (replacedByVersion), unless the
+// lesson's own plain video stays (ownVideoStays), whose files they are; one
+// at this episode's base that no step places at stays, and stays the
+// lesson's (stays); a folder the download does
 // not fully bring back stays, no longer recorded (kept); any other is set
 // aside. An error means the move must fail.
 func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[string]bool, kept []keptFolder, stays []string, err error) {
 	ours = make(map[string]bool, len(remove))
+	videoStays := s.ownVideoStays(remove)
 	for _, p := range remove {
 		ours[p] = true
 		if dst := placedAt(p, s.plan.steps); dst != "" {
 			ours[dst] = true
 			continue
 		}
-		if s.replacedByVersion(p) {
+		if !videoStays && s.replacedByVersion(p) {
 			if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
 				return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
 			}
@@ -367,6 +371,21 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 		}
 	}
 	return ours, kept, stays, nil
+}
+
+// ownVideoStays reports whether the lesson's own plain video,
+// "<episode base>.mp4", stays where it is: remove (its record) names it, it
+// is in the season folder, and no step places anything there. Musora calls
+// the lesson a song now while its record is an ordinary lesson's; that video
+// is not brought back, and is kept (owner ruling #72: a re-download keeps
+// what it did not bring back). Its image and nfo, "<base>.jpg" and
+// "<base>.nfo", then stay with it (Plex reads them only under the video's
+// own name), never retired as replaced by the versions' own.
+func (s seasonPrevious) ownVideoStays(remove []string) bool {
+	name := s.plan.episodeBase + ".mp4"
+	p := filepath.Join(filepath.Clean(s.seasonDir), name)
+	isDir, there := s.listing[name]
+	return there && !isDir && slices.Contains(remove, p) && placedAt(p, s.plan.steps) == ""
 }
 
 // replacedByVersion reports whether p, an entry the lesson's record names,

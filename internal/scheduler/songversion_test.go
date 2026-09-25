@@ -358,3 +358,41 @@ func TestAKeptVersionKeepsItsFilesBesideTheLessonsOwnVideo(t *testing.T) {
 	}
 	assertRecordIs(t, store, season, append(append(append([]string(nil), own...), versions...), base+" resources")...)
 }
+
+// TestALessonNowASongKeepsItsOwnVideosFiles pins the other direction of
+// Musora's song flag: a lesson recorded as an ordinary one ("<base>.mp4",
+// "<base>.nfo", "<base>.jpg") that Musora now calls a song keeps its plain
+// video (the re-download does not bring it back, and never deletes a video on
+// a guess), and that video keeps its own image and nfo, still recorded: Plex
+// reads them only under the video's own name. The versions the re-download
+// brings get theirs beside it.
+func TestALessonNowASongKeepsItsOwnVideosFiles(t *testing.T) {
+	const base = sameTitleBase
+	w, store, _, season := songWorker(t, true)
+	own := []string{base + ".mp4", base + ".nfo", base + ".jpg"}
+	seedSeason(t, season, own...)
+	prev := recordedRow(100, season, own...)
+	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+	prev.VideoPath = sql.NullString{String: filepath.Join(season, base+".mp4"), Valid: true}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, season, own...)
+	videos := versionNames(base, ".mp4", "Drumless", "Original")
+	nfos := versionNames(base, ".nfo", "Drumless", "Original")
+	images := versionNames(base, ".jpg", "Drumless", "Original")
+	for _, p := range paths(season, images...) {
+		if got := readFile(p); got != "new image" {
+			t.Errorf("%s = %q, want the song's image", filepath.Base(p), got)
+		}
+	}
+	for _, p := range paths(season, nfos...) {
+		if got := readFile(p); !strings.Contains(got, "<episodedetails>") {
+			t.Errorf("%s = %q, want the episode nfo", filepath.Base(p), got)
+		}
+	}
+	assertRecordIs(t, store, season, append(append(append(append(append([]string(nil), own...), videos...), nfos...), images...), base+" resources")...)
+}
