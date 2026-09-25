@@ -177,6 +177,27 @@ describe("focus ring everywhere", () => {
   })
 })
 
+// Owner, 2026-09-25: a focused control's border turns amber, as Inputs and
+// Selects do. The app is dark-only, and a variant's dark:border-* (the
+// outline's dark:border-input) beats the base focus-visible:border-ring:
+// same specificity, later in the built CSS. Only a dark:focus-visible
+// border class wins back. jsdom builds no CSS, so the browser pass checks
+// the colour; this keeps the class from silently going.
+describe("the focus border in the dark theme", () => {
+  const variants = ["default", "destructive", "outline", "secondary", "ghost", "link"] as const
+  const classesOf = (variant: (typeof variants)[number]) =>
+    buttonVariants({ variant }).split(/\s+/)
+
+  it("turns amber on keyboard focus on every button variant with a dark border", () => {
+    const bordered = variants.filter((v) => classesOf(v).some((c) => /^dark:border-/.test(c)))
+    // Positive control: the outline button has one, so the check is not vacuous.
+    expect(bordered).toContain("outline")
+    for (const variant of bordered) {
+      expect(classesOf(variant), variant).toContain("dark:focus-visible:border-ring")
+    }
+  })
+})
+
 // Owner's ruling (g), 2026-09-24: every control with a solid fill while
 // focused sets its ring 2px off the fill, over the page background, so the
 // amber ring never touches an amber (or red) fill and reads as a fatter
