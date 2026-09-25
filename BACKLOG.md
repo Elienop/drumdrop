@@ -1656,8 +1656,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     downloads are open-read.
   - *To weigh:* (b) or (c) removes the risk rather than managing it, because a password that
     is never stored can't leak. The web UI's Musora card says the server signs in with the
-    email and password and "saves a copy in its config folder"; (b) or (c) changes that
-    sentence too (`grep -n 'saves a copy' web/src/pages/Settings.tsx`).
+    email and password and "keeps a copy in its config folder"; (b) or (c) changes that
+    sentence too (`grep -n 'keeps a copy' web/src/pages/Settings.tsx`).
   - *Detail:* vault note drumdrop-auth-posture.
 
 - **D83 · Which 4xx does Musora send for a wrong password?**
@@ -2132,7 +2132,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     - Round 5h's corrected lines (from the round-5f/5g reviews): a season folder in the
       course folder the downloads fallback goes into counts as the library's, since the
       fallback only writes `NN - Title` folders (`inLibrary`,
-      `internal/scheduler/worker_record.go:302`; security N1, a regression from 5f:
+      `internal/scheduler/worker_record.go:358`; security N1, a regression from 5f:
       after the library root moved up from the downloads folder, a legacy season row fell
       back and its season files were claimed by no lesson); `inLibrary`'s comment states
       its rule and where it differs from `previousFolder`'s longest root (code I4); a
