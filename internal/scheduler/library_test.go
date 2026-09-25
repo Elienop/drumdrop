@@ -49,7 +49,7 @@ func seedLesson(t *testing.T) (downloadsDir, lessonDir string) {
 // placement is committed, and the downloaded folder removed, as the worker does.
 func movePlex(t *testing.T, libraryDir, show string, season, episode int, title, lessonDir string) (string, string, error) {
 	t.Helper()
-	res, err := testMovePlexTV(t, libraryDir, show, season, episode, title, lessonDir, plexLibrary{})
+	res, err := testMovePlexTV(t, libraryDir, plexEpisode{show, season, episode, title}, lessonDir, plexLibrary{})
 	return res.seasonDir, res.videoPath, err
 }
 

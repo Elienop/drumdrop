@@ -171,7 +171,7 @@ func TestCopyKeepsAFolderPlantedAtTheDestination(t *testing.T) {
 			var err error
 			if layout == LayoutPlexTV {
 				var res plexMoveResult
-				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+				res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 				moved = res.seasonDir
 			} else {

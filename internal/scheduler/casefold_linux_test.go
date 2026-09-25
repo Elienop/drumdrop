@@ -210,7 +210,7 @@ func TestPlexTVCaseOnlyTitleChangeMergesOnACaseInsensitiveDisk(t *testing.T) {
 		writeTree(t, filepath.Join(season, old+" resources"), map[string]string{"my-notes.txt": "mine"})
 		lessonDir := scratchLesson(t, tmp, 5, "Five", []string{".mp4", ".nfo"}, "resources")
 
-		res, err := testMovePlexTV(t, lib, "Show", 1, 5, "Five", lessonDir,
+		res, err := testMovePlexTV(t, lib, plexEpisode{"Show", 1, 5, "Five"}, lessonDir,
 			plexLibrary{self: recordedRow(1, season, old+".mp4", old+" resources/")})
 		if err != nil || res.seasonDir != season {
 			t.Fatalf("move = (%+v, %v)", res, err)

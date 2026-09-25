@@ -33,7 +33,7 @@ func TestPlexTVMoveThatCannotOpenTheSeasonKeepsThePreviousDownload(t *testing.T)
 	}
 	lessonDir, _, _ := seedSongScratch(t, tmp)
 
-	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir,
 		plexLibrary{self: recordedRow(1, oldSeason, prev)})
 	if err == nil {
 		t.Fatal("move = nil error, want the season folder refused")
@@ -62,7 +62,7 @@ func TestPlexTVMoveWithAnUnknownPreviousDownload(t *testing.T) {
 		seedSeason(t, season, legacyVideo)
 		self := legacyRow(1, "Even Flow", 5, season, legacyVideo)
 
-		res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: self}, self)
+		res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir, plexLibrary{self: self}, self)
 		if err == nil || !strings.Contains(err.Error(), "the previous download's library files are not known, so none were removed") {
 			t.Errorf("err = %v, want the note that the previous download is not known", err)
 		}
@@ -79,7 +79,7 @@ func TestPlexTVMoveWithAnUnknownPreviousDownload(t *testing.T) {
 		seedSeason(t, season, legacyVideo, taken)
 		self := legacyRow(1, "Even Flow", 5, season, legacyVideo)
 
-		res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: self},
+		res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir, plexLibrary{self: self},
 			self, recordedRow(2, season, taken))
 		if err == nil || res.seasonDir != "" {
 			t.Fatalf("move = (%+v, %v), want the conflict refusal", res, err)
@@ -109,7 +109,7 @@ func TestPlexTVMoveSetsNothingAsideUnlessItCanSetAll(t *testing.T) {
 
 	// The record lists old first, so it is set aside before the stale folder
 	// fails.
-	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir,
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir,
 		plexLibrary{self: recordedRow(1, season, old, stale+"/")})
 	if err == nil {
 		t.Fatal("move = nil error, want the stale entry reported")
@@ -138,7 +138,7 @@ func TestPlexTVUndoThatCannotRenameBackKeepsTheEntry(t *testing.T) {
 	})
 	makeUnreadable(t, filepath.Join(lessonDir, "05 - Even Flow [Original].mp4")) // so its copy fails
 
-	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
 	stuck := filepath.Join(season, episodeBase+" [Drumless].mp4")
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("its only copy is left at %q", stuck)) {
 		t.Errorf("err = %v, want the stuck entry named", err)
@@ -172,7 +172,7 @@ func TestPlexTVUndoThatCannotRemoveACopyKeepsIt(t *testing.T) {
 	}
 	t.Cleanup(func() { syncFile = orig; _ = os.Chmod(season, 0o755) })
 
-	res, err := testMovePlexTV(t, lib, "Songs", 1, 5, "Even Flow", lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
+	res, err := testMovePlexTV(t, lib, plexEpisode{"Songs", 1, 5, "Even Flow"}, lessonDir, plexLibrary{self: database.Lesson{RailcontentID: 1}})
 	if err == nil || res.seasonDir != "" {
 		t.Fatalf("move = (%+v, %v), want the flush failure", res, err)
 	}

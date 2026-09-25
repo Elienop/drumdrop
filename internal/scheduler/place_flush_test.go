@@ -29,7 +29,7 @@ func placeRecordingFlushes(t *testing.T, layout, dl, lib, scratch, fail string) 
 	t.Cleanup(func() { syncFile = orig })
 	if layout == LayoutPlexTV {
 		var res plexMoveResult
-		res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+		res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 			plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 		return flushed, res.seasonDir, err
 	}

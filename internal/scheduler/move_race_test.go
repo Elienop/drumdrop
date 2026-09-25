@@ -74,7 +74,7 @@ func TestMovesStayInTheLibraryUnderARace(t *testing.T) {
 		season := filepath.Join(lib, "Show", "Season 01")
 		swapBeforeFirstRename(t, season, outside)
 
-		res, err := testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+		res, err := testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 			plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 		if got := readDirNames(t, outside); len(got) != 1 {
 			t.Errorf("the move landed outside the library: %v (move = %+v, %v)", got, res, err)
@@ -164,7 +164,7 @@ func TestMovesKeepAnEntryPlantedAtTheDestination(t *testing.T) {
 				var err error
 				if layout == LayoutPlexTV {
 					var res plexMoveResult
-					res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+					res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 						plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 					moved = res.seasonDir
 				} else {
@@ -237,7 +237,7 @@ func TestEpisodeNFONeverReplacesAPlantedSymlink(t *testing.T) {
 	if err := os.Symlink(victim, filepath.Join(scratch, "05 - Five.nfo")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+	res, err := testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 		plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}, episodeNFO: []byte("<episodedetails/>")})
 	if got, _ := os.ReadFile(victim); string(got) != "victim.nfo" {
 		t.Errorf("the symlink's target was written: %q", got)
@@ -288,7 +288,7 @@ func TestMovesCopyOnlyAcrossFilesystems(t *testing.T) {
 			var err error
 			if layout == LayoutPlexTV {
 				var res plexMoveResult
-				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", scratch,
+				res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, scratch,
 					plexLibrary{self: database.Lesson{RailcontentID: 1}, roots: []string{lib, dl}})
 				moved = res.seasonDir
 			} else {

@@ -139,18 +139,27 @@ var fiveLookAlikes = map[string][]string{
 
 var fiveTitles = []string{"Five", "Five [Live]", "Five-Part Fill", "Five.5"}
 
-// testMovePlexTV runs the plex-tv move as the worker does, with the claims of
-// others (none when empty) unless pl already carries claims, reading the
-// downloaded lesson lessonDir through its parent folder. A placement is
-// committed and the downloaded folder removed, as the worker does once the
-// download is recorded; a refused move leaves lessonDir as it is.
-func testMovePlexTV(t *testing.T, libraryDir, show string, season, episode int, title, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
+// plexEpisode is where a plex-tv move files a lesson: its show, season and
+// episode number, and its title (moveToLibraryPlexTV's arguments).
+type plexEpisode struct {
+	show            string
+	season, episode int
+	title           string
+}
+
+// testMovePlexTV runs the plex-tv move of the lesson as episode ep, as the
+// worker does, with the claims of others (none when empty) unless pl already
+// carries claims, reading the downloaded lesson lessonDir through its parent
+// folder. A placement is committed and the downloaded folder removed, as the
+// worker does once the download is recorded; a refused move leaves lessonDir
+// as it is.
+func testMovePlexTV(t *testing.T, libraryDir string, ep plexEpisode, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
 	t.Helper()
-	return testMovePlexTVFrom(t, filepath.Dir(lessonDir), libraryDir, show, season, episode, title, lessonDir, pl, others...)
+	return testMovePlexTVFrom(t, filepath.Dir(lessonDir), libraryDir, ep, lessonDir, pl, others...)
 }
 
 // testMovePlexTVFrom is testMovePlexTV reading lessonDir through downloads.
-func testMovePlexTVFrom(t *testing.T, downloads, libraryDir, show string, season, episode int, title, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
+func testMovePlexTVFrom(t *testing.T, downloads, libraryDir string, ep plexEpisode, lessonDir string, pl plexLibrary, others ...database.Lesson) (plexMoveResult, error) {
 	t.Helper()
 	if pl.claims == nil {
 		c, err := library.NewClaims(libraryDir, others)
@@ -164,7 +173,7 @@ func testMovePlexTVFrom(t *testing.T, downloads, libraryDir, show string, season
 		return plexMoveResult{}, err
 	}
 	defer src.close()
-	res, err := moveToLibraryPlexTV(libraryDir, show, season, episode, title, src, pl)
+	res, err := moveToLibraryPlexTV(libraryDir, ep.show, ep.season, ep.episode, ep.title, src, pl)
 	if res.pending != nil {
 		if _, cerr := res.pending.commit(); cerr != nil {
 			t.Fatalf("commit: %v", cerr)

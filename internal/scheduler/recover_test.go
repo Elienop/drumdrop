@@ -52,7 +52,7 @@ func TestMoveRefusesALessonFolderThatIsASymlinkInsideDownloads(t *testing.T) {
 			var err error
 			if layout == LayoutPlexTV {
 				var res plexMoveResult
-				res, err = testMovePlexTVFrom(t, dl, lib, "Show", 1, 5, "Five", lessonDir, plexLibrary{})
+				res, err = testMovePlexTVFrom(t, dl, lib, plexEpisode{"Show", 1, 5, "Five"}, lessonDir, plexLibrary{})
 				if res.seasonDir != "" {
 					t.Errorf("seasonDir = %q, want none", res.seasonDir)
 				}
