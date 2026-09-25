@@ -56,33 +56,46 @@ var (
 // ends, and returns a func that lists the queries it was sent.
 func Serve(t testing.TB, c Catalog) func() []string {
 	t.Helper()
-	var mu sync.Mutex
-	var queries []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		q, err := queryOf(r)
-		if err != nil {
-			t.Errorf("musoratest: unreadable request: %v", err)
-			http.Error(w, "unreadable", http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		queries = append(queries, q)
-		mu.Unlock()
-		result, ok := c.answer(q)
-		if !ok {
-			t.Errorf("musoratest: a query of a shape the fake doesn't know: %s", q)
-			http.Error(w, "unknown query", http.StatusInternalServerError)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"result": result})
-	}))
+	f := &fake{t: t, c: c}
+	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	t.Cleanup(musora.SetSanityBase(srv.URL))
-	return func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(queries)
+	return f.queries
+}
+
+// fake is the handler Serve starts: it answers each query from c and records
+// it, and fails t on a request it can't read or a query it doesn't know.
+type fake struct {
+	t    testing.TB
+	c    Catalog
+	mu   sync.Mutex
+	sent []string
+}
+
+func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	q, err := queryOf(r)
+	if err != nil {
+		f.t.Errorf("musoratest: unreadable request: %v", err)
+		http.Error(w, "unreadable", http.StatusBadRequest)
+		return
 	}
+	f.mu.Lock()
+	f.sent = append(f.sent, q)
+	f.mu.Unlock()
+	result, ok := f.c.answer(q)
+	if !ok {
+		f.t.Errorf("musoratest: a query of a shape the fake doesn't know: %s", q)
+		http.Error(w, "unknown query", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"result": result})
+}
+
+// queries lists the queries sent so far, in the order they came.
+func (f *fake) queries() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.sent)
 }
 
 // queryOf reads the GROQ from a GET's query parameter or a POST's JSON body,
