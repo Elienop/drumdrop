@@ -1303,17 +1303,20 @@ D53 waits on an owner decision.
   - *Detail:* `drumdrop-song-soundslice-video.md`.
 
 - **D12 · Fix the open SonarQube findings.**
-  - *What:* the only analysis so far (2026-08-15, of `1c2dbda`) left 67 open issues (*moves*).
-    Most are cognitive complexity (`go:S3776`, mostly in test files), read-only props
-    (`typescript:S6759`), nested ternaries (`typescript:S3358`) and repeated strings
-    (`go:S1192`). Two are accessibility: `ProgressRow` uses a `progressbar` role instead of
-    `<progress>` (S6819), and `Dashboard.tsx` puts `tabIndex` on an element that isn't
-    interactive (S6845, also the one reliability issue).
+  - *What:* the latest analysis of `main` (2026-09-25, `344ee1f` = v0.8.0) has 43 open issues
+    (*moves*), down from 67 at `1c2dbda`. Most are cognitive complexity (`go:S3776` ×12) and
+    read-only props (`typescript:S6759` ×12), then nested ternaries (`typescript:S3358` ×4).
+    One is accessibility: `ProgressRow` uses a `progressbar` role instead of `<progress>`
+    (S6819). Branch `fix/sonar-gate-and-coverage` fixes the five that `main`'s gate counts as
+    new code: three `go:S3776`, `StatusBadge`'s props, and `Dashboard.tsx`'s focusable span
+    (S6845, which was the one reliability issue). So 38 should remain after its release.
   - *Why:* the owner's standing rule is that Sonar findings get fixed: no false-positive
-    marking, no rule deactivation, no custom profile (decisions #3 in the vault). The two
-    accessibility findings are real problems for keyboard and screen-reader users.
+    marking, no rule deactivation, no custom profile (decisions #3 in the vault). The
+    accessibility finding is a real problem for screen-reader users. Leaving the rest open
+    also costs the gate. An older issue on a line a PR changes counts as new code, which is how
+    v0.8.0's scan got `new_violations` 5.
   - *Evidence:* `sonar-issues --all` (read-only)
-  - *Detail:* vault note drumdrop-sonarqube. The 5 findings in `web/src/test/` wait on D30.
+  - *Detail:* vault note drumdrop-sonarqube. The 4 findings in `web/src/test/` wait on D30.
 
 - **D13 · Status colours bypass the design tokens.**
   - *What:* `web/src/index.css` defines the shadcn base tokens (including `--destructive`)
@@ -1369,6 +1372,17 @@ D53 waits on an owner decision.
     match) · `authorized` and `isLoopbackAddr` in `internal/server/auth.go`
   - *Detail:* vault note drumdrop-auth-posture, §3.
 
+- **D142 · A sync button that gets blocked drops keyboard focus.**
+  - *What:* on the Dashboard, when Run sync or Dry-run gets a 503, the pressed `PendingButton`
+    is replaced by the blocked control, which is a different element, so keyboard focus falls
+    to `<body>`. A keyboard user starts again from the top of the page. This predates branch
+    `fix/sonar-gate-and-coverage`, which made the blocked control focusable (its frontend
+    agent found it, 2026-09-25).
+  - *Why:* losing focus breaks WCAG 2.4.3 (focus order). The fix renders one element for both
+    states, which changes the unblocked path too.
+  - *Evidence:* `SyncButton`'s two return branches in `web/src/pages/Dashboard.tsx` · the
+    comment at `web/src/pages/Dashboard.test.tsx:84`
+
 ## Housekeeping & dependencies
 
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
@@ -1389,33 +1403,12 @@ D53 waits on an owner decision.
     lucide-react 0.x → 1.x, sonner 1 → 2, tailwind-merge 2 → 3, jsdom 25 → 30 and
     @vitejs/plugin-react 4 → 6. Nothing tracks this automatically (D31).
   - *Why:* dev-only advisories don't ship to users, but they run on the developer machine and
-    in CI, and the longer the majors wait, the bigger the eventual jump. The vitest major also
-    gates the coverage wiring (D18).
+    in CI, and the longer the majors wait, the bigger the eventual jump. Coverage (D18) runs on
+    vitest 2.1: `@vitest/coverage-v8` is pinned to 2.1.9, which peers exactly vitest 2.1.9, and
+    `vitest-sonar-reporter` to 2.0.4 (its 3.x needs vitest 3). A vitest upgrade moves all three
+    together. `npm audit` also lists `@vitest/coverage-v8` as critical, through vitest's own
+    advisory.
   - *Evidence:* `cd web && npm audit` · `cd web && npm outdated`
-
-- **D18 · Wire test coverage into SonarQube.**
-  - *What:* there's no `make coverage` target, so `sonar-scan` uploads no coverage and the scan
-    reports 0%. SpenDrop is the template. It has a Makefile `coverage:` target (a Go cover
-    profile and `go test -json`, plus vitest lcov and a test-execution report), the report
-    paths in `sonar-project.properties`, `sonar.coverage.exclusions` for entry points that
-    can't be tested, and the report files in `.gitignore`. First check whether vitest 2.x
-    supports the reporter and `@vitest/coverage-v8`, or whether D17's upgrade has to come
-    first.
-  - *Why:* the "Sonar way" quality gate has a coverage condition on new code. At 0%, the first
-    scan that includes new lines will fail it. Until then the gate passes only because it has
-    nothing to check.
-  - *Evidence:* `grep -n '^coverage:' Makefile` (no match) · the commented coverage lines in
-    `sonar-project.properties`
-  - *Detail:* vault note drumdrop-sonarqube.
-
-- **D19 · Rescan DrumDrop in SonarQube once.**
-  - *What:* the project has only ever had one analysis (2026-08-15). The server has been
-    upgraded since then and the TypeScript/JS/CSS rule sets have changed, so D12's numbers
-    will shift. Best done right after D18, so the new baseline includes real coverage.
-  - *Why:* fixing D12 against stale numbers wastes effort.
-  - *Needs:* the owner's OK, because a scan writes to the Sonar server.
-  - *Evidence:* the header of `sonar-issues --all` · run `sonar-scan` from the repo root
-  - *Detail:* vault note drumdrop-sonarqube.
 
 - **D20 · `make test` is weaker than CI.**
   - *What:* `make test` is `go test ./...`, which is cached and runs without `-race`. CI runs
@@ -1437,17 +1430,16 @@ D53 waits on an owner decision.
   - *Evidence:* `cd web && npx vitest run`
 
 - **D22 · Local clean-up, in this checkout only.**
-  - *What:* this checkout has:
-    - a stale 16 MB `./drumdrop` binary, built 2026-05-31 with version `dev`, before 11 later
-      commits to `cmd/` and `internal/`;
-    - a `web/dist` built on 2026-06-01 at 18:50, while #11 was being finished. Its timestamps
-      make it look older than #11, but the bundle already holds #11's UI ("Edit follow", the
-      `PATCH` call in `updateFollow`), and no web change has landed since
-      (`git log ad6afd6..HEAD -- web/` is empty), so it is probably current. Run
-      `make build-ui` to be sure before relying on a bare `go build -tags webui`;
-    - empty `downloads/` and `.claude/worktrees/` folders;
-    - five `origin/*` remote-tracking refs for branches that are already deleted on GitHub
-      (`git fetch --prune` drops them).
+  - *What:* this checkout has a stale 16 MB `./drumdrop` binary, built 2026-05-31 with version
+    `dev`, long before v0.8.0, and an empty `downloads/` folder. The rest was cleared on
+    2026-09-25, after v0.8.0 merged:
+    - the 42 agent worktrees under `.claude/worktrees/` and their 42 branches, each checked
+      first for uncommitted work and for commits missing from the merged code;
+    - the stale `origin/*` refs (`git fetch --prune`).
+
+    `web/dist` is rebuilt by every local gate run, so it no longer lags. Still run
+    `make build-ui` before a bare `go build -tags webui`. New agent worktrees keep appearing
+    under `.claude/worktrees/` while a branch is being built.
   - *Why:* stale artefacts get run or embedded by mistake. They're all gitignored or local, so
     none of them affects the repo. Read before deleting anything.
   - *Evidence:* `ls -la drumdrop downloads .claude/worktrees web/dist` · `git branch -r` compared
@@ -1922,6 +1914,29 @@ lease holder token goes into the unreleased migration 004 (before this branch me
 
 ## Recently shipped
 
+- **D18 · Test coverage reaches SonarQube.** Branch `fix/sonar-gate-and-coverage`.
+  - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of
+    `main`, the first with new code since v0.7.1, failed the gate's new-code coverage condition
+    (0 against 80), and would have failed it on every release.
+  - *Now:* `make coverage` writes:
+    - the Go cover profile and the `go test -json` stream;
+    - vitest's v8 lcov;
+    - a Generic Test Execution report (`vitest-sonar-reporter`).
+
+    `sonar-scan` runs it before each upload, and a failing test fails it.
+    `sonar-project.properties` names the four files. It excludes from coverage only what no
+    unit test can run: `cmd/drumdrop/main.go`, `web/src/main.tsx` and `web/vite.config.ts`,
+    each with its reason. Every plain `vitest run` also writes the gitignored
+    `web/coverage/sonar-report.xml`. It runs on vitest 2.1 (see D17 for the pins).
+  - *Evidence:* `make coverage` ·
+    `grep -n 'reportPaths\|coverage.exclusions' sonar-project.properties`
+- **D19 · `main` rescanned at v0.8.0.** No PR, since a scan writes only to the Sonar server. The
+  owner's OK on 2026-09-25: *"Yes, right after the merge"*.
+  - *Was:* one analysis, of `1c2dbda` (v0.7.1) on 2026-08-15: 67 open, under older rule sets.
+  - *Now:* a second analysis, of `344ee1f` = v0.8.0: 43 open, gate ERROR. New-code coverage was
+    0 (D18), and five older issues sit on lines PR #21 changed (D12). The next release's scan
+    is the check that `fix/sonar-gate-and-coverage` turns it green.
+  - *Evidence:* the header of `sonar-issues --all` · vault note drumdrop-sonarqube
 - **D28 · The tracked git hooks are back on.** Local git config only, so there is no PR. The
   owner asked on 2026-09-23: *"drumdrop: turn its Git hooks back on."*
   - *Was:* `core.hooksPath` pointed at `.git/hooks`, which holds only the `*.sample` files, so
