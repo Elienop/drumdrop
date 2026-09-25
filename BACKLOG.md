@@ -1923,7 +1923,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     scripts/hooks`) · `printf 'bad subject\n' > /tmp/m && git hook run commit-msg -- /tmp/m`
     (exits 1 with the bypass hint).
 - **D113 · Round 5: what the review seats found, and the owner's rulings (a)–(y).** This
-  branch (`fix-library-delete-and-move`), PR number to follow.
+  branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* at `8ee019d` the round-5 seats (code, security, UI), and the seats on each fix
     round after it, found:
     - a re-download set a lesson's subfolders (`resources/`, `play-along/`,
@@ -2245,7 +2245,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     swap points too), D82 (the follow dialogs' buttons move), D89 (the preview names a
     brand Add won't follow), D93 (the previous folders ruling (e) keeps).
 - **D131 · At 1024px the Lessons table scrolled sideways.** This branch
-  (`fix-library-delete-and-move`), PR number to follow. Settled by ruling (t), refined
+  (`fix-library-delete-and-move`), PR #21. Settled by ruling (t), refined
   by the owner on 2026-09-24.
   - *Was:* ruling (t) hides Brand and Quality below 1280px so that at 1024px the table
     fits, nothing cut and no sideways scroll, with Title and note, Status, Size, Updated
@@ -2274,7 +2274,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'keeps its width|hides Brand and Quality'`
 - **D129 · A click or a key meant for a lesson's row menu could press *Cancel download*
   or *Download* as the lesson started or stopped downloading.** This branch
-  (`fix-library-delete-and-move`), PR number to follow. Settled by the owner's ruling
+  (`fix-library-delete-and-move`), PR #21. Settled by the owner's ruling
   (v), 2026-09-24, which supersedes (u); built by the web half of round 5h.
   - *Was:* the row menu is built from the live row, so its items change when a download
     starts or stops. Ruling (u) recorded one case, not fixed: a pointer resting on a
@@ -2314,7 +2314,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `grep -n 'function RowMenu' web/src/pages/Lessons.tsx` ·
     `cd web && npx vitest run src/pages/Lessons.test.tsx -t 'under its open menu|stays closed when that attempt fails|no exit fade|stays open, its highlight'`
 - **D78 · A Skip was undone by a queued or running download.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* Skip only set the lesson's status, so its queued job was claimed and downloaded
     anyway, and a download already running recorded itself as downloaded: the lesson ended
     `downloaded` although the dialog promised "Syncs leave a skipped lesson alone".
@@ -2331,7 +2331,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Left open:* D80 (a Skip that races the planner's enqueue). D79 (a Skip during the
     library move) has since shipped on this branch.
 - **D85 · A lesson Musora couldn't be reached for was skipped for good.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* the worker treated any error from Musora's lesson lookup, a network failure or
     an answer it couldn't read included, as "gated or missing", and skipped the lesson.
     Syncs never queue a skipped lesson again, so a short outage during a sync skipped every
@@ -2345,7 +2345,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `grep -n 'Resolver.Resolve' -A12 internal/scheduler/worker.go` ·
     `go test -count=1 -run 'SkipsOnlyALessonMusoraHasNoMatchFor' ./internal/scheduler/`
 - **D86 · A failure's text was raw, wrong, or gone too fast.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* the lesson's note (shown under the lesson, and in the Queue next to *Retry*) and
     the live events carried the worker's raw error (a Go error, yt-dlp's exit status), and
     a canceled download showed the bare word "canceled". The API answered with fragments
@@ -2366,7 +2366,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `go test -count=1 -run 'RecordsSentencesNotErrors|MessagesFitTheDialog|MessagesFollowTheCopyRules|MigrationGivesOldCanceledNotesASentence' ./internal/scheduler/ ./internal/server/ ./internal/database/`
     · `grep -rn 'failureToast(' web/src --include=*.tsx`
 - **D87 · Partial files could reach the library.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* the move took the lesson folder as it was, so partial files a run left when it
     died (yt-dlp's `.part`, `.ytdl`, `.f<number>.<ext>` and `.temp.<ext>`, drumdrop's own
     `.drumdrop-part` and `.drumdrop-episode`) moved into the library with the lesson.
@@ -2376,7 +2376,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     2). The README says so.
   - *Evidence:* `go test -count=1 -run 'MovesNoPartialFileIntoTheLibrary|CleanupPartialsRemovesOnlyPartials' ./internal/scheduler/`
 - **D88 · A wrong Musora password logged the user out of DrumDrop.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* `POST /api/session` answered 401 when Musora refused the login, and also when
     Musora couldn't be reached. The web client takes any 401 for its own API token being
     refused, so it cleared the stored token and opened the token prompt: a mistyped Musora
@@ -2392,7 +2392,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · `cd web && npx vitest run src/pages/Settings.test.tsx`
   - *Left open:* D83 (which 4xx Musora sends for a wrong password is unconfirmed).
 - **D66 · A stopped download could cost the lesson its video, and what it wrote was known
-  only by its folder.** This branch (`fix-library-delete-and-move`), PR number to follow.
+  only by its folder.** This branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* a download wrote into the lesson's own folder (`<downloads>/<Course>/NN -
     Title`), shared with whatever was already there: an earlier download, a copy kept in
     downloads when a library move failed, or a folder kept when a follow was removed
@@ -2437,7 +2437,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     goes by path and is untested), D58 (legacy plex-tv rows), D62 (Plex and the copy
     fallback).
 - **D79 · A Skip during a library move could lose the lesson's earlier files.** This
-  branch (`fix-library-delete-and-move`), PR number to follow.
+  branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* the move ran after the download was confirmed and before `FinishDownload` read
     the Skip, and a Skip's kill stopped only yt-dlp, so a Skip that landed during the move
     was seen only once the move was done. The move's irreversible step came first: in the
@@ -2457,7 +2457,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Evidence:* `go test -count=1 -run 'StopDuringThePlacement|UndoPutsEverythingBack|PlexDiscardLeavesTheSeasonFolderQuietly|SetsNothingAsideUnlessItCanSetAll' ./internal/scheduler/`
     · `grep -n 'pl.undo' internal/scheduler/worker_record.go`
 - **D75 · A moved download whose record failed was untracked until the next download.**
-  This branch (`fix-library-delete-and-move`), PR number to follow.
+  This branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* the move ran before `FinishDownload`. When that write failed (a database error),
     the attempt failed and nothing reported success, but the files the move had placed in
     the library stayed, recorded by no row, until the lesson's next download replaced them.
@@ -2468,7 +2468,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     (the `unrecorded` cases)
     · `grep -n 'the download could not be recorded' internal/scheduler/worker_record.go`
 - **D84 · An instructor could be followed only by Musora's slug.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* an instructor follow took only the slug (`jared-falk`). A name, another letter
     case or a pasted coach-page link was refused with a 400 before any lookup
     (`msgBadSlug`). D84 was the owner question whether to accept more.
@@ -2488,7 +2488,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · `cd web && npx vitest run src/pages/Follows.test.tsx`
   - *Left open:* D89 (one instructor, one brand), D91 (PlayBass's name).
 - **D94 · An instructor follow could sync none of its brand's lessons.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* Musora keeps several instructor documents under one slug, one per brand and
     sometimes two in one brand (`jared-falk` has a drumeo and a singeo one). The lessons
     query referenced only the first document for the slug (`[0]`), so a follow in a brand
@@ -2505,7 +2505,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · `cat internal/musora/queries/instructor_lessons.groq`
   - *Left open:* D89 (one instructor, one brand), D90 (the query's order does nothing).
 - **D67 · A default-layout delete after the library moved answered 200 and lost track of
-  the files.** This branch (`fix-library-delete-and-move`), PR number to follow.
+  the files.** This branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* a default-layout lesson records its folder by absolute path. After the library
     (or downloads) was mounted at another path, a delete found nothing at the old path,
     called it already gone, tombstoned the row and logged nothing, while the files stayed
@@ -2517,7 +2517,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Left open:* recording `output_dir` relative to its root, as the library record is,
     would let such a delete find the files; that is a migration of every row.
 - **D52 · A library move that failed part-way left an untracked copy.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* on the copy fallback (two filesystems) nothing was undone when a step failed. A
     default-layout copy that failed part-way left a partial folder in the library; a plex-tv
     one left the lesson split between the season folder and scratch, recorded with no video.
@@ -2569,7 +2569,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     can't be put back stays in its `replaced-<id>` folder (D93). Plex seeing half-copied
     files is D62.
 - **D51 · A plex-tv delete left most of a song, and every lesson's folders, behind.** This
-  branch (`fix-library-delete-and-move`), PR number to follow.
+  branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* the delete matched the recorded video's name minus `.mp4` followed by `.` or `-`.
     A song records its `[Drumless]` version, so its `[Original]` video, `.nfo`, poster and
     folders stayed; any lesson's `<episode> resources` / `play-along` folders stayed too.
@@ -2603,7 +2603,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Left open:* D57 (two lessons can share an episode number), D58 (a legacy lesson's
     previous files can be left behind when its folder changes).
 - **D55 · A plex-tv lesson with no video couldn't be deleted from the library.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* the delete found an episode's entries from its recorded video's name, so a
     lesson recorded without one (`--resources-only`, or a song whose score has no
     recordings) was a no-op, and its nfo, poster and folders stayed, untracked.
@@ -2612,7 +2612,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     position (if the title has changed since, see D58).
   - *Evidence:* `go test -count=1 -run 'NoVideoLessonByRecord|SeasonFolderIsNeverWiped' ./internal/server/`
 - **D56 · Deleting a lesson's files discarded every error.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* both delete paths called `_ = removeLessonFiles(...)`, so a refusal or a file that
     couldn't be removed was neither logged nor returned, and the lesson read as deleted
     while its files stayed.
@@ -2639,7 +2639,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Left open:* nothing of its own. D66, which it left open, has since shipped on this
     branch.
 - **D60 · A download a delete overtook could leave or lose files.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* the worker could not tell which kind of delete had removed its job. Without a
     library the lesson folder was left alone, so files written after a lesson delete
     stayed untracked; with a library (or with the library the same path as downloads) the
@@ -2667,14 +2667,14 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   - *Left open:* nothing of its own. D66, which it left open, has since shipped on this
     branch.
 - **D61 · A job canceled between two attempts was briefly re-marked running.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* `MarkJobRunning` re-stamped a job by id whatever its status, overwriting a
     cancel with `running` and counting one more attempt.
   - *Now:* it re-stamps only a running job; a canceled one is left as it is, and the
     worker's next step (`StartDownload`) stops the download and records the cancel.
   - *Evidence:* `go test -count=1 -run 'MarkJobRunningLeavesACanceledJob|HonoursADatabaseCancel' ./internal/database/ ./internal/scheduler/`
 - **D63 · A lesson whose re-download was canceled or deleted kept its files as "skipped".**
-  This branch (`fix-library-delete-and-move`), PR number to follow.
+  This branch (`fix-library-delete-and-move`), PR #21.
   - *Was:* canceling a re-download, or a delete that stopped one and then could not remove
     every file, left the row `skipped` while it still recorded its earlier files, and the
     Lessons page offered *Delete* only for `downloaded` lessons.
@@ -2689,7 +2689,7 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     still leaves it `downloaded`: whatever stopped the download settles the lesson. D113.)
   - *Evidence:* `go test -count=1 -run 'GuardedFailSkipCancel|DownloadingLessonWithFiles|KeepLessonFiles|HasFiles' ./internal/database/ ./internal/server/`
 - **D64 · The store exported download writers no job guarded.** This branch
-  (`fix-library-delete-and-move`), PR number to follow.
+  (`fix-library-delete-and-move`), PR #21.
   - *Was:* `MarkDownloaded`, `MarkDownloading`, `MarkFailed`, `MarkJobDone`,
     `MarkJobFailed`, `MarkJobCanceled` and `UpdateLessonDeleted` wrote a lesson or a job by
     id, whatever had happened to it since. No production code called them any more, but a
