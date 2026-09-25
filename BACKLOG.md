@@ -46,7 +46,10 @@ added no entry. The round-5j pass (2026-09-25, same branch) narrowed ruling (y)'
 the lesson's own files, corrected D58, D113, D128 and D137 against its own code and the
 round-5i seats' reports, and added D138 and D139. The round-5k pass (same day and
 branch) reworded the left-behind refusals, corrected D58, D113, D128, D137, D138 and D139
-against its own code and the round-5j seats' reports, and added D140 and D141._
+against its own code and the round-5j seats' reports, and added D140 and D141. The
+round-5m pass (same day and branch) corrected D113 and D137 against the round-5l seats'
+reports, and re-anchored the line numbers round 5l's refactor moved in D58, D128, D130
+and D137; it added no entry._
 
 ## Next up
 
@@ -169,17 +172,17 @@ D53 waits on an owner decision.
   - *A library folder spelled another way is not seen by ruling (f)'s refusal*
     (round-5f/5g security review, N3; the same at `5cb8fbe`, before round 5f). The
     refusal asks `inLibrary` first, and its first test is lexical
-    (`library.Inside(lib, …)`, `internal/scheduler/worker_record.go:352`). With
+    (`library.Inside(lib, …)`, `internal/scheduler/worker_record.go:354`). With
     `DRUMDROP_LIBRARY_DIR` set through a symlink (or the library remounted at another
     path) and the row's folder spelled the real way, a refused library placement falls
     back to downloads, and the library folder is left where it is, logged as "inside
     neither the downloads folder nor the library" (`previousFolder`,
-    `internal/scheduler/place.go:419`) and claimed by no lesson; when the refused
+    `internal/scheduler/place.go:470`) and claimed by no lesson; when the refused
     target is the row's own folder under the other spelling, the same happens to it.
     A row spelled through the symlink is refused as it should be. The delete side of
     the same spelling gap is D67. *Fix (new mechanism, can wait):* decide containment
     by identity, as the repo already does in `Claims.within`
-    (`internal/library/ownership.go:580`, through `sameFolder`, `:182-187`) and in
+    (`internal/library/ownership.go:613`, through `sameFolder`, `:199-204`) and in
     `library.Remove`'s root lookup (`internal/library/remove.go:28-31`), both on
     `os.SameFile`. Seen in the security seat's scratch probe (S2, S2b, S3), not
     pinned by a committed test.
@@ -525,16 +528,24 @@ D53 waits on an owner decision.
     - an old folder the move emptied now takes the gone-folder path through the
       fallback (code round 5j, Low 1): `LeftBehind` answers false, and the second line,
       `keptInLibrary`, never refuses a recorded folder outside today's library
-      (`inLibrary` reads it as spelled, `internal/scheduler/worker_record.go:352`). So a
+      (`inLibrary` reads it as spelled, `internal/scheduler/worker_record.go:354`). So a
       legacy row whose files were moved to the same place in the new folder, and whose
       failed placement learned nothing there (a season folder it can't list, or a legacy
       name it can't settle), falls back: it records the downloads folder, and its moved
-      files stay in the new season folder, recorded by nothing (the code seat's scratch
-      probe; the unlistable-folder trigger was probed, the ambiguous-name one reasoned).
+      files stay in the new season folder, recorded by nothing. Both triggers are
+      probed: the unlistable folder by the round-5j code seat's scratch probe, the
+      ambiguous name by the round-5l security seat's (identical in `1a03e16` and
+      `7090ad0`, for an emptied old folder and for a remount: the lesson falls back, its
+      row records the downloads folder with `library_entries` NULL, and the three legacy
+      files in the new season folder are recorded by no row). An ambiguous name alone
+      does not fail the move: the move learns nothing, succeeds, and the legacy files
+      stay unrecorded, case (a) under D58. The fallback needs a second, independent
+      failure (the probe refused a rename; in real use an I/O error, or an entry the
+      move can't set aside).
       Rare, and nothing is deleted. A recorded row is safe: its relative record resolves
       at the new place. Before round 5j the emptied folder refused, as it still existed.
       *Later fix, the owner's call:* make `keptInLibrary` read this row's folder as it
-      is read now (`Claims.seasonFolder`, `internal/library/ownership.go:208`); that
+      is read now (`Claims.seasonFolder`, `internal/library/ownership.go:225`); that
       changes the remount case ruling (y) keeps as before;
     - a copy kept in both folders (security round 5i, E2) is still refused, as its own
       files are in the old folder. Since round 5k the refusal offers switching back only
@@ -554,7 +565,7 @@ D53 waits on an owner decision.
       usable, but that Delete never answers, and each new Delete parks another request.
       The lease-renewing park now needs the mount to stall between the up-front check
       and the one after Begin (`lessons.go:252`, `follows.go:399`). The worker's
-      fallback check (`refuseFallback`, `internal/scheduler/worker_record.go:233`) makes
+      fallback check (`refuseFallback`, `internal/scheduler/worker_record.go:235`) makes
       the same unbounded stat in the single serial worker (`daemon.go:94` →
       `Worker.RunOnce`, `worker.go:232`), so one hung stat stalls the whole queue
       (reasoned, not probed; true since round 5i, when `keptInLibrary` already stat'ed
@@ -581,7 +592,7 @@ D53 waits on an owner decision.
       library pointed sideways, `/oldlib` to `/newlib`): a refused placement falls back
       to downloads and leaves that folder where it was, no longer recorded, logged
       "… inside neither the downloads folder nor the library" (round-5i scratch probe,
-      in both layouts; `previousFolder`, `internal/scheduler/place.go:419`).
+      in both layouts; `previousFolder`, `internal/scheduler/place.go:470`).
       `LeftBehind` reads season folders only: a lesson folder is recorded by its full
       path and never re-pointed, and the fix's message names the library folder while
       the downloads setting may be the one that moved. A delete of such a lesson is
@@ -592,7 +603,7 @@ D53 waits on an owner decision.
     ruling (y)'s declined option *Remember the library folder*: it fixes every reader,
     but needs its own design, so a later branch. A remembered root *path* can't see a
     Docker bind re-pointed under an unchanged container path: the recorded path and the
-    setting stay equal (`internal/library/ownership.go:243`). That case needs an
+    setting stay equal (`internal/library/ownership.go:260`). That case needs an
     identity, such as a marker file holding an ID in the library root (security round
     5j, S2). Engine: `os.SameFile` compares two live stats only; nothing in the standard
     library or SQLite records a folder's identity across restarts, and drumdrop writes
@@ -719,7 +730,7 @@ D53 waits on an owner decision.
     a downloads folder that sits inside the library falls back to downloads when its
     library placement is refused again, but only when its recorded lesson folder is in
     the course folder the fallback goes into (`inLibrary`,
-    `internal/scheduler/worker_record.go:351-357`). Since round 5h a season folder there
+    `internal/scheduler/worker_record.go:353-359`). Since round 5h a season folder there
     counts as the library's, since the fallback only writes `NN - Title` folders
     (round-5f/5g security review, N1: after the library root moved up, a legacy plex-tv
     or default-layout season row fell back and its season files were claimed by no
@@ -758,7 +769,7 @@ D53 waits on an owner decision.
       `lib/downloads/<Course>/05 - Old Title`; the owner unfollowed it and kept the
       files (the row's follow becomes NULL), Musora renamed the lesson, and a
       *Download* (filed under its parent course,
-      `internal/scheduler/worker.go:691-695`) has its library placement fail
+      `internal/scheduler/worker.go:775-779`) has its library placement fail
       (round-5f/5g security review, N2: A1, A1o, A2);
     - the library root moved up a level from a tie (library and downloads both
       `media/drumeo`, then the library at `media`), and the lesson's title changed: its
@@ -798,7 +809,7 @@ D53 waits on an owner decision.
     (`internal/server/dto.go:43`, `web/src/types.ts:21`), which no page reads, and a
     download with no follow files the lesson under the parent course title Musora
     returns, not the stored parent (`lessonParentTitle`,
-    `internal/scheduler/worker.go:691`).
+    `internal/scheduler/worker.go:775`).
     Three other writes still stamp every time:
     - `StartDownload` sets `downloading` and stamps at the start of every attempt.
       Nothing changes the lesson between attempts, so on attempts 2 and 3 it is already
@@ -2217,6 +2228,27 @@ lease holder token goes into the unreleased migration 004 (before this branch me
       legacy episode name counts a file under every candidate name, pinned where
       `LeftBehind` and `Claimants` read it (`anyBaseClaims`; mutants trying only the
       first or only the last name had survived since before round 5k; code 5k Low 1).
+    - Round 5l cleared the SonarQube findings new on the branch against `main` (68 new
+      → 0 new; the branch scan at `7090ad0` has 43 open, every one also on `main`), in
+      14 commits: `370ac34`, `528fa23`, `6f4b796`, `8f5d1d7`, `9d4282e`, `4f7361e`,
+      `e37130b`, `7a39778`, `0df2d70`, `61cd192`, `9781401`, `a77c6b9`, `7f178ff` and
+      `7090ad0`. It split long functions and tests into single-purpose steps and
+      named checks, and `8f5d1d7` pins a nested root, an alias of a root and a folder
+      named like an nfo. Both seats found the behaviour preserved: the code seat by
+      reading each split against the base and 22 mutants, the security seat by 15,386
+      worker and 380 delete scenarios giving identical results in `1a03e16` and
+      `7090ad0` (JSON timestamps aside), and by running each side's tests over the other side's code. Their
+      findings were test gaps that predate the round, each a line the code already
+      gets right, pinned in round 5m (`142e87f`, `b4de5b2`, `e4cd069` and the docs
+      commit after them): a placement that fails while clearing names takes back a
+      folder it merged, in both layouts (code W1); an empty record `[]` owns nothing
+      (W2); `library.Remove` goes by the root a path is written inside before any
+      identity lookup, so a symlink out of downloads into the library is refused (W3);
+      a recorded row claims only what it records, legacy matching or not (S1); and
+      `TestPlacementReleasesItsFolders` counts only the descriptors open in its own
+      temp folder, so another failed test's leak can't disturb it (security I2).
+      D137's ambiguous-name trigger is measured now, not reasoned (security I1), and
+      the line numbers the refactor moved are re-anchored in D58, D128, D130 and D137.
   - *Evidence:* `go test -count=1 -run 'MergesTheSubfolders|StopDuringAMerge|FailsAfterAMerge|PreviousFolder|LibraryPlacementFailure|RefusedLibraryPlacement|FailedReDownloadLeaves|FailedFirstDownloadFails|SameTitleReDownloadKeeps|PlexTvRefusedMoveKeepsThePreviousRecord|SpelledAnotherWay|LastAttemptsFailure|NewFolderFlushFails|ReleasesItsFolders|CancelDuringABackoff|OpenRealDir|NodeBrand|FollowNodeFoldsItsBrand|CreateNodeFollowFoldsTheBrand|InstructorInputIsNormalisedAlike|AFailedReDownloadKeepsTheLessonDownloaded' ./internal/scheduler/ ./internal/database/ ./internal/musora/ ./internal/server/ ./cmd/drumdrop/`
     · `cd web && npx vitest run src/button-rows.test.tsx src/components/ui/sonner.test.tsx src/design-tokens.test.ts src/pages/Lessons.test.tsx`
     · round 5d: `go test -count=1 -run 'RefusedMoveKeeps|RefusedMoveOfALegacyRow|RefusedPlacementOfASeasonFolderRow|APress|OnDisk|WhoseVideoIsGone|LibraryUnplugged|LessonMusoraDoesNotReturn|RecordedFilesPresent|NotOnDisk|CanNotBeListed|ResourcesOnlyReDownload|OfALegacyRow|JudgeCasefoldChild|BadBrandNames' ./internal/scheduler/ ./internal/server/`
@@ -2234,6 +2266,8 @@ lease holder token goes into the unreleased migration 004 (before this branch me
     · round 5j: `go test -count=1 -run 'LeftBehind|OwnFiles|OwnFileAlone|CantRead|StopNothing|ChecksAgain|WhileARecordIsDamaged|MessagesFollowTheCopyRules' ./internal/library/ ./internal/scheduler/ ./internal/server/`
     · round 5k: `go test -count=1 -v -run 'ReadsAPathThroughAFileAsGone|CountsTheVideoOnlyInTheOldFolder|LeftBehind|MessagesFollowTheCopyRules|TriesEveryNameOfAnUnsettledLegacyEpisode' ./internal/library/ ./internal/server/ ./internal/scheduler/ | grep -c -- '--- PASS'`
     and `~/go/bin/gocognit ./internal/library/ | grep -E 'ownFilesIn|legacyOwnFileIn|legacyClaims'`
+    · round 5l: `go test -count=1 -v -run 'WhileClearingNamesTakesTheMergeBack|ByAnEmptyRecordOwnsNothing|GoesByTheRootAPathIsWrittenIn|ReadsARecordedRowByItsRecordAlone|ReleasesItsFolders|RefusesARootInsideAnotherRoot' ./internal/library/ ./internal/scheduler/ | grep -c -- '--- PASS'`
+    (12) and `git -C /mnt/data/projects/Musora/drumdrop rev-list --count 1a03e16..7090ad0` (14)
   - *Left open:* D96–D112, found or recorded in round 5; D114–D119, recorded in round 5d
     (D114–D118 from the round-5c reviews, D119 found in the round-5d fix); D121–D125, from
     the round-5d reviews; D126–D128, from the round-5e reviews; D130, from the round-5f
