@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,8 +70,8 @@ func main() {
 
 // run dispatches args (the command line without the program name) to its
 // command and returns the exit code: 0 for --help or a command that succeeded,
-// 1 for no arguments (after printing the usage) or a command that failed
-// (after printing its error). The commands write their own output to
+// 1 for no arguments or no download target (after printing the usage) or a
+// command that failed (after printing its error). The commands write their own output to
 // os.Stdout; stdout and stderr receive only the usage and the error line.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -102,6 +103,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdServe(args[1:])
 	default:
 		err = cmdDownload(args)
+	}
+	if errors.Is(err, errNoTarget) {
+		fmt.Fprint(stdout, usage)
+		return 1
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "✖ ", err)

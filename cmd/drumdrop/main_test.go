@@ -35,6 +35,17 @@ func TestRunWithoutArgumentsPrintsUsageAndFails(t *testing.T) {
 	}
 }
 
+// TestRunDownloadWithoutATargetPrintsUsageAndFails pins a download command
+// line that names no lesson or course (only its flags): the usage on stdout,
+// nothing on stderr, exit 1, the same answer as a bare `drumdrop`.
+func TestRunDownloadWithoutATargetPrintsUsageAndFails(t *testing.T) {
+	code, stdout, stderr, _ := runArgs(t, "--quality", "720")
+	if code != 1 || stdout != usage || stderr != "" {
+		t.Errorf("run(--quality 720) = %d, stdout %d bytes (usage is %d), stderr %q; want 1, the usage, nothing",
+			code, len(stdout), len(usage), stderr)
+	}
+}
+
 // TestRunHelpPrintsUsage pins -h and --help: the usage on stdout, exit 0.
 func TestRunHelpPrintsUsage(t *testing.T) {
 	for _, arg := range []string{"-h", "--help"} {

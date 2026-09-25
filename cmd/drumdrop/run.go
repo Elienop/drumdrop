@@ -105,6 +105,10 @@ func parseDownloadArgs(argv []string) (downloadArgs, error) {
 	}, nil
 }
 
+// errNoTarget is cmdDownload's answer to a command line with no lesson or
+// course to download: run prints the usage for it, as for no arguments at all.
+var errNoTarget = errors.New("no lesson or course to download")
+
 // cmdDownload resolves a lesson or course and downloads each lesson.
 func cmdDownload(argv []string) error {
 	args, err := parseDownloadArgs(argv)
@@ -120,8 +124,7 @@ func cmdDownload(argv []string) error {
 
 	rest := args.positionals
 	if len(rest) == 0 {
-		fmt.Print(usage)
-		os.Exit(1)
+		return errNoTarget
 	}
 
 	targetID := engine.ExtractID(rest[0])
