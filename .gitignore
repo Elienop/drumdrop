@@ -27,9 +27,10 @@ session.cookie
 # Built web UI assets
 /web/dist/
 
-# Test reports `make coverage` writes for SonarQube
-/coverage.out
-/go-test-report.json
+# Test reports `make coverage` writes for SonarQube. The Go two are unanchored, so
+# a run from any directory leaves nothing to commit.
+coverage.out
+go-test-report.json
 /web/coverage/
 
 # Claude Code's local folder: its settings, agent worktrees, and the CLAUDE.md

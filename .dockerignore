@@ -1,15 +1,22 @@
 .git
-node_modules
-web/node_modules
+# `**/` matches at any depth, the root included: a bare name matches the root only.
+**/node_modules
 web/dist
 dist
 downloads
 docs
-*.db
-*.db-wal
-*.db-shm
-secret.key
-credentials.enc
-session.cookie
-.env*
-.secrets*
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/secret.key
+**/credentials.enc
+**/session.cookie
+**/.env*
+**/.secrets*
+# Test reports `make coverage` writes for SonarQube
+**/coverage.out
+**/go-test-report.json
+web/coverage
+# Local-only folders: Claude Code's (agent worktrees included) and the brainstorm companion's
+.claude
+.superpowers
