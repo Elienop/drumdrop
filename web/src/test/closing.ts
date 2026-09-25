@@ -20,14 +20,17 @@ export function holdClosingOverlays() {
   const real = globalThis.getComputedStyle.bind(globalThis)
   vi.stubGlobal("getComputedStyle", (el: Element, pseudo?: string | null) => {
     const style = real(el, pseudo ?? undefined)
-    const state = el.getAttribute?.("data-state")
+    // An HTML, SVG or MathML element has a live dataset (the DOM's Element
+    // type does not declare it); Radix's overlays are HTML elements.
+    const { dataset } = el as Element & Partial<HTMLOrSVGElement>
+    const state = dataset?.state
     if (state !== "open" && state !== "closed") return style
     // A live Proxy: Presence keeps the declaration from mount and reads it
     // again at close.
     return new Proxy(style, {
       get(target, prop) {
         if (prop === "animationName") {
-          if (el.getAttribute("data-state") !== "closed") return "x-in"
+          if (dataset?.state !== "closed") return "x-in"
           // `animation: none !important` on a closed element, as the built CSS has it
           return el.classList.contains("data-[state=closed]:animate-none!") ? "none" : "x-out"
         }
