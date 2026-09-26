@@ -595,15 +595,22 @@ func openSeason(lib *os.Root, rel string) (*os.Root, error) {
 
 // openRegular opens name in dir to read, never waiting: O_NONBLOCK, so a
 // FIFO swapped in for a regular file after readRegular's Lstat opens at once
-// (its Stat then differs) instead of blocking the cycle until a writer
-// comes. O_NONBLOCK changes nothing for a regular file, and Windows ignores
-// it. A package variable so a test can swap the file in that window.
+// (and is then refused: it is not a regular file) instead of blocking the
+// cycle until a writer comes. O_NONBLOCK changes nothing for a regular file,
+// and Windows ignores it. A package variable so a test can swap the file in
+// that window.
 var openRegular = func(dir *os.Root, name string) (*os.File, error) {
 	return dir.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 }
 
+// statOpened is the Stat of what readRegular opened. A package variable so a
+// test can give it the inode number of the file the Lstat saw, as ext4 gives
+// a freed number to the next file made, on every filesystem.
+var statOpened = (*os.File).Stat
+
 // readRegular reads name in dir: a regular file (not through a symlink),
-// read up to maxRenameBytes, with its Lstat.
+// read up to maxRenameBytes, with its Lstat. What it opened must be that
+// file, unchanged (sameRegular), whatever inode number it carries.
 func readRegular(dir *os.Root, name string) (os.FileInfo, []byte, error) {
 	info, err := dir.Lstat(name)
 	if err != nil {
@@ -617,7 +624,7 @@ func readRegular(dir *os.Root, name string) (os.FileInfo, []byte, error) {
 		return nil, nil, err
 	}
 	defer f.Close()
-	if st, err := f.Stat(); err != nil || !os.SameFile(st, info) {
+	if st, err := statOpened(f); err != nil || !sameRegular(st, info) {
 		return nil, nil, fmt.Errorf("%q changed while it was read", name)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxRenameBytes+1))
@@ -630,8 +637,8 @@ func readRegular(dir *os.Root, name string) (os.FileInfo, []byte, error) {
 	return info, data, nil
 }
 
-// removeIfSame removes name from dir if it is still the file info described.
-// Gone already is not an error.
+// removeIfSame removes name from dir if it is still the regular file info
+// described, unchanged (sameRegular). Gone already is not an error.
 func removeIfSame(dir *os.Root, name string, info os.FileInfo) error {
 	now, err := dir.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
@@ -640,10 +647,22 @@ func removeIfSame(dir *os.Root, name string, info os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	if info == nil || !os.SameFile(now, info) {
-		return fmt.Errorf("%q was replaced meanwhile; left as it is", name)
+	if !sameRegular(now, info) {
+		return fmt.Errorf("%q was replaced or changed meanwhile; left as it is", name)
 	}
 	return dir.Remove(name)
+}
+
+// sameRegular reports whether now is a regular file and the very one was
+// described, unchanged: the same type, device and inode number (os.SameFile),
+// size and modification time. The number alone proves nothing once the file
+// it named is gone: a filesystem may give it to the next file made (ext4
+// does, at once), so a FIFO or another file put in its place can carry it.
+// When unsure it says no: a file left alone waits for the next pass, while
+// one removed in error was the owner's.
+func sameRegular(now, was os.FileInfo) bool {
+	return was != nil && now.Mode().IsRegular() && now.Mode().Type() == was.Mode().Type() &&
+		os.SameFile(now, was) && now.Size() == was.Size() && now.ModTime().Equal(was.ModTime())
 }
 
 // absLibrary is the library folder as the lessons' claims read it (absolute),
