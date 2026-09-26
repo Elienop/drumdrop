@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D164 on 2026-09-26 (*moves*; re-check the
+the highest ID on this page: the next new ID is D165 on 2026-09-26 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -1511,6 +1511,33 @@ D53 waits on an owner decision.
     the coordination its own timeout that fails the test with a message.
   - *Evidence:* the test in `internal/scheduler/showfiles_test.go`; found by the Sonar round of
     `feat/plex-show-artwork` (mutant s1)
+
+- **D164 · Older "is it still the same file?" checks trust the inode number alone.**
+  - *What:* `os.SameFile` compares only the device and the inode number
+    (`$GOROOT/src/os/types_unix.go:28-30`). ext4 gives a freed number to the next file at
+    once (measured 20 of 20), so a file swapped in can pass as the one checked. PR #23 fixed
+    this for the one-time episode rename (`sameRegular`: also the file type, size and
+    modification time). The same pattern is older, from PR #21 and before:
+    - `openRealDir` (`internal/scheduler/private.go` ~119): a folder swapped for a symlink to a
+      folder that took the freed number would pass. The show-file step and the placement rely
+      on it. Size and mtime do not suit folders (a folder's mtime moves with every entry);
+      it needs its own design (the type plus the folder's ctime, or opening without following
+      symlinks).
+    - `Claims.Claimants` (`internal/library/ownership.go` ~482) and `sameFolder` (~204): a
+      false match mostly adds a claimant, so callers refuse (fail-safe), except around
+      ownership.go ~270, which treats the recorded folder as the current one.
+    - `rootAt` (`internal/library/remove.go` ~121), `placedAt` (`internal/scheduler/previous.go`
+      ~184) and `sameDir` (`internal/scheduler/library.go` ~48): back-to-back stats in a
+      microsecond window, failing safe.
+    - Residual of the PR #23 fix: a different regular file with the same reused number, the
+      same size and the identical nanosecond mtime would still pass. Closing it means keeping
+      the file open until the decision (Windows needs a separate path) or comparing ctime
+      (three build-tagged files).
+  - *Why:* the owner's library is on ZFS; whether ZFS reuses an object number inside these
+    windows is unmeasured. Each site is either fail-safe or needs a swap timed within
+    milliseconds, so none is urgent.
+  - *Evidence:* `grep -rn 'os.SameFile' internal/`; found by the debugger on PR #23 (the
+    CI-only failure of `TestRenameEpisodeFilesNeverWaitsOnAFIFOSwappedIn`)
 
 ## Housekeeping & dependencies
 
