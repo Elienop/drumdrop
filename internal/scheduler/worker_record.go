@@ -35,7 +35,10 @@ func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, 
 	job, lesson, privateLesson := run.job, run.lesson, run.privateLesson
 	id := job.RailcontentID
 	// The download is complete: a shutdown that began meanwhile does not stop
-	// it being placed and recorded (both are local and short).
+	// it being placed and recorded (both are local). The show's own files are
+	// the exception: the placement of a new show's first episode asks Musora
+	// for the show (Resolve, which a shutdown does not stop: up to its 30 s
+	// timeout, BACKLOG D160) and fetches its images (which a shutdown does).
 	claims, err := w.claims(context.WithoutCancel(ctx))
 	if err != nil {
 		return 0, false, fmt.Errorf("not placed: %w", err)
@@ -48,7 +51,7 @@ func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, 
 	defer src.close()
 
 	rec := database.DownloadRecord{Quality: run.quality}
-	pl, err := w.place(run, claims, src, &rec)
+	pl, err := w.place(ctx, run, claims, src, &rec)
 	if err != nil {
 		return 0, false, err
 	}
@@ -95,7 +98,9 @@ func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, 
 
 // place puts the finished download src where the lesson lives and fills rec
 // with where that is, returning the placement to commit or undo:
-//   - plex-tv with a library: the season folder (moveToLibraryPlexTV);
+//   - plex-tv with a library: the season folder (moveToLibraryPlexTV), after
+//     the show's own files its show folder is missing (showFilesFor), which
+//     are the show's and never recorded;
 //   - otherwise the lesson's folder <root>/<Course>/NN - Title
 //     (placeLessonFolder), root being the library, or the downloads folder
 //     without one. No library is a library rooted at the downloads folder.
@@ -115,7 +120,7 @@ func (w *Worker) recordDownload(ctx context.Context, run *jobRun) (bytes int64, 
 // a row can record a folder written under the other layout. An error
 // returned means the download could not be placed, and nothing outside its
 // private folder was changed.
-func (w *Worker) place(run *jobRun, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
+func (w *Worker) place(ctx context.Context, run *jobRun, claims *library.Claims, src *scratchDir, rec *database.DownloadRecord) (*placement, error) {
 	job, lesson, prev, index := run.job, run.lesson, run.prev, run.index
 	id := job.RailcontentID
 	rel, err := filepath.Rel(w.Cfg.DownloadsDir, lessonDir(run.outDir, index, lesson.Title))
@@ -154,6 +159,8 @@ func (w *Worker) place(run *jobRun, claims *library.Claims, src *scratchDir, rec
 		res, err := moveToLibraryPlexTV(lib, show, 1, index, lesson.Title, src, plexLibrary{
 			self: prev, claims: claims, roots: w.roots(), jobID: job.ID,
 			episodeNFO: []byte(musora.BuildEpisodeNFO(lesson, show, 1, index)),
+			showFiles:  w.showFilesFor(ctx, run, show),
+			song:       lesson.IsSong(),
 		})
 		if err != nil {
 			fmt.Fprintf(w.log(), "  ⚠ move to library %d: %v\n", id, err)

@@ -134,6 +134,12 @@ func Sanitize(name string) string {
 	return s
 }
 
+// PosterSuffix ends the name DownloadLesson gives a lesson's image,
+// "<base>-poster.jpg". The default layout keeps it; the plex-tv layout places
+// the image as "<episode base>.jpg" instead, or one per version for a song
+// (the scheduler's episodeNames).
+const PosterSuffix = "-poster.jpg"
+
 // fetchToFile downloads url to dest, a path inside the open folder root. The
 // media/asset URLs are open-read and need no auth: a User-Agent header is
 // enough, no session cookie is attached.
@@ -319,7 +325,9 @@ type auxFetch struct {
 func auxFetches(l *Lesson, dir, base string) []auxFetch {
 	var out []auxFetch
 	if thumb := firstNonEmpty(l.Thumbnail, l.Video.PosterImageURL); thumb != "" {
-		out = append(out, auxFetch{artifact: "poster", url: thumb, dest: filepath.Join(dir, base+"-poster.jpg")})
+		// Named .jpg, so asked for as JPEG: Musora stores many thumbnails as
+		// PNG, which Sanity converts on request (JPEGURL).
+		out = append(out, auxFetch{artifact: "poster", url: JPEGURL(thumb), dest: filepath.Join(dir, base+PosterSuffix)})
 	}
 	out = append(out, resourceFetches(l.Resources, dir)...)
 	out = append(out, playAlongFetches(l, dir)...)
@@ -444,7 +452,8 @@ func DownloadLesson(ctx context.Context, l *Lesson, o DownloadOpts) error {
 			if err := runYtDlp(ctx, args, o.OnProgress); err != nil {
 				return err
 			}
-		} else if slug := l.SoundsliceSlug(); slug != "" {
+		} else if l.IsSong() {
+			slug := l.SoundsliceSlug()
 			// A song has no Musora/Vimeo video of its own; its playable videos are
 			// the YouTube-backed recordings referenced inside its soundslice score.
 			// Download EACH recording (e.g. Original + Drumless) as a bracket-tagged

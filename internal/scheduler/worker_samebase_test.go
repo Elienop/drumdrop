@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,11 +25,19 @@ import (
 // files removes them. What it did bring back is replaced, a folder merged.
 // A recorded file at an old title's name still goes (ruling #66), even one
 // whose name starts with this episode's base.
+//
+// The episode's image is placed as "<base>.jpg" (owner ruling #78). A
+// recorded image under the name earlier versions gave it, "<base>-poster.jpg",
+// counts as brought back when the re-download places "<base>.jpg": it goes,
+// and the record names the new one, so the episode never has two images, and
+// never none (it stays when the re-download brings no image).
 func TestWorkerPlexTvSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T) {
-	for _, missing := range []string{"vtt", "poster", "resources"} {
-		t.Run("missing "+missing, func(t *testing.T) {
-			checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t, missing)
-		})
+	for _, recorded := range []string{sameTitleBase + "-poster.jpg", sameTitleBase + ".jpg"} {
+		for _, missing := range []string{"vtt", "poster", "resources"} {
+			t.Run("missing "+missing+"/recorded "+recorded, func(t *testing.T) {
+				checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t, missing, recorded)
+			})
+		}
 	}
 }
 
@@ -46,15 +55,16 @@ var (
 	}
 	sameTitleEpisode = map[string]string{
 		"vtt":       sameTitleBase + ".en.vtt",
-		"poster":    sameTitleBase + "-poster.jpg",
+		"poster":    sameTitleBase + ".jpg",
 		"resources": sameTitleBase + " resources/",
 	}
 )
 
 // checkSameTitleReDownloadKeepsWhatItDidNotBringBack is
 // TestWorkerPlexTvSameTitleReDownloadKeepsWhatItDidNotBringBack for a
-// re-download that does not bring back the extra missing.
-func checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T, missing string) {
+// re-download that does not bring back the extra missing, of a lesson whose
+// record names its image as recordedImage.
+func checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T, missing, recordedImage string) {
 	t.Helper()
 	const base = sameTitleBase
 	w, store, dl, lib, season := plexWorker(t)
@@ -62,7 +72,7 @@ func checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T, missing st
 	w.Log = &log
 	dl.afterWrite = func(dir string) { writeExtrasExcept(t, dir, missing) }
 	oldTitle := base + " (old).mp4" // "Lesson A (old)", a title the lesson had
-	mine := []string{base + ".mp4", base + ".nfo", sameTitleEpisode["vtt"], sameTitleEpisode["poster"], sameTitleEpisode["resources"], oldTitle}
+	mine := []string{base + ".mp4", base + ".nfo", sameTitleEpisode["vtt"], recordedImage, sameTitleEpisode["resources"], oldTitle}
 	seedSeason(t, season, mine...)
 	prev := recordedRow(100, season, mine...)
 	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
@@ -76,17 +86,25 @@ func checkSameTitleReDownloadKeepsWhatItDidNotBringBack(t *testing.T, missing st
 	rec := onlyRecord(t, store)
 	// The one it missed is kept as it was; the others are the new
 	// download's, the resources folder merged with the earlier one.
-	assertSeeded(t, season, sameTitleEpisode[missing])
+	kept, image := sameTitleEpisode[missing], sameTitleEpisode["poster"]
+	if missing == "poster" {
+		kept, image = recordedImage, recordedImage
+	}
+	assertSeeded(t, season, kept)
 	assertExtrasReplacedExcept(t, season, missing)
 	assertExist(t, false, filepath.Join(season, oldTitle))
-	want := recordOf(season, base+".mp4", base+".nfo", sameTitleEpisode["vtt"], sameTitleEpisode["poster"], sameTitleEpisode["resources"])
+	if image != recordedImage {
+		// The image the record named under its old name was replaced.
+		assertExist(t, false, filepath.Join(season, recordedImage))
+	}
+	want := recordOf(season, base+".mp4", base+".nfo", sameTitleEpisode["vtt"], image, sameTitleEpisode["resources"])
 	if got := slices.Sorted(slices.Values(rec.entries)); !reflect.DeepEqual(got, slices.Sorted(slices.Values(want))) {
 		t.Errorf("entries = %v, want %v", got, want)
 	}
 	if strings.Contains(log.String(), "left its previous folder") {
 		t.Errorf("log %q says a folder was left behind", log.String())
 	}
-	assertADeleteRemovesEveryEntry(t, w, lib, season, rec.entries, mine)
+	assertADeleteRemovesEveryEntry(t, w, lib, season, rec.entries, append(mine, image))
 }
 
 // writeExtrasExcept writes, into the downloaded lesson folder dir, every
@@ -189,4 +207,28 @@ func TestWorkerPlexTvSameTitleReDownloadOfALegacyRow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWorkerPlexTvRefusedRecordKeepsTheOldImageName proves the image a
+// re-download retires under its old name ("<base>-poster.jpg", replaced by
+// "<base>.jpg") is only set aside: when the download is not recorded, the
+// undo puts it back where it was and takes the new one out, so the episode
+// is exactly as it was.
+func TestWorkerPlexTvRefusedRecordKeepsTheOldImageName(t *testing.T) {
+	const base = sameTitleBase
+	w, store, dl, _, season := plexWorker(t)
+	dl.afterWrite = func(dir string) { writeExtrasExcept(t, dir, "") }
+	mine := []string{base + ".mp4", base + ".nfo", base + "-poster.jpg"}
+	seedSeason(t, season, mine...)
+	prev := recordedRow(100, season, mine...)
+	prev.Position = sql.NullInt64{Int64: 5, Valid: true}
+	store.lessons[100] = prev
+	store.withFiles = []database.Lesson{prev}
+	store.finishErr = errors.New("database is locked")
+
+	if _, err := w.RunOnce(context.Background(), 0); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertContent(t, season, mine...)
+	assertExist(t, false, filepath.Join(season, base+".jpg"))
 }

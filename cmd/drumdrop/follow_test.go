@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,8 @@ type cliStore struct {
 	markedDLed []int
 	touched    []int64
 	nextJobID  int64
+	// withFiles is what ListLessonsWithFiles returns.
+	withFiles []database.Lesson
 }
 
 func newCLIStore(follows []database.Follow) *cliStore {
@@ -163,7 +166,23 @@ func (s *cliStore) GetLesson(ctx context.Context, id int) (database.Lesson, erro
 }
 func (s *cliStore) MarkJobRunning(ctx context.Context, id int64) error { return nil }
 func (s *cliStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
-	return nil, nil
+	return s.withFiles, nil
+}
+
+// SwapLibraryEntries records the new record on the row withFiles holds for
+// before, when it still records before's files (the store's compare-and-swap).
+func (s *cliStore) SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error {
+	for i, r := range s.withFiles {
+		if r.RailcontentID != before.RailcontentID {
+			continue
+		}
+		if r.OutputDir != before.OutputDir || r.VideoPath != before.VideoPath || r.LibraryEntries != before.LibraryEntries {
+			return database.ErrLessonChanged
+		}
+		s.withFiles[i].LibraryEntries = database.EncodeLibraryEntries(entries)
+		return nil
+	}
+	return sql.ErrNoRows
 }
 func (s *cliStore) setJobStatus(id int64, status string) {
 	j := s.jobs[id]
@@ -306,6 +325,57 @@ func TestRunSyncLimitCapsNewDownloads(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Sync complete") {
 		t.Errorf("real run should print a completion summary; got:\n%s", buf.String())
+	}
+}
+
+// cliImages serves every image as "jpeg".
+type cliImages struct{ calls int }
+
+func (c *cliImages) FetchJPEG(context.Context, string) ([]byte, error) {
+	c.calls++
+	return []byte("jpeg"), nil
+}
+
+// TestRunSyncGivesShowsTheirFilesOnlyOnARealRun: like a daemon cycle, a real
+// sync ends with the one-time rename of the plex-tv episode files and the
+// shows' missing files (a show already in the library that this run
+// downloads nothing into included); a dry run writes and fetches nothing.
+func TestRunSyncGivesShowsTheirFilesOnlyOnARealRun(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		store := newCLIStore([]database.Follow{cliNodeFollow(1, 100)})
+		lib := t.TempDir()
+		season := filepath.Join(lib, "Course", "Season 01")
+		if err := os.MkdirAll(season, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		poster := filepath.Join(season, "Course - s01e01 - L-poster.jpg")
+		if err := os.WriteFile(poster, []byte("image"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		store.withFiles = []database.Lesson{{
+			RailcontentID: 11, FollowID: sql.NullInt64{Int64: 1, Valid: true},
+			OutputDir:      sql.NullString{String: season, Valid: true},
+			LibraryEntries: database.EncodeLibraryEntries([]string{"Course/Season 01/Course - s01e01 - L.mp4", "Course/Season 01/Course - s01e01 - L-poster.jpg"}),
+		}}
+		store.downloaded[11] = true
+		planner, worker := newSyncHarness(t, store, cliExpander{ids: map[int64][]int{1: {11}}}, &cliDownloader{})
+		worker.Cfg.LibraryDir, worker.Cfg.Layout = lib, scheduler.LayoutPlexTV
+		img := &cliImages{}
+		worker.Images = img
+
+		if err := runSync(context.Background(), planner, worker, dryRun, 0, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Stat(filepath.Join(lib, "Course", "tvshow.nfo"))
+		if wrote := err == nil; wrote == dryRun {
+			t.Errorf("dryRun=%v: tvshow.nfo written = %v (fetched %d)", dryRun, wrote, img.calls)
+		}
+		// As a daemon cycle, a real sync also gives the episode image the name
+		// Plex reads.
+		_, err = os.Stat(filepath.Join(season, "Course - s01e01 - L.jpg"))
+		if renamed := err == nil; renamed == dryRun {
+			t.Errorf("dryRun=%v: episode image renamed = %v", dryRun, renamed)
+		}
 	}
 }
 

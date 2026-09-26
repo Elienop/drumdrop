@@ -148,12 +148,20 @@ func (Downloader) Download(ctx context.Context, l *musora.Lesson, o musora.Downl
 	return musora.DownloadLesson(ctx, l, o)
 }
 
+// Images adapts musora.FetchJPEG to scheduler.ImageFetcher.
+type Images struct{}
+
+func (Images) FetchJPEG(ctx context.Context, url string) ([]byte, error) {
+	return musora.FetchJPEG(ctx, url)
+}
+
 // Compile-time assertions that the real adapters satisfy the scheduler
 // interfaces. They wrap the same musora calls the engine has always used.
 var (
-	_ scheduler.Expander   = Expander{}
-	_ scheduler.Resolver   = Resolver{}
-	_ scheduler.Downloader = Downloader{}
+	_ scheduler.Expander     = Expander{}
+	_ scheduler.Resolver     = Resolver{}
+	_ scheduler.Downloader   = Downloader{}
+	_ scheduler.ImageFetcher = Images{}
 )
 
 // Build is the single wiring recipe: it composes a Planner, Worker, and Daemon
@@ -171,8 +179,10 @@ func Build(store *database.Store, cfg scheduler.Config, permIDs string, log io.W
 		Log:      log,
 	}
 	worker := scheduler.NewWorker(store, Resolver{}, Downloader{}, cfg, permIDs, log)
-	// Set the sink by assignment so NewWorker's positional signature is untouched.
+	// Set the sink and the show-image fetcher by assignment so NewWorker's
+	// positional signature is untouched.
 	worker.Progress = progress
+	worker.Images = Images{}
 	daemon := &scheduler.Daemon{
 		Store:    store,
 		Planner:  planner,

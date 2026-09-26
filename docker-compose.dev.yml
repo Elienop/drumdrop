@@ -25,15 +25,17 @@ services:
       # - DRUMDROP_LIBRARY_DIR=/media/library
       # Optional Plex TV layout (requires DRUMDROP_LIBRARY_DIR): the library copy uses
       # Plex's TV-Shows naming — <library>/<Show>/Season 01/<Show> - s01e05 - Title.mp4
-      # (sidecars share the episode base) — instead of the default Course/NN - Lesson
-      # folders. In this layout the .nfo is a Kodi/Plex <episodedetails> doc (not
-      # <movie>), carrying the episode title/showtitle/season/episode/aired/instructor.
-      # On the PLEX side: create a *TV Shows* library pointing at DRUMDROP_LIBRARY_DIR
-      # and switch its agent to one that reads .nfo files (the XBMCnfoTVImporter
-      # plugin is what the working setup uses), then Refresh Metadata. The show will
-      # not match TheTVDB, so episode titles must come from the local <episodedetails>
-      # nfos; Local Media Assets alone was not enough in testing (Plex kept showing
-      # "Episode N"). Empty/unset (or "default") keeps today's layout.
+      # (sidecars .nfo/.jpg/.en.vtt share the episode base; a song's versions each
+      # get their own .jpg and .nfo) — instead of the default Course/NN - Lesson
+      # folders, plus tvshow.nfo, poster.jpg and fanart.jpg per show (created only
+      # when missing). In this layout the .nfo is a Kodi/Plex <episodedetails> doc
+      # (not <movie>), carrying the episode title/showtitle/season/episode/aired/
+      # instructor.
+      # On the PLEX side: a *TV Shows* library on DRUMDROP_LIBRARY_DIR with Scanner
+      # "Plex TV Series", Agent "Plex NFO Series", "Use local assets" ON and "Prefer
+      # local metadata" ON. Plex only chooses local images present at an item's
+      # first match: a show already in Plex needs a one-time "Plex Dance" (see the
+      # README's "Plex TV layout"). Empty/unset (or "default") keeps today's layout.
       # - DRUMDROP_LAYOUT=plex-tv
       # Set to the ABSOLUTE host path of ./downloads so the UI's "Copy path" gives
       # a host path you can paste into a file manager (else it shows /downloads).

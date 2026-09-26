@@ -14,7 +14,7 @@ finding, an incident, a parked idea), add it here in the same commit that discov
 
 **IDs** (`D1`, `D2`, …) are stable. An entry keeps its ID when it moves between sections, and
 an ID is never reused (the owner's vault cites them). A new entry takes the next number after
-the highest ID on this page: the next new ID is D142 on 2026-09-25 (*moves*; re-check the
+the highest ID on this page: the next new ID is D165 on 2026-09-26 (*moves*; re-check the
 highest ID before you use it).
 
 **Evidence commands** run from the repo root. A number marked *(moves)* was true on the day
@@ -1454,6 +1454,91 @@ D53 waits on an owner decision.
     `outline` that stays transparent until forced colours are on.
   - *Evidence:* `grep -rn 'outline-none\|outline-hidden\|outline-1' web/src/components/ui`
 
+- **D160 · A shutdown during a new show's first placement can wait up to 30 s on Musora.**
+  - *What:* the plex-tv placement of a new show's first episode asks Musora for the show's
+    document (`Resolve`) before it places the episode. `Resolve` takes no context
+    (`musora.Query` builds its request with `http.NewRequest`), so a shutdown that lands
+    then waits for the answer, up to the client's 30 s timeout. Docker's default stop
+    timeout is 10 s, so a hung Musora gets the process killed, and the finished download,
+    still in its private folder, is removed by the next start's sweep and fetched again.
+    The image fetches honour the context.
+  - *Why:* rare (a hung Musora during a stop, on a new show's first episode), but the cost
+    is a whole re-download. Fix later: make `Resolve` (and `musora.Query`) cancellable.
+  - *Evidence:* `showFilesFor` and `resolveShowDoc` in `internal/scheduler/showfiles.go` ·
+    `grep -n 'http.NewRequest(' internal/musora/sanity.go`; found by the code seat of
+    `feat/plex-show-artwork`
+
+- **D161 · "Never over an existing file" depends on a rename that refuses to replace.**
+  - *What:* `createOnly` (a show's own files) and the one-time episode-file rename publish
+    a file by renaming a hidden temp file to its name with `renameAt`, which refuses an
+    existing name only where the platform can: on Linux, a filesystem without
+    `RENAME_NOREPLACE` (some network filesystems) returns EINVAL and `renameAt` retries with
+    a plain rename that replaces; on Windows `os.Rename` replaces. There, a file that
+    appears between the slot check and the rename (the owner's `poster.jpg`, dropped in at
+    that moment) is replaced. The behaviour is `renameAt`'s and predates the branch; these
+    callers now rely on it.
+  - *Why:* a narrow race, on filesystems and platforms the owner does not run, but a
+    write-once promise. Fix later: publish with a hard link (`os.Root.Link`, which never
+    replaces on any platform), then remove the temp file, falling back to the rename where
+    hard links are not supported.
+  - *Evidence:* `createOnly` in `internal/scheduler/showfiles.go` · `renameat_linux.go`,
+    `renameat_other.go` in `internal/scheduler`; found by the code seat of
+    `feat/plex-show-artwork`
+
+- **D162 · A symlinked show folder gets the episode but not the show's files.** *Owner's call.*
+  - *What:* when a plex-tv show folder is a symlink to another show folder inside the
+    library, the placement still puts the episode through it (it lands in the other show's
+    `Season 01` and is recorded there), because `openLibraryParent` follows symlinks that
+    stay inside the library. The show-file step refuses the same symlink (`openRealDir`),
+    so the other show never receives this show's poster, background or `tvshow.nfo`. The
+    two paths disagree: one refuses to write this show's artwork into another show's folder,
+    the other writes this show's episode there.
+  - *Why:* no known way for DrumDrop itself to create such a link; it needs the owner (or
+    another tool) to make one. The question is whether the placement should refuse a
+    symlinked show folder too, which changes what the owner can do with links on purpose.
+  - *Evidence:* `TestPlexTVPlacementWritesNoShowFilesThroughASymlink` in
+    `internal/scheduler/showfiles_test.go` (it shows the episode recorded under the other
+    show) · `openLibraryParent`, `openShowDir`; found by the Sonar round of
+    `feat/plex-show-artwork`
+
+- **D163 · One test hangs instead of failing when `createOnly` skips its flush.**
+  - *What:* `TestCreateOnlyNeverPublishesAnotherWritersFile` coordinates its two writers only
+    inside the `syncFile` stub. A change that skips the flush never reaches that stub, so the
+    second writer waits and the test runs until the 5-minute `go test` timeout instead of
+    failing at once. It still fails, so the guard is pinned, but slowly and with a timeout's
+    stack dump instead of a message.
+  - *Why:* a mutation run or a real regression costs 5 minutes and reads as a hang. Fix: give
+    the coordination its own timeout that fails the test with a message.
+  - *Evidence:* the test in `internal/scheduler/showfiles_test.go`; found by the Sonar round of
+    `feat/plex-show-artwork` (mutant s1)
+
+- **D164 · Older "is it still the same file?" checks trust the inode number alone.**
+  - *What:* `os.SameFile` compares only the device and the inode number
+    (`$GOROOT/src/os/types_unix.go:28-30`). ext4 gives a freed number to the next file at
+    once (measured 20 of 20), so a file swapped in can pass as the one checked. PR #23 fixed
+    this for the one-time episode rename (`sameRegular`: also the file type, size and
+    modification time). The same pattern is older, from PR #21 and before:
+    - `openRealDir` (`internal/scheduler/private.go` ~119): a folder swapped for a symlink to a
+      folder that took the freed number would pass. The show-file step and the placement rely
+      on it. Size and mtime do not suit folders (a folder's mtime moves with every entry);
+      it needs its own design (the type plus the folder's ctime, or opening without following
+      symlinks).
+    - `Claims.Claimants` (`internal/library/ownership.go` ~482) and `sameFolder` (~204): a
+      false match mostly adds a claimant, so callers refuse (fail-safe), except around
+      ownership.go ~270, which treats the recorded folder as the current one.
+    - `rootAt` (`internal/library/remove.go` ~121), `placedAt` (`internal/scheduler/previous.go`
+      ~184) and `sameDir` (`internal/scheduler/library.go` ~48): back-to-back stats in a
+      microsecond window, failing safe.
+    - Residual of the PR #23 fix: a different regular file with the same reused number, the
+      same size and the identical nanosecond mtime would still pass. Closing it means keeping
+      the file open until the decision (Windows needs a separate path) or comparing ctime
+      (three build-tagged files).
+  - *Why:* the owner's library is on ZFS; whether ZFS reuses an object number inside these
+    windows is unmeasured. Each site is either fail-safe or needs a swap timed within
+    milliseconds, so none is urgent.
+  - *Evidence:* `grep -rn 'os.SameFile' internal/`; found by the debugger on PR #23 (the
+    CI-only failure of `TestRenameEpisodeFilesNeverWaitsOnAFIFOSwappedIn`)
+
 ## Housekeeping & dependencies
 
 - **D146 · The release job installs the web dependencies while holding a write token.**
@@ -1509,6 +1594,34 @@ D53 waits on an owner decision.
     ignored), so it waits for the owner.
   - *Evidence:* `cmdLogin`, `cmdWhoami`, `cmdLogout`, `cmdFollows`, `cmdUnfollow` in
     `cmd/drumdrop/`; found by the fix round of that branch
+
+- **D157 · An empty "Africa" show in the owner's library.**
+  - *What:* the owner's plex-tv library holds a show "Africa" with an nfo and a poster but
+    no video, from June. How it got there has not been investigated: which lesson row (if
+    any) records those files, and whether a download placed them without a video.
+  - *To do:* find the row(s) filed there (`ListLessonsWithFiles`, by `output_dir` or a
+    record entry under `Africa/`), and what their last download placed. Never list or read
+    the owner's share without asking first.
+  - *Evidence:* reported by the owner on 2026-09-25 while testing show artwork
+- **D158 · Two lessons of one course land in two one-lesson shows.**
+  - *What:* "Welcome To 30-Day Jazz!" and "The Swing Pattern" each became a show of one
+    episode, instead of two episodes of one show. A likely cause, not yet checked: each was
+    followed on its own, and a node follow's show is the followed node's title
+    (`plexShow`: `folderTitle(f)` for any follow that is not an instructor's), so a
+    followed lesson is a show named after itself.
+  - *To do:* check the two lessons' follows. If that is the cause, decide whether a
+    followed single lesson should file under its parent course's show instead (an owner
+    call: it moves where new downloads go).
+  - *Evidence:* `plexShow` in `internal/scheduler/worker.go`; reported by the owner on
+    2026-09-25
+- **D159 · A resource is saved without its file extension.**
+  - *What:* a lesson resource named "E-Book PDF" was saved as `E-Book PDF`, with no `.pdf`,
+    so a file manager or Plex can't tell what it is. The name comes from the resource's
+    title when it has one (`Sanitize(firstNonEmpty(r.Name, urlBasename(r.URL)))`), and a
+    title carries no extension; only the URL's basename does.
+  - *To do:* keep the title, and add the URL's extension when the title has none.
+  - *Evidence:* `resourceFetches` in `internal/musora/download.go`; reported by the owner
+    on 2026-09-25
 
 - **D16 · Move off Node 20, which reached end-of-life on 2026-04-30.**
   - *What:* CI (`node-version: 20` in `ci.yml` and `main.yml`) and the Dockerfile's web stage
@@ -1600,6 +1713,42 @@ D53 waits on an owner decision.
 Three choices described in their own entries are also waiting on the owner: D3's yt-dlp
 rebuild, D53's fix for the tokenless loopback mode (options A, B or C), and whether D81's
 lease holder token goes into the unreleased migration 004 (before this branch merges).
+
+- **D154 · A show's own files stay after its last lesson is deleted.**
+  - *Context:* ruling #78 (3) makes `tvshow.nfo`, `poster.jpg` and `fanart.jpg` write-once
+    and unrecorded, like the season folder: drumdrop creates a missing one and never
+    removes one. So deleting a show's last lesson leaves the show folder with those three
+    files (and the empty season folder) behind, and Plex keeps listing an empty show.
+  - *The question:* whether a delete that removes a show's last recorded lesson should also
+    remove the show files drumdrop wrote (it can't tell them from an owner's own files at
+    the same names without recording them), or leave them.
+  - *Evidence:* the top comment of `internal/scheduler/showfiles.go` ("never replaces or
+    removes one"); `EnsureShowFiles` writes no record
+- **D155 · Show art is never refreshed when Musora changes it.**
+  - *Context:* a show's files are written once; `tvshow.nfo` marks the show done, and from
+    then on the show costs no request (ruling #78 (3)). A new course header, coach card or
+    description on Musora never reaches the show folder. The only way today is by hand:
+    remove `tvshow.nfo` and the images to replace, and the next cycle writes them again.
+  - *The question:* whether to refresh them (on a schedule, or from an action in the UI),
+    given that a refresh must not replace a file the owner put there.
+  - *Evidence:* `EnsureShowFiles` and `showFilesFor` in `internal/scheduler/showfiles.go`
+- **D156 · A re-download replaces a hand-placed `<episode>.jpg`.**
+  - *Context:* in plex-tv the episode image is `<episode>.jpg`, the name Plex documents
+    for an episode's image, so an owner may put one there by hand. A re-download places its
+    image at that name and, like every other name it places, replaces an entry there that
+    no lesson records (owner ruling #66: a leftover drumdrop no longer tracks), logging
+    "replaced … which no lesson recorded". The file is set aside, then **deleted** when the
+    download is recorded: no copy is kept. The same happens to an owner who overwrites
+    drumdrop's own recorded `<episode>.jpg` in place with their own art: it is the
+    lesson's recorded file, so the next re-download replaces it and deletes it. The
+    one-time rename does neither: it leaves a name already taken alone. Legacy name
+    matching never claims `<episode>.jpg`, so a delete never removes an unrecorded one.
+  - *The question:* whether `<episode>.jpg` (and a song version's `.jpg` and `.nfo`) should
+    be protected from that replacement, unlike the other episode names: left alone when
+    unrecorded or changed since drumdrop placed it, with the download's image not placed.
+    Protecting it needs the owner's ruling; nothing is built.
+  - *Evidence:* `clearNames` in `internal/scheduler/place.go` ·
+    `TestPlexTVMoveReplacesAnEntryNoLessonClaims`
 
 - **D132 · A long title makes the Lessons table scroll sideways, and then every ⋯ is out
   of view.**
@@ -2057,6 +2206,60 @@ lease holder token goes into the unreleased migration 004 (before this branch me
   D93, D106.
 
 ## Recently shipped
+
+- **D153 · Plex shows and episodes get artwork Plex reads.** Branch `feat/plex-show-artwork`
+  (owner rulings #78, 1–5).
+  - *Was:* in plex-tv, drumdrop wrote nothing at show level, and named each episode's image
+    `<episode>-poster.jpg`, which Plex does not read. A song's one `<episode>.nfo` and image
+    matched neither version video, so Plex showed a song with no date and no cover.
+  - *Now:* each show folder gets `tvshow.nfo`, `poster.jpg` and (courses) `fanart.jpg`,
+    created only when missing, never replaced, never recorded; a new show gets them before
+    its first video. Each episode's image is `<episode>.jpg`, and a song has one `.jpg` and
+    one `.nfo` per version video; all are placed before the video. Files placed by earlier
+    versions are renamed once, at the end of a cycle, by copy, record, then removal, so a
+    crash or an unmounted library never loses a file; a lesson moved before the record
+    existed is recorded by it (D65's exception). The README's *Plex TV layout* has the Plex
+    setup that works (*Plex TV Series* scanner, *Plex NFO Series* agent, local assets and
+    local metadata on) and the one-time "Plex Dance" for shows already in Plex.
+  - *Residuals:* a show's own files stay after its last lesson is deleted (D154) and are
+    never refreshed (D155); a hand-placed `<episode>.jpg` is replaced by a re-download
+    (D156). A `tvshow.nfo` the owner wrote by hand marks the show done, so drumdrop adds no
+    poster or background to it (owner, 2026-09-25: *"Keep it"*; the README says to delete it
+    to have the next cycle fill everything). A song retitled from "X [Y]" to "X" at the same episode
+    number keeps its old title's per-version files, recorded (a later delete removes them).
+    A song's subtitles keep one unsuffixed name, which may match neither version in Plex.
+    A re-download keeps a recorded version video whatever Musora's song flag says; a single
+    `<episode> [L].mp4` with its own `.jpg` and `.nfo` can not be told from an earlier title
+    "<title> [L]" of a lesson that is not a song, so when such a lesson is retitled to
+    "<title>" its old title's video, image and nfo are kept and stay recorded beside the new
+    download (a later delete removes them), where before the per-version files they went.
+    This follows owner ruling #72 (e): after a title change the old title's video stays, and
+    the owner deletes it by hand (here it also stays recorded, so the lesson's Delete removes
+    it too). Only an old title still recorded with its `<episode> [L]-poster.jpg` (not yet
+    renamed) goes as before. The other way round, a lesson recorded as an ordinary one that
+    Musora now calls a song keeps its `<episode>.mp4` with its own `.jpg` and `.nfo`,
+    recorded, beside the versions the re-download brings (any `<episode>.mp4` in the season
+    folder keeps them, recorded or not, unless the re-download places them anew). The show-file step has no per-cycle
+    memory of a show Musora answered nothing for beyond the process: it is asked again after
+    each restart. An empty image field, or an image URL drumdrop refuses (a scheme other
+    than https, no host name), leaves that slot empty for good once the show's `tvshow.nfo`
+    is written; delete `tvshow.nfo` to have the next cycle fill it again. An image URL with
+    no scheme at all is not final: that show gets no `tvshow.nfo` and is asked about again
+    every cycle (one Musora request each). Each writer's hidden temp file is its own, named
+    by host name and process id, since the image runs drumdrop as process 1 of every
+    container; two containers given one host name (a compose `hostname:`, host networking)
+    can still publish each other's unfinished file, so run a second drumdrop on the same
+    library with `docker exec` in the serve container. A writer that crashed mid-write
+    removes its own temp file next time; one left by a container since recreated stays (Plex
+    ignores it). The record swap's running-job guard (`SwapLibraryEntries`) misses a job
+    canceled while its worker is still placing: that needs two processes and a Cancel during
+    the placement, no file is lost, and the next re-download repairs the record. A real guard
+    needs a marker the worker writes when it ends, a new mechanism, so it is not built.
+  - *Evidence:* `internal/scheduler/showfiles.go`, `internal/scheduler/episodefiles.go`,
+    `episodeNames` and `recordedVersions` in `internal/scheduler/plexmove.go`,
+    `library.VersionEntry` · `TestAVersionIsKeptWhateverMusorasSongFlagSays`,
+    `TestALessonNowASongKeepsItsOwnVideosFiles`, `TestWriterID`,
+    `TestFetchJPEGAsksAgainForAURLWithNoScheme`
 
 - **D18 · Test coverage reaches SonarQube.** Branch `fix/sonar-gate-and-coverage`.
   - *Was:* there was no `make coverage` target, so every scan reported 0%. v0.8.0's scan of

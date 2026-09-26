@@ -79,7 +79,10 @@ func (d *Daemon) progress() ProgressSink {
 	return d.Progress
 }
 
-// RunOnce runs one full cycle: plan, then drain. It plans first so any newly
+// RunOnce runs one full cycle: plan, drain, then the one-time rename of the
+// plex-tv episode files placed before their names changed
+// (Worker.RenameEpisodeFiles) and the plex-tv shows' own files
+// (Worker.EnsureShowFiles). It plans first so any newly
 // discovered lessons are queued before the worker drains, letting a single cycle
 // download brand-new content. It logs a one-line summary (planned, processed) and
 // returns the first fatal error encountered (a planner or worker store failure);
@@ -92,6 +95,14 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 
 	planned, perr := d.Planner.Plan(ctx, 0)
 	processed, werr := d.Worker.RunOnce(ctx, 0)
+	// The episode files placed under their old names get the names Plex
+	// reads, and the shows no download of this cycle placed into get their
+	// missing own files (plex-tv only; both cost nothing once done). A pause
+	// stops them like it stops the queue.
+	if werr == nil && ctx.Err() == nil && !d.IsPaused() {
+		d.Worker.RenameEpisodeFiles(ctx)
+		d.Worker.EnsureShowFiles(ctx)
+	}
 
 	fmt.Fprintf(d.log(), "cycle: planned %d, processed %d\n", planned, processed)
 	d.progress().Emit(ProgressEvent{

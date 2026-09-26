@@ -51,9 +51,23 @@ type Worker struct {
 	// (the daemon's own pause flag only gates whole cycles). nil => never paused
 	// (the CLI sync path has no daemon). engine.Build wires it to Daemon.IsPaused.
 	IsPaused func() bool
+	// Images fetches the images of a plex-tv show's own files (showfiles.go).
+	// nil writes no show files; engine.Build sets it.
+	Images ImageFetcher
 	// sleep waits between retry attempts. It defaults to time.Sleep; tests inject
 	// a no-op so retry paths run instantly.
 	sleep func(time.Duration)
+
+	// showMu guards showDown, set when Musora could not be reached for a
+	// show's files this cycle (the show-file step then waits for the next),
+	// and showUnknown, the show folders none of whose lessons leads to a show
+	// of that name (not asked about again in this process); and renamed, the
+	// lessons the one-time rename of episode files has nothing left to do for
+	// (episodefiles.go; not looked at again in this process).
+	showMu      sync.Mutex
+	showDown    bool
+	showUnknown map[string]bool
+	renamed     map[int]bool
 
 	// mu guards running. running maps an in-flight job id to the CancelFunc of
 	// the per-job context passed into the Downloader, so CancelRunning can kill an
@@ -230,6 +244,7 @@ func (w *Worker) backoff(i int) time.Duration {
 // whole queue. Cancellation returns nil (not an error): the in-flight job, if
 // any, has already finished before the next claim.
 func (w *Worker) RunOnce(ctx context.Context, limit int) (processed int, err error) {
+	w.startShowCycle()
 	for {
 		if err := ctx.Err(); err != nil {
 			return processed, nil

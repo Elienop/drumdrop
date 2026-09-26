@@ -112,6 +112,9 @@ func (s *fakePlannerStore) MarkJobRunning(ctx context.Context, id int64) error {
 func (s *fakePlannerStore) ListLessonsWithFiles(ctx context.Context) ([]database.Lesson, error) {
 	panic("ListLessonsWithFiles: not expected from Planner")
 }
+func (s *fakePlannerStore) SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error {
+	panic("SwapLibraryEntries: not expected from Planner")
+}
 func (s *fakePlannerStore) StartDownload(ctx context.Context, jobID int64, id int) error {
 	panic("StartDownload: not expected from Planner")
 }

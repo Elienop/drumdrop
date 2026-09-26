@@ -35,6 +35,13 @@ type Downloader interface {
 	Download(ctx context.Context, l *musora.Lesson, o musora.DownloadOpts) error
 }
 
+// ImageFetcher downloads an image as JPEG bytes, for a plex-tv show's
+// poster.jpg and fanart.jpg (musora.FetchJPEG, whose errors say whether to
+// ask again).
+type ImageFetcher interface {
+	FetchJPEG(ctx context.Context, url string) ([]byte, error)
+}
+
 // Expander turns one follow into the railcontent ids of the lessons under it.
 // Node follows expand via the catalog walk; instructor follows via the
 // instructor-lessons query.
@@ -81,6 +88,11 @@ type Store interface {
 	NotReturnedDownload(ctx context.Context, jobID int64, id int, reason, keptMsg string, onDisk bool) error
 	CancelDownload(ctx context.Context, jobID int64, id int, onDisk bool) error
 	RequeueStaleRunning(ctx context.Context) (int, error)
+	// the one-time rename of plex-tv episode files (episodefiles.go): a
+	// compare-and-swap of the lesson's library record that a delete's hold
+	// or a running job of the lesson refuses (database.ErrLessonDeleting,
+	// ErrLessonDownloading, ErrLessonChanged, sql.ErrNoRows).
+	SwapLibraryEntries(ctx context.Context, before database.Lesson, entries []string) error
 }
 
 // Compile-time assertion that the real store satisfies the scheduler's Store

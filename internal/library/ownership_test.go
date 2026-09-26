@@ -331,6 +331,41 @@ func TestLegacyEpisodeEntry(t *testing.T) {
 	}
 }
 
+// TestEpisodeEntryKnowsTheImageTheLegacyGrammarDoesNot pins the episode's
+// image name "<base>.jpg" (owner ruling #78): EpisodeEntry, which only ever
+// reads entries a record gives the lesson (ruling (j)), knows it, look-alikes
+// excepted; the legacy grammar does not, since no lesson placed before the
+// record has one, so a legacy lesson's delete never takes a "<base>.jpg" the
+// owner may have put there.
+func TestEpisodeEntryKnowsTheImageTheLegacyGrammarDoesNot(t *testing.T) {
+	base := "S - s01e05 - Five"
+	if !EpisodeEntry(base, base+".jpg", false, nil) {
+		t.Errorf("EpisodeEntry(%q) = false, want the episode's image", base+".jpg")
+	}
+	for _, name := range []string{base + ".5.jpg", base + "-Part Fill.jpg", base + " [Live].jpg", base + ".JPG"} {
+		if EpisodeEntry(base, name, false, nil) {
+			t.Errorf("EpisodeEntry(%q) = true, want another lesson's name", name)
+		}
+	}
+	if EpisodeEntry(base, base+".jpg", true, nil) {
+		t.Errorf("a folder named like the image read as the image")
+	}
+	if legacyEpisodeEntry(base, base+".jpg", false, nil) {
+		t.Errorf("legacyEpisodeEntry(%q) = true, want the legacy grammar to leave it", base+".jpg")
+	}
+
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	seedSeason(t, season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e05 - Five.jpg")
+	row := legacyRow(1, "Five", 5, season, "Show - s01e05 - Five.mp4")
+	got, err := plan(t, libraryOf(season), row, []database.Lesson{row})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if want := sorted(paths(season, "Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo")); !reflect.DeepEqual(sorted(got.Remove), want) {
+		t.Errorf("a legacy row owns %v, want %v (never the unrecorded image)", got.Remove, want)
+	}
+}
+
 // TestLegacyEpisodeEntryLeavesASongOfAnotherLesson covers a song whose title
 // extends a legacy lesson's ("Five [Live]" beside "Five"): its version files
 // "<Five> [Live] [Drumless].mp4" read as "Five" plus a label, but the "[Live]"
@@ -346,6 +381,84 @@ func TestLegacyEpisodeEntryLeavesASongOfAnotherLesson(t *testing.T) {
 	// With no such lesson, they are this song's versions.
 	if !legacyEpisodeEntry(base, base+" [Live] [Drumless].mp4", false, nil) {
 		t.Errorf("a version label holding a bracket not recognised with no other lesson")
+	}
+}
+
+// TestVersionEntryReadsASongsFilesPerVersion pins ruling #78 5's names: for
+// the versions a caller knows, each version's video, image, nfo and captions
+// are the song's; nothing else is, and no label the caller did not give.
+func TestVersionEntryReadsASongsFilesPerVersion(t *testing.T) {
+	base := "S - s01e05 - Five"
+	versions := []string{"Drumless", "Original"}
+	for _, name := range []string{
+		base + " [Drumless].mp4", base + " [Original].jpg", base + " [Drumless].nfo", base + " [Original].en.vtt",
+	} {
+		if !VersionEntry(base, name, versions) {
+			t.Errorf("VersionEntry(%q) = false, want a version's file", name)
+		}
+	}
+	for _, name := range []string{
+		base + " [Live].nfo", base + " [Live].mp4", base + " [Drumless]-poster.jpg", base + " [Drumless].JPG",
+		base + " [Drumless].mkv", base + " [Drumless] resources", base + ".nfo", base + ".jpg", base + " [Drumless].x.vtt.bak",
+		"S - s01e05 - Fiver [Drumless].mp4",
+	} {
+		if VersionEntry(base, name, versions) {
+			t.Errorf("VersionEntry(%q) = true, want it not read as a version's", name)
+		}
+	}
+	if VersionEntry(base, base+" [Drumless].nfo", nil) {
+		t.Errorf("with no versions known, a per-version name was read as the song's")
+	}
+}
+
+// TestVersionsListsTheVersionVideos pins Versions: the labels of
+// "<base> [L].mp4", sorted, once each, and nothing from another base, another
+// file kind or an empty label.
+func TestVersionsListsTheVersionVideos(t *testing.T) {
+	base := "S - s01e05 - Five"
+	names := []string{
+		base + " [Original].mp4", base + " [Drumless].mp4", base + " [Drumless].nfo", base + " [].mp4",
+		base + ".mp4", base + " [Mix [Live].mp4", "S - s01e05 - Fiver [Live].mp4", base + " [Original].mp4",
+	}
+	if got, want := Versions(base, names), []string{"Drumless", "Mix [Live", "Original"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Versions = %q, want %q", got, want)
+	}
+	if got := Versions(base, nil); got != nil {
+		t.Errorf("Versions(nil) = %q, want nil", got)
+	}
+}
+
+// TestLegacyGrammarBesideASongPlacedPerVersion pins ruling 5d for a lesson
+// with no record: the legacy grammar still reads the OLD shape (one nfo for
+// the song), and a song placed per version beside it (a recorded "Five
+// [Live]", whose version files start with "Five" plus a label) is never read
+// as the legacy lesson's: each version's own nfo, "<Five [Live]> [Drumless].nfo",
+// says whose it is, exactly as the song's one nfo said before.
+func TestLegacyGrammarBesideASongPlacedPerVersion(t *testing.T) {
+	base := "S - s01e05 - Five"
+	perVersion := map[string]bool{base + " [Live] [Drumless].nfo": false, base + " [Live] [Original].nfo": false}
+	for _, name := range []string{base + " [Live] [Drumless].mp4", base + " [Live] [Original].mp4"} {
+		if legacyEpisodeEntry(base, name, false, perVersion) {
+			t.Errorf("%q given to %q, want it left to the song placed per version", name, base)
+		}
+	}
+
+	season := filepath.Join(t.TempDir(), "lib", "Show", "Season 01")
+	five := []string{"Show - s01e05 - Five.mp4", "Show - s01e05 - Five.nfo", "Show - s01e05 - Five-poster.jpg"}
+	live := []string{
+		"Show - s01e05 - Five [Live] [Drumless].mp4", "Show - s01e05 - Five [Live] [Drumless].nfo", "Show - s01e05 - Five [Live] [Drumless].jpg",
+		"Show - s01e05 - Five [Live] [Original].mp4", "Show - s01e05 - Five [Live] [Original].nfo", "Show - s01e05 - Five [Live] [Original].jpg",
+	}
+	seedSeason(t, season, five...)
+	seedSeason(t, season, live...)
+	fiveRow := legacyRow(1, "Five", 5, season, "Show - s01e05 - Five.mp4")
+	liveRow := recordedRow(2, season, live...)
+	got, err := plan(t, libraryOf(season), fiveRow, []database.Lesson{fiveRow, liveRow})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if want := sorted(paths(season, five...)); !reflect.DeepEqual(sorted(got.Remove), want) || len(got.Kept) != 0 {
+		t.Errorf("legacy Five plans %+v, want to remove exactly %v and claim none of the song's", got, want)
 	}
 }
 

@@ -3,6 +3,7 @@ package musora
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -79,6 +80,43 @@ func (s *stringOrSlice) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// looseString decodes a JSON string, and reads null, an absent key or any
+// other shape (a number, an object, an array) as "" without an error. It is
+// for a field that only feeds optional output, the plex-tv show's artwork and
+// tvshow.nfo: Musora changing that field's shape must never fail the lesson,
+// and with it the download (hard rule 10).
+type looseString string
+
+func (s *looseString) UnmarshalJSON(b []byte) error {
+	var v string
+	if json.Unmarshal(b, &v) != nil {
+		v = ""
+	}
+	*s = looseString(v)
+	return nil
+}
+
+// looseInt decodes a JSON number (a fraction truncated) or a quoted one, and
+// reads null, an absent key or any other shape as 0 without an error, for
+// the same reason as looseString.
+type looseInt int
+
+func (n *looseInt) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if json.Unmarshal(b, &s) == nil {
+			b = []byte(strings.TrimSpace(s))
+		}
+	}
+	v, err := strconv.ParseFloat(string(b), 64)
+	if err != nil || math.IsNaN(v) || v > math.MaxInt32 || v < math.MinInt32 {
+		v = 0
+	}
+	*n = looseInt(int(v))
+	return nil
+}
+
 type Video struct {
 	ExternalID     string `json:"external_id"`
 	HLSManifestURL string `json:"hlsManifestUrl"`
@@ -98,8 +136,25 @@ type Assignment struct {
 	SheetMusicImageURLs stringOrSlice `json:"sheet_music_image_url"`
 }
 
+// Instructor is one entry of a lesson's instructor[]. Slug, Biography,
+// CoachCardImage and Thumbnail (the instructor's square photo,
+// thumbnail_url) only feed a plex-tv show's own files (tvshow.nfo and its
+// poster), so they decode loosely: a shape Musora changes reads as empty,
+// never as a failed lesson (hard rule 10).
 type Instructor struct {
-	Name string `json:"name"`
+	Name           string      `json:"name"`
+	Slug           looseString `json:"slug"`
+	Biography      looseString `json:"biography"`
+	CoachCardImage looseString `json:"coach_card_image"`
+	Thumbnail      looseString `json:"thumbnail"`
+}
+
+// ParentContent is one entry of a lesson's parent_content_data: a course (or
+// pack, or collection) the lesson is in. ID only feeds a plex-tv show's own
+// files, so it decodes loosely (looseInt).
+type ParentContent struct {
+	ID    looseInt `json:"id"`
+	Title string   `json:"title"`
 }
 
 // SoundsliceRef is one entry of a song's soundslice[] array — a play-along
@@ -127,16 +182,19 @@ type Lesson struct {
 	Genre            []struct {
 		Name string `json:"name"`
 	} `json:"genre"`
-	Resources           []Resource   `json:"resources"`
-	Assignments         []Assignment `json:"assignments"`
-	Mp3NoDrumsNoClick   string       `json:"mp3_no_drums_no_click_url"`
-	Mp3NoDrumsYesClick  string       `json:"mp3_no_drums_yes_click_url"`
-	Mp3YesDrumsNoClick  string       `json:"mp3_yes_drums_no_click_url"`
-	Mp3YesDrumsYesClick string       `json:"mp3_yes_drums_yes_click_url"`
-	ParentContentData   []struct {
-		Title string `json:"title"`
-	} `json:"parent_content_data"`
-	Soundslice []SoundsliceRef `json:"soundslice"`
+	Resources           []Resource      `json:"resources"`
+	Assignments         []Assignment    `json:"assignments"`
+	Mp3NoDrumsNoClick   string          `json:"mp3_no_drums_no_click_url"`
+	Mp3NoDrumsYesClick  string          `json:"mp3_no_drums_yes_click_url"`
+	Mp3YesDrumsNoClick  string          `json:"mp3_yes_drums_no_click_url"`
+	Mp3YesDrumsYesClick string          `json:"mp3_yes_drums_yes_click_url"`
+	ParentContentData   []ParentContent `json:"parent_content_data"`
+	Soundslice          []SoundsliceRef `json:"soundslice"`
+	// Type is the document's Sanity _type ("song", "course", ...), and
+	// HeaderImageURL a guided course's header image (usually square). Both
+	// only pick a plex-tv show's artwork (ShowArt), so both decode loosely.
+	Type           looseString `json:"type"`
+	HeaderImageURL looseString `json:"header_image_url"`
 }
 
 // SoundsliceSlug returns the first non-empty soundslice score slug for the
@@ -151,6 +209,15 @@ func (l *Lesson) SoundsliceSlug() string {
 		}
 	}
 	return ""
+}
+
+// IsSong reports whether DownloadLesson downloads the lesson as a song: no
+// HLS video of its own, and a soundslice score whose recordings become its
+// version files ("<base> [Original].mp4", "<base> [Drumless].mp4"). It says
+// so even when a download writes no version (resources only, or a score
+// with no recording).
+func (l *Lesson) IsSong() bool {
+	return l != nil && l.Video.HLSManifestURL == "" && l.SoundsliceSlug() != ""
 }
 
 func ResolveLesson(id int, permIDs string) (*Lesson, error) {

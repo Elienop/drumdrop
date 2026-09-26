@@ -347,6 +347,16 @@ var plexFiles = map[string]string{
 	".en.vtt":     "WEBVTT",
 }
 
+// plexSuffix is the suffix the plex-tv move gives a downloaded file's suffix:
+// the same, but the image "-poster.jpg" becomes ".jpg", the name Plex reads
+// for an episode's image (owner ruling #78).
+func plexSuffix(suffix string) string {
+	if suffix == "-poster.jpg" {
+		return ".jpg"
+	}
+	return suffix
+}
+
 // TestMoveToLibraryPlexTV proves that moveToLibraryPlexTV flattens the scratch
 // "NN - Title" lesson into <lib>/<Show>/Season 01/ with every file renamed to the
 // episode base "<Show> - s01eNN - Title<suffix>", content intact, the scratch dir
@@ -371,16 +381,17 @@ func TestMoveToLibraryPlexTV(t *testing.T) {
 	}
 	// Every file is flat in the season folder under the episode base, content intact.
 	for suffix, body := range plexFiles {
-		p := filepath.Join(wantSeason, base+suffix)
+		p := filepath.Join(wantSeason, base+plexSuffix(suffix))
 		got, err := os.ReadFile(p)
 		if err != nil {
-			t.Errorf("missing moved file %s: %v", base+suffix, err)
+			t.Errorf("missing moved file %s: %v", base+plexSuffix(suffix), err)
 			continue
 		}
 		if string(got) != body {
-			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+			t.Errorf("%s content = %q, want %q", base+plexSuffix(suffix), got, body)
 		}
 	}
+	assertExist(t, false, filepath.Join(wantSeason, base+"-poster.jpg"))
 	// The scratch lesson dir is gone.
 	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
 		t.Errorf("scratch lesson dir still present (stat err = %v), want removed", err)
@@ -405,13 +416,13 @@ func TestMoveToLibraryPlexTVCrossFsFallback(t *testing.T) {
 		t.Errorf("videoPath = %q, want %q", videoPath, filepath.Join(seasonDir, base+".mp4"))
 	}
 	for suffix, body := range plexFiles {
-		got, err := os.ReadFile(filepath.Join(seasonDir, base+suffix))
+		got, err := os.ReadFile(filepath.Join(seasonDir, base+plexSuffix(suffix)))
 		if err != nil {
-			t.Errorf("missing copied file %s: %v", base+suffix, err)
+			t.Errorf("missing copied file %s: %v", base+plexSuffix(suffix), err)
 			continue
 		}
 		if string(got) != body {
-			t.Errorf("%s content = %q, want %q", base+suffix, got, body)
+			t.Errorf("%s content = %q, want %q", base+plexSuffix(suffix), got, body)
 		}
 	}
 	if _, err := os.Stat(lessonDir); !os.IsNotExist(err) {
@@ -684,6 +695,17 @@ func seedSongScratch(t *testing.T, tmp string) (lessonDir, episodeBase, seasonDi
 var songScratchEntries = []string{
 	"05 - Even Flow [Drumless].mp4", "05 - Even Flow [Original].mp4",
 	"05 - Even Flow-poster.jpg", "05 - Even Flow.nfo", "resources",
+}
+
+// songEpisodeNames is what the plex-tv move places for seedSongScratch's
+// song at episodeBase: each version's video, image and nfo (owner ruling
+// #78 5), and the resources folder.
+func songEpisodeNames(episodeBase string) []string {
+	var out []string
+	for _, v := range []string{"Drumless", "Original"} {
+		out = append(out, episodeBase+" ["+v+"].mp4", episodeBase+" ["+v+"].jpg", episodeBase+" ["+v+"].nfo")
+	}
+	return append(out, episodeBase+" resources")
 }
 
 // assertScratchWhole checks the scratch folder still holds every entry of the

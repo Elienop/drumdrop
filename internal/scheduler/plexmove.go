@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -48,6 +49,13 @@ type plexLibrary struct {
 	episodeNFO []byte
 	// jobID names the folder replaced entries are set aside in (asideArea).
 	jobID int64
+	// showFiles, when set, are the show-level files (tvshow.nfo, poster.jpg,
+	// fanart.jpg) to create in the show folder before the episode is placed.
+	showFiles *showFiles
+	// song is whether Musora says the lesson is a song (musora.Lesson.IsSong):
+	// then the version videos its record names at this episode's base are its
+	// versions, even when this download brings none back (resources only).
+	song bool
 }
 
 // plexMoveResult says where a plex-tv move left the lesson.
@@ -92,7 +100,9 @@ func (r plexMoveResult) record(root string) ([]string, error) {
 // folder src into <libraryDir>/<Sanitize(show)>/Season 0N/, renaming each entry
 // from its "NN - Title" base to the episode base
 // "<Sanitize(show)> - s0Ne0M - <Sanitize(title)>" while preserving the suffix
-// (".mp4", ".en.vtt", ".nfo", "-poster.jpg", " [Drumless].mp4"); each subfolder
+// (".mp4", ".en.vtt", ".nfo", " [Drumless].mp4"; the image "-poster.jpg"
+// becomes ".jpg", and a song's image and nfo become one per version,
+// episodeNames); each subfolder
 // becomes "<episodeBase> <folder>". Files end up FLAT in the season folder,
 // which is shared across the show's episodes. A song's version files keep one
 // episode base, so Plex merges them as one episode with several versions.
@@ -151,13 +161,22 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 
 	seasonRel := filepath.Join(musora.Sanitize(show), library.SeasonName(season))
 	seasonDir := filepath.Join(libraryDir, seasonRel)
-	plan, err := planPlexTVMove(src, src.dir.Name(), seasonDir, show, title, season, episode)
+	self := lib.self.RailcontentID
+	previous, known, notes := previousDownload(c, lib.self)
+	prevNames := namesIn(previous.Remove, seasonDir)
+	versionsAt := func(base string) []string { return recordedVersions(lib.song, prevNames, base) }
+	plan, err := planPlexTVMove(src, seasonDir, show, title, season, episode, func(base string) []string {
+		// A lesson Musora no longer calls a song whose record names its own
+		// "<base>.mp4" has that video's image and nfo at "<base>.jpg" and
+		// "<base>.nfo": its kept versions keep theirs, and are not named for.
+		if !lib.song && slices.Contains(prevNames, base+".mp4") {
+			return nil
+		}
+		return versionsAt(base)
+	})
 	if err != nil {
 		return plexMoveResult{}, err
 	}
-
-	self := lib.self.RailcontentID
-	previous, known, notes := previousDownload(c, lib.self)
 	// Refused, or undone, the lesson still owns its previous entries; if those
 	// are not known, its record stays as it is.
 	refused := plexMoveResult{kept: previous.Remove, known: known}
@@ -202,7 +221,8 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 	if err != nil {
 		return fail(fmt.Errorf("read the season folder %q: %w", seasonDir, err), nil)
 	}
-	prevSeason := seasonPrevious{libraryDir: libraryDir, seasonDir: seasonDir, plan: plan, tree: tree, listing: listing}
+	prevSeason := seasonPrevious{libraryDir: libraryDir, seasonDir: seasonDir, plan: plan, tree: tree, listing: listing,
+		versions: versionsAt(plan.episodeBase)}
 	ours, kept, stays, err := prevSeason.setAside(previous.Remove, aside)
 	if err != nil {
 		return fail(err, nil)
@@ -228,8 +248,18 @@ func moveToLibraryPlexTV(libraryDir, show string, season, episode int, title str
 		notes = append(notes, err)
 	}
 
-	// 4. Place every entry, or none.
-	placed, stuck, err := placeSteps(seasonRoot, src.dir, steps)
+	// The show's own files go in before the episode, so Plex, which picks
+	// local artwork only when it first matches a show, finds them with it.
+	// They are the show's, not the lesson's: never recorded, never undone.
+	if lib.showFiles != nil {
+		if err := lib.showFiles.write(libraryDir, musora.Sanitize(show)); err != nil {
+			notes = append(notes, err)
+		}
+	}
+
+	// 4. Place every entry, or none: the video(s) last, so the episode's
+	// image, nfo and captions are there when Plex finds the video.
+	placed, stuck, err := placeSteps(seasonRoot, src.dir, videosLast(steps, src.base))
 	if err != nil {
 		return fail(err, stuck)
 	}
@@ -264,6 +294,22 @@ func writeEpisodeNFO(src *scratchDir, episodeNFO []byte) error {
 	return writeScratchNFO(src.dir, src.base+".nfo", episodeNFO)
 }
 
+// videosLast is steps with the lesson's video(s) (isLessonVideoName, by the
+// name in the scratch folder, whose base is base) moved to the end, every
+// other step keeping its order.
+func videosLast(steps []plexMoveStep, base string) []plexMoveStep {
+	out := make([]plexMoveStep, 0, len(steps))
+	var videos []plexMoveStep
+	for _, st := range steps {
+		if !st.dir && isLessonVideoName(st.name, base) {
+			videos = append(videos, st)
+			continue
+		}
+		out = append(out, st)
+	}
+	return append(out, videos...)
+}
+
 // stepDsts is every step's destination, in order (nil for no steps).
 func stepDsts(steps []plexMoveStep) []string {
 	var dsts []string
@@ -275,30 +321,43 @@ func stepDsts(steps []plexMoveStep) []string {
 
 // seasonPrevious is what step 2 of moveToLibraryPlexTV reads to decide on the
 // lesson's previous entries: the library and season folders, the move's
-// plan, the download's tree and the season folder's listing (listSeason).
+// plan, the download's tree and the season folder's listing (listSeason),
+// and, for a song, the versions its record names at this episode's base
+// (recordedVersions): a version the download brings is placed at its names
+// anyway, so only the recorded ones decide what stays.
 type seasonPrevious struct {
 	libraryDir, seasonDir string
 	plan                  plexMovePlan
 	tree                  downloadTree
 	listing               map[string]bool
+	versions              []string
 }
 
 // setAside is step 2 of moveToLibraryPlexTV for the entries remove, the
 // lesson's previous download by its record: one at one of this episode's
 // names is left to step 3 (ours, which also holds every entry of remove,
-// says it is the lesson's own); one at this episode's base that no step
-// places at stays, and stays the lesson's (stays); a folder the download does
+// says it is the lesson's own); an image or nfo under a name earlier
+// versions gave it is set aside when the move places it under another name
+// (replacedByVersion); one at this episode's base that no step places at
+// stays, and stays the lesson's (stays); a folder the download does
 // not fully bring back stays, no longer recorded (kept); any other is set
 // aside. An error means the move must fail.
 func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[string]bool, kept []keptFolder, stays []string, err error) {
 	ours = make(map[string]bool, len(remove))
+	plainThere := s.plainVideoThere()
 	for _, p := range remove {
 		ours[p] = true
 		if dst := placedAt(p, s.plan.steps); dst != "" {
 			ours[dst] = true
 			continue
 		}
-		if atEpisodeBase(p, s.seasonDir, s.plan.episodeBase, s.listing) {
+		if s.replacedByVersion(p, plainThere) {
+			if err := aside.setAsidePath(s.libraryDir, p, true); err != nil {
+				return nil, nil, nil, fmt.Errorf("the previous download could not be set aside, so the lesson is not placed: %w", err)
+			}
+			continue
+		}
+		if atEpisodeBase(p, s.seasonDir, s.plan.episodeBase, s.listing, s.versions) {
 			stays = append(stays, p)
 			continue
 		}
@@ -311,6 +370,55 @@ func (s seasonPrevious) setAside(remove []string, aside *asideArea) (ours map[st
 		}
 	}
 	return ours, kept, stays, nil
+}
+
+// plainVideoThere reports whether a plain video, "<episode base>.mp4", is in
+// the season folder. It stays there when Musora calls a lesson a song whose
+// record is an ordinary lesson's (the re-download brings versions, never
+// that video, and keeps what it did not bring back, owner ruling #72), or
+// when it is a video no record names. Plex reads that video's image and nfo
+// only under its own name, "<base>.jpg" and "<base>.nfo". (A download brings
+// either a plain video or versions, never both, so one the move places
+// anew gets its files at those names too.)
+func (s seasonPrevious) plainVideoThere() bool {
+	isDir, there := s.listing[s.plan.episodeBase+".mp4"]
+	return there && !isDir
+}
+
+// replacedByVersion reports whether p, an entry the lesson's record names,
+// is the episode's image or nfo under a name earlier versions gave it, while
+// this move places that file under another name at this episode's base: the
+// image "<base>-poster.jpg" (or, for a song, "<base>.jpg") once the move
+// places "<base>.jpg" or one image per version, and a song's one
+// "<base>.nfo" once it places one nfo per version (owner rulings #78 and
+// (j)). The download brought the file back, so the old one goes like any
+// replaced entry (removed once the download is recorded, put back by an
+// undo), and the episode keeps its file, never none, never two. While a
+// plain video is there (plainThere, plainVideoThere), only a file the move
+// places under that video's own name ("<base>.jpg", "<base>.nfo") brings
+// the old one back: the versions' own files are no image or nfo of that
+// video, so without it the video would lose its own.
+func (s seasonPrevious) replacedByVersion(p string, plainThere bool) bool {
+	season := filepath.Clean(s.seasonDir)
+	if filepath.Dir(p) != season {
+		return false
+	}
+	base := s.plan.episodeBase
+	var kind string
+	switch filepath.Base(p) {
+	case base + musora.PosterSuffix, base + library.EpisodeImageSuffix:
+		kind = musora.PosterSuffix
+	case base + ".nfo":
+		kind = ".nfo"
+	default:
+		return false
+	}
+	for _, st := range s.plan.steps {
+		if st.from == kind && st.dst != p && (!plainThere || st.dst == filepath.Join(season, base+filepath.Ext(st.dst))) {
+			return true
+		}
+	}
+	return false
 }
 
 // setAsidePreviousLessonFolder is the end of step 2 of moveToLibraryPlexTV:
@@ -337,15 +445,62 @@ func setAsidePreviousLessonFolder(lib plexLibrary, seasonDir string, tree downlo
 
 // atEpisodeBase reports whether p, an entry the lesson's record names, is in
 // the season folder seasonDir under one of the names the move gives the
-// episode base (library.EpisodeEntry): an entry of this episode, not of the
-// lesson's previous download under an old title. listing is the season
-// folder's entries (name -> isDir); an entry not in it is not there.
-func atEpisodeBase(p, seasonDir, base string, listing map[string]bool) bool {
+// episode base: a file of one of the song's versions (library.VersionEntry),
+// or any other entry of the episode (library.EpisodeEntry). Either way an
+// entry of this episode, not of the lesson's previous download under an old
+// title. listing is the season folder's entries (name -> isDir); an entry
+// not in it is not there.
+func atEpisodeBase(p, seasonDir, base string, listing map[string]bool, versions []string) bool {
 	if filepath.Dir(p) != filepath.Clean(seasonDir) {
 		return false
 	}
-	isDir, ok := listing[filepath.Base(p)]
-	return ok && library.EpisodeEntry(base, filepath.Base(p), isDir, listing)
+	name := filepath.Base(p)
+	isDir, ok := listing[name]
+	if !ok {
+		return false
+	}
+	return !isDir && library.VersionEntry(base, name, versions) || library.EpisodeEntry(base, name, isDir, listing)
+}
+
+// recordedVersions returns the labels of the version videos "<base> [L].mp4"
+// that names, the lesson's own previous entries in this season folder
+// (namesIn), hold at the episode base base, when they are versions of the
+// episode: its record proves them the lesson's, and only a name shared with
+// another title of this lesson, "<title> [L]", could make one not a version.
+// So they are versions when
+//   - Musora says the lesson is a song (song);
+//   - there are two or more: one earlier title is one video, never two;
+//   - there is one, and it is not provably an earlier title: the record does
+//     not name "<base> [L]-poster.jpg", the shape of a title placed before
+//     each version had its own files (a song then had one "<base>-poster.jpg").
+//
+// A single "<base> [L].mp4" with its own "<base> [L].jpg" and ".nfo" is
+// either a song's one version whose song flag changed on Musora or an earlier
+// title "<title> [L]" of a lesson that is not a song; the names can not tell,
+// so it is kept (a re-download keeps what it did not bring back, owner ruling
+// #72 (j)), never deleted on a guess (BACKLOG D153's residuals). nil when
+// there is no version.
+func recordedVersions(song bool, names []string, base string) []string {
+	labels := library.Versions(base, names)
+	switch {
+	case song || len(labels) > 1:
+		return labels
+	case len(labels) == 1 && !slices.Contains(names, base+" ["+labels[0]+"]"+musora.PosterSuffix):
+		return labels
+	}
+	return nil
+}
+
+// namesIn is the names of the entries of previous in the season folder
+// seasonDir.
+func namesIn(previous []string, seasonDir string) []string {
+	var names []string
+	for _, p := range previous {
+		if filepath.Dir(p) == filepath.Clean(seasonDir) {
+			names = append(names, filepath.Base(p))
+		}
+	}
+	return names
 }
 
 // listSeason lists the season folder the plex-tv move holds open. A package
@@ -488,13 +643,20 @@ type placedStep struct {
 
 // placeStep puts one entry at its destination in the folder season: by a
 // rename from the scratch folder (renameAt, on the two open folders), or, when
-// the two are on different filesystems (and only then), by a copy made inside
-// season, leaving the source for the final scratch-folder removal. Any other
+// the two are on different filesystems, or the entry goes to several names
+// (plexMoveStep.copy), by a copy made inside season, leaving the source for
+// the final scratch-folder removal. Any other
 // rename error is a refusal: an entry that appeared at the destination after
 // the checks is kept, never copied over. A copy that fails part-way takes back
 // out what it created, and nothing else.
 func placeStep(season, scratch *os.Root, st plexMoveStep) (renamed bool, err error) {
 	name := filepath.Base(st.dst)
+	if st.copy {
+		if cerr := copyFileInto(season, name, scratch, st.name, st.mode); cerr != nil {
+			return false, fmt.Errorf("copy %q -> %q: %w", st.src, st.dst, cerr)
+		}
+		return false, nil
+	}
 	rerr := renameAt(scratch, st.name, season, name)
 	if rerr == nil {
 		return true, nil
@@ -556,11 +718,14 @@ func discardPartialCopy(dir *os.Root, name string) error {
 }
 
 // plexMovePlan is what planPlexTVMove works out before the plex-tv move writes
-// anything: each entry's destination, the video to record, and the episode base.
+// anything: each entry's destination, the video to record, the episode base,
+// and the song's version labels its image and nfo are placed for (none for
+// a lesson that is not a song).
 type plexMovePlan struct {
 	steps       []plexMoveStep
 	videoPath   string
 	episodeBase string
+	labels      []string
 }
 
 // plexMoveStep is one entry of a scratch lesson folder and where the plex-tv
@@ -573,13 +738,30 @@ type plexMoveStep struct {
 	dst  string
 	dir  bool
 	mode fs.FileMode
+	// from is the suffix the download gave the file after its base when the
+	// move names it after something other than that suffix (episodeNames):
+	// musora.PosterSuffix for the episode's image, ".nfo" for a song's nfo
+	// placed per version; "" for every other entry.
+	from string
+	// copy is set when the file goes to several names (a song's image and nfo,
+	// one per version): each is a copy, and the file itself stays in the
+	// scratch folder.
+	copy bool
 }
 
 // planPlexTVMove lists the scratch lesson folder in name order and names each
 // entry's destination in the season folder, without writing anything:
 //   - a file keeps its suffix, with the scratch base swapped for the episode
-//     base (".nfo", "-poster.jpg", a song's " [Original].mp4");
+//     base (".en.vtt", a song's " [Original].mp4"), except the image and a
+//     song's nfo, named by episodeNames;
 //   - a folder becomes "<episodeBase> <folder>" (e.g. "<episodeBase> resources").
+//
+// A song's versions are the labels of the version videos the download
+// brings ("<base> [L].mp4") and, unless it brings a "<base>.mp4" of its own,
+// those recorded(episodeBase) returns (the lesson's own recorded versions,
+// recordedVersions): so a resources-only re-download names the files as the
+// videos it keeps, and a version the download does not bring back still gets
+// its own image and nfo.
 //
 // Any name is fine, brackets included: the lesson records exactly what it
 // placed, so nothing ever has to parse these names back.
@@ -590,58 +772,153 @@ type plexMoveStep struct {
 // regular files; they go with the scratch folder). videoPath is the destination
 // of the first real lesson video in name order (isLessonVideoName), which for a
 // song is its [Drumless] version.
-func planPlexTVMove(scratch *scratchDir, lessonDir, seasonDir, show, title string, season, episode int) (plexMovePlan, error) {
-	entries, err := fs.ReadDir(scratch.dir.FS(), ".")
+func planPlexTVMove(scratch *scratchDir, seasonDir, show, title string, season, episode int, recorded func(episodeBase string) []string) (plexMovePlan, error) {
+	list, videos, longest, err := readScratchEntries(scratch)
 	if err != nil {
-		return plexMovePlan{}, fmt.Errorf("read scratch lesson dir %q: %w", lessonDir, err)
+		return plexMovePlan{}, err
 	}
-	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
-	// across filesystems and across a song's multiple version files.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-
-	type entry struct {
-		step   plexMoveStep
-		suffix string
-		video  bool
-	}
-	var list []entry
-	longest := 0
-	for _, e := range entries {
-		name := e.Name()
-		en := entry{step: plexMoveStep{name: name, src: filepath.Join(lessonDir, name), dir: e.IsDir()}}
-		if en.step.dir {
-			en.suffix = " " + name
-		} else {
-			info, ierr := e.Info()
-			if ierr != nil {
-				return plexMovePlan{}, fmt.Errorf("stat scratch file %q: %w", name, ierr)
-			}
-			if !info.Mode().IsRegular() {
-				continue // skip symlinks/devices: drumdrop only produces regular files
-			}
-			en.step.mode = info.Mode()
-			en.suffix = strings.TrimPrefix(name, scratch.base)
-			// The matcher runs on the SCRATCH name (against the scratch base), so
-			// yt-dlp fragments and strays are never chosen as the video.
-			en.video = isLessonVideoName(name, scratch.base)
-		}
-		longest = max(longest, len(en.suffix))
-		list = append(list, en)
-	}
-
 	episodeBase, err := fitEpisodeBase(show, title, season, episode, longest)
 	if err != nil {
 		return plexMovePlan{}, err
 	}
-	plan := plexMovePlan{episodeBase: episodeBase}
+	plan := plexMovePlan{episodeBase: episodeBase, labels: library.Versions(scratch.base, videos)}
+	if recorded != nil && !slices.Contains(videos, scratch.base+".mp4") {
+		// Every version that stays gets its own image and nfo too, before the
+		// one shared file is retired (replacedByVersion).
+		plan.labels = append(plan.labels, recorded(episodeBase)...)
+		slices.Sort(plan.labels)
+		plan.labels = slices.Compact(plan.labels)
+	}
 	for _, en := range list {
-		en.step.dst = filepath.Join(seasonDir, episodeBase+en.suffix)
-		if en.video && plan.videoPath == "" {
-			plan.videoPath = en.step.dst
-		}
-		plan.steps = append(plan.steps, en.step)
+		plan.addSteps(en, seasonDir)
 	}
 	return plan, nil
+}
+
+// scratchEntry is one entry of the scratch lesson folder as planPlexTVMove
+// reads it: its step (every field but dst, from and copy), its suffix after
+// the scratch base (" <name>" for a folder), and whether it is a real lesson
+// video (isLessonVideoName).
+type scratchEntry struct {
+	step   plexMoveStep
+	suffix string
+	video  bool
+}
+
+// readScratchEntries is planPlexTVMove's reading of the scratch lesson
+// folder: its entries in name order (scratchEntryOf; a non-regular file is
+// left out), the names of the real lesson videos among them, and the
+// longest suffix, which the episode base is fitted to.
+func readScratchEntries(scratch *scratchDir) (list []scratchEntry, videos []string, longest int, err error) {
+	entries, err := fs.ReadDir(scratch.dir.FS(), ".")
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("read scratch lesson dir %q: %w", scratch.dir.Name(), err)
+	}
+	// Sort by name so the chosen videoPath (the first .mp4) is deterministic
+	// across filesystems and across a song's multiple version files.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, e := range entries {
+		en, ok, err := scratchEntryOf(scratch, e)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if !ok {
+			continue // skip symlinks/devices: drumdrop only produces regular files
+		}
+		if en.video {
+			videos = append(videos, en.step.name)
+		}
+		// The base is fitted to the download's own suffixes, before the image
+		// and a song's nfo are renamed (episodeNames, whose names are never
+		// longer than a version video's), so it is the base earlier versions
+		// gave the same lesson.
+		longest = max(longest, len(en.suffix))
+		list = append(list, en)
+	}
+	return list, videos, longest, nil
+}
+
+// scratchEntryOf reads the entry e of the scratch lesson folder; ok is false
+// for a file that is not a regular one.
+func scratchEntryOf(scratch *scratchDir, e fs.DirEntry) (en scratchEntry, ok bool, err error) {
+	name := e.Name()
+	en = scratchEntry{step: plexMoveStep{name: name, src: filepath.Join(scratch.dir.Name(), name), dir: e.IsDir()}}
+	if en.step.dir {
+		en.suffix = " " + name
+		return en, true, nil
+	}
+	info, err := e.Info()
+	if err != nil {
+		return scratchEntry{}, false, fmt.Errorf("stat scratch file %q: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return scratchEntry{}, false, nil
+	}
+	en.step.mode = info.Mode()
+	en.suffix = strings.TrimPrefix(name, scratch.base)
+	// The matcher runs on the SCRATCH name (against the scratch base), so
+	// yt-dlp fragments and strays are never chosen as the video.
+	en.video = isLessonVideoName(name, scratch.base)
+	return en, true, nil
+}
+
+// addSteps adds the steps of en to the plan: one per name episodeNames gives
+// a file (a song's image and nfo, one copy per version), one for a folder,
+// each at its destination in seasonDir under the plan's episode base. The
+// first real lesson video's destination becomes the plan's videoPath.
+func (plan *plexMovePlan) addSteps(en scratchEntry, seasonDir string) {
+	names := []string{en.suffix}
+	if !en.step.dir {
+		names = episodeNames(en.suffix, plan.labels)
+	}
+	for _, n := range names {
+		st := en.step
+		st.dst = filepath.Join(seasonDir, plan.episodeBase+n)
+		if n != en.suffix {
+			st.from = en.suffix
+		}
+		st.copy = len(names) > 1
+		if en.video && plan.videoPath == "" {
+			plan.videoPath = st.dst
+		}
+		plan.steps = append(plan.steps, st)
+	}
+}
+
+// episodeNames is the ONE place that says what the plex-tv move names a
+// downloaded file whose name ends in suffix after the lesson's base, given
+// the song's version labels (none for a lesson that is not a song). Plex reads
+// an episode's image and nfo only under a name that is a video's own name
+// with ".jpg" or ".nfo" (owner ruling #78 5, measured in the owner's Plex), so:
+//   - the image "-poster.jpg" becomes "<episode base>.jpg", or for a song one
+//     "<episode base> [L].jpg" per version;
+//   - the nfo ".nfo" stays "<episode base>.nfo", or for a song becomes one
+//     "<episode base> [L].nfo" per version;
+//   - anything else keeps its suffix.
+//
+// The one-time rename of files placed before this (episodefiles.go) names
+// them the same way.
+func episodeNames(suffix string, labels []string) []string {
+	var ext string
+	switch suffix {
+	case musora.PosterSuffix:
+		ext = library.EpisodeImageSuffix
+		if len(labels) == 0 {
+			return []string{ext}
+		}
+	case ".nfo":
+		ext = ".nfo"
+		if len(labels) == 0 {
+			return []string{ext}
+		}
+	default:
+		return []string{suffix}
+	}
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		out = append(out, " ["+l+"]"+ext)
+	}
+	return out
 }
 
 // fitEpisodeBase is plexEpisodeBase, with the title cut short (at a rune

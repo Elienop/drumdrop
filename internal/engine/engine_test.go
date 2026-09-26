@@ -117,6 +117,10 @@ func TestBuildWires(t *testing.T) {
 	if planner.Expander == nil {
 		t.Error("planner.Expander not wired")
 	}
+	// Without it a plex-tv show gets no files of its own.
+	if _, ok := worker.Images.(Images); !ok {
+		t.Errorf("worker.Images = %T, want the musora image fetcher", worker.Images)
+	}
 	if worker.PermIDs != "perm" {
 		t.Errorf("worker.PermIDs = %q, want perm", worker.PermIDs)
 	}
